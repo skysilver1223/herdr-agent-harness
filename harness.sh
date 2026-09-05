@@ -27,6 +27,8 @@ Agent Loop 스텝 명령 (호출 1회 = 1스텝, 상주 루프 없음):
   $SCRIPT_NAME close-agent PATH TASK_ID [ROLE]    Harness가 만든 Pane 정리
   $SCRIPT_NAME quota-check PATH TASK_ID ROLE       실행 중인 Agent의 쿼터 확인(claude/codex는 /status, agy는 --print)
   $SCRIPT_NAME quota-check PATH --provider agy    Task 없이 agy 쿼터만 바로 확인
+  $SCRIPT_NAME quota-retry PATH TASK_ID ROLE       (opt-in) 연속 저쿼터 확인 시 Provider 교체를 handover_required까지 자동 처리, 재개는 사람 승인 필요
+  $SCRIPT_NAME auto-step PATH TASK_ID [--max-turns N]  (opt-in) 유한 턴 동안 dispatch 1회 + observe 반복, settled/blocked/오류에서 즉시 정지
 
 init 옵션:
   --name NAME                     프로젝트명
@@ -1325,6 +1327,10 @@ EOF
 quota_policy:
   # 정상 실행 중에는 다른 Provider를 호출하지 않는다.
   strategy: failure_only
+  # true로 켜면 `herdr-harness quota-retry PATH TASK_ID ROLE`이 동작한다.
+  # 그래도 자동 실행은 handover_required 전이까지만이다 — Provider 교체 후
+  # 재개(ready로 전이)는 항상 사람이 .harness/decisions/TASK-failover-approval.md
+  # 에 "승인: yes"를 쓴 뒤 직접 한다. false(기본값)면 quota-retry는 즉시 거부한다.
   automatic_failover: false
   require_handover: true
   require_user_approval: true
@@ -1342,9 +1348,33 @@ quota_policy:
   # 있을 때부터 low로 뜬다 — 코드가 아니라 여기서 조정한다.
   low_warning_threshold_pct: 25
 
+  # quota-retry가 요구하는 연속 low 판정 횟수와 그 사이 최소 간격(초).
+  # 오탐 한 번으로 Provider를 바꾸는 것을 막는다.
+  low_confirm_count: 2
+  cooldown_seconds: 300
+
+  # quota-retry/auto-step이 쓰는 Task Lock이 소유 프로세스가 죽은 채로
+  # 이 시간(초)을 넘기면 stale로 보고 회수한다.
+  stale_lock_seconds: 600
+
   # dispatch/observe는 Agent 출력에서 알려진 쿼터 경고 문구를 지나가는 김에
   # 스캔해 evidence에 "쿼터 신호(자동 감지)" 절로 남긴다(확정 아님, 참고용).
   passive_scan_on_dispatch: true
+EOF
+
+  write_file "$target" ".harness/policies/loop-policy.yaml" <<'EOF'
+loop_policy:
+  # true로 켜면 `herdr-harness auto-step PATH TASK_ID`가 동작한다. 기본은
+  # 꺼져 있다 — opt-in. 켜도 상주 루프가 아니다: 호출 1회가 최대
+  # max_turns_ceiling턴 안에서 반드시 끝난다.
+  enabled: false
+
+  # --max-turns로 이보다 큰 값을 요청해도 이 값이 상한이다.
+  max_turns_ceiling: 5
+
+  # Task Lock이 소유 프로세스가 죽은 채로 이 시간(초)을 넘기면 stale로
+  # 보고 회수한다.
+  stale_lock_seconds: 600
 EOF
 
   write_file "$target" ".harness/profiles/generic.yaml" <<'EOF'
@@ -2006,6 +2036,108 @@ _runtime_meta_value() {
   sed -n "s/^$key=//p" "$file" | head -n 1
 }
 
+# ---------------------------------------------------------------------------
+# Task Lock — mkdir 기반 권고적(advisory) 잠금이다. SQLite Lease나 Fencing
+# Token이 아니다: quota-retry/auto-step처럼 harness.sh를 거치는 자동화 경로
+# 끼리만 같은 Task에 동시에 들어가는 것을 막는다. 사람이 같은 Task에
+# 수동으로 dispatch/transition을 실행하는 것까지는 막지 않는다 — 자동
+# 명령이 도는 동안은 `status --live`로 확인하고 수동 개입을 삼가야 한다.
+# ---------------------------------------------------------------------------
+
+_runtime_lock_dir() {
+  printf '%s/.harness/runtime/%s.lock' "$1" "$2"
+}
+
+_runtime_lock_acquire() {
+  local root="$1" task_id="$2" purpose="$3" stale_seconds="${4:-600}"
+  local lock_dir holder pid acquired_at now acquired_epoch token
+  lock_dir="$(_runtime_lock_dir "$root" "$task_id")"
+  mkdir -p "$root/.harness/runtime"
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    holder="$lock_dir/holder"
+    if [[ ! -f "$holder" ]]; then
+      printf 'Task Lock 디렉터리가 손상되었습니다: %s\n' "$lock_dir" >&2
+      return 1
+    fi
+    pid="$(_runtime_meta_value "$holder" pid)"
+    acquired_at="$(_runtime_meta_value "$holder" acquired_at)"
+    now="$(date -u +%s)"
+    acquired_epoch="$(date -u -d "$acquired_at" +%s 2>/dev/null || printf 0)"
+    if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null && (( now - acquired_epoch > stale_seconds )); then
+      append_event "$root" lock_reclaim_stale "$task_id" "" "" "purpose=$purpose pid=$pid"
+      rm -rf -- "$lock_dir"
+      if ! mkdir "$lock_dir" 2>/dev/null; then
+        printf 'Task Lock 획득에 실패했습니다(경합): %s\n' "$task_id" >&2
+        return 1
+      fi
+    else
+      printf 'Task가 다른 프로세스에 의해 잠겨 있습니다: %s (owner=%s pid=%s since=%s)\n' \
+        "$task_id" "$(_runtime_meta_value "$holder" owner)" "$pid" "$acquired_at" >&2
+      return 1
+    fi
+  fi
+  token="$$-$(date -u +%s)-$RANDOM"
+  local holder_content
+  holder_content="$(printf 'owner=%s\npid=%s\nacquired_at=%s\ntoken=%s' \
+    "$purpose" "$$" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$token")"
+  _runtime_atomic_text "$lock_dir/holder" "$holder_content"
+  printf '%s' "$token"
+}
+
+_runtime_lock_release() {
+  local root="$1" task_id="$2" token="$3" lock_dir current_token
+  lock_dir="$(_runtime_lock_dir "$root" "$task_id")"
+  [[ -d "$lock_dir" ]] || return 0
+  current_token="$(_runtime_meta_value "$lock_dir/holder" token 2>/dev/null || true)"
+  [[ "$current_token" == "$token" ]] || return 0
+  rm -rf -- "$lock_dir"
+}
+
+# 다음 Fallback Provider 계산: Task 자신의 fallback_chain에서 현재 Provider
+# 다음 값(끝이면 처음 값으로 순환)을 고른다. dispatch/observe/transition을
+# 재구현하지 않는 것과 같은 이유로, Provider를 실제로 갈아끼우는 로직은
+# 여기 한 곳에만 둔다.
+_runtime_next_fallback_provider() {
+  local task_file="$1" current="$2"
+  local -a chain=()
+  local item
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    chain+=("$item")
+  done < <(yaml_flow_list "$task_file" fallback_chain)
+  (( ${#chain[@]} > 0 )) || return 1
+  local i
+  for ((i = 0; i < ${#chain[@]}; i++)); do
+    if [[ "${chain[$i]}" == "$current" ]]; then
+      if (( i + 1 < ${#chain[@]} )); then
+        printf '%s' "${chain[$((i + 1))]}"
+      else
+        printf '%s' "${chain[0]}"
+      fi
+      return 0
+    fi
+  done
+  printf '%s' "${chain[0]}"
+}
+
+# cmd_transition의 원자적 status 갱신과 같은 관용구(mktemp+awk+grep 검증+mv)
+# 를 그대로 따른다. Task YAML의 primary_worker/reviewer 한 필드만 바꾼다.
+_runtime_set_task_provider() {
+  local task_file="$1" field="$2" new_provider="$3" temporary quote="'"
+  temporary="$(mktemp "$(dirname "$task_file")/.harness-provider.XXXXXX")"
+  trap "rm -f -- '$temporary'" RETURN
+  awk -v key="$field" -v val="$new_provider" -v q="$quote" '
+    !done_flag && index($0, key ":") == 1 { print key ": " q val q; done_flag = 1; next }
+    { print }
+  ' "$task_file" >"$temporary"
+  grep -q "^${field}: '${new_provider}'$" "$temporary" || {
+    rm -f "$temporary"
+    die "Provider 갱신에 실패했습니다: $task_file"
+  }
+  chmod 0644 "$temporary"
+  mv "$temporary" "$task_file"
+}
+
 _runtime_append_evidence() {
   local evidence="$1" addition="$2" temporary
   temporary="$(mktemp "$(dirname "$evidence")/.evidence.XXXXXX")"
@@ -2436,6 +2568,24 @@ cmd_quota_check() {
 
   if [[ -n "$task_id" ]]; then
     evidence_file="$root/.harness/evidence/$task_id-$role-quota.md"
+    # quota-retry가 참고하는 연속 low 판정 스트릭. low가 아니면 스트릭을
+    # 끊는다 — "연속" 판정만 인정한다(오탐 한 번에 반응하지 않기 위함).
+    local streak_file="$root/.harness/runtime/$task_id-$role.quota-streak"
+    if [[ "$status_word" == low ]]; then
+      local prev_count=0 first_low_at="" streak_content
+      if [[ -f "$streak_file" ]]; then
+        prev_count="$(_runtime_meta_value "$streak_file" count)"
+        first_low_at="$(_runtime_meta_value "$streak_file" first_low_at)"
+      fi
+      [[ "$prev_count" =~ ^[0-9]+$ ]] || prev_count=0
+      [[ -n "$first_low_at" ]] || first_low_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+      streak_content="$(printf 'count=%s\nfirst_low_at=%s\nlast_low_at=%s' \
+        "$((prev_count + 1))" "$first_low_at" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')")"
+      mkdir -p "$root/.harness/runtime"
+      _runtime_atomic_text "$streak_file" "$streak_content"
+    else
+      rm -f -- "$streak_file"
+    fi
   else
     evidence_file="$root/.harness/evidence/quota-$provider.md"
   fi
@@ -2450,6 +2600,185 @@ cmd_quota_check() {
   rm -f -- "$addition"
 
   printf 'quota_check: provider=%s status=%s detail=%s\n' "$provider" "$status_word" "$detail"
+}
+
+# ---------------------------------------------------------------------------
+# quota-retry — opt-in. 연속 저쿼터가 확인되면 Provider를 fallback_chain의
+# 다음 값으로 바꾸고 handover_required까지 자동 전이한다. 거기서 멈춘다:
+# ready로 재개하려면 사람이 .harness/decisions/TASK-failover-approval.md에
+# "승인: yes"를 쓴 뒤 herdr-harness transition을 직접 실행해야 한다.
+# cmd_transition/cmd_close_agent를 그대로 호출하므로 두 함수의 모든
+# 전제조건(예: submitted에 필요한 Attempt/Evidence, working Agent 보호)을
+# 그대로 물려받는다 — 이 함수는 재구현하지 않는다.
+# ---------------------------------------------------------------------------
+
+cmd_quota_retry() {
+  local path="${1:-}" task_id="${2:-}" role="${3:-}"
+  [[ -n "$path" && -n "$task_id" && -n "$role" && $# -eq 3 ]] ||
+    die "사용법: quota-retry PATH TASK_ID ROLE(worker|reviewer)"
+  [[ "$role" == worker || "$role" == reviewer ]] || die "ROLE은 worker 또는 reviewer여야 합니다."
+  _runtime_require_id "$task_id"
+
+  local root task_file policy_file
+  root="$(project_root "$path")"
+  task_file="$root/.harness/tasks/$task_id.yaml"
+  [[ -f "$task_file" ]] || die "Task YAML을 찾을 수 없습니다: $task_file"
+
+  policy_file="$root/.harness/policies/quota-policy.yaml"
+  [[ -f "$policy_file" ]] || die "quota-policy.yaml이 없습니다: $policy_file"
+  local automatic_failover
+  automatic_failover="$(_runtime_yaml_scalar "$policy_file" automatic_failover)"
+  [[ "$automatic_failover" == "true" ]] ||
+    die "automatic_failover가 꺼져 있습니다(.harness/policies/quota-policy.yaml). quota-retry는 opt-in 기능입니다."
+
+  local task_status
+  task_status="$(yaml_scalar "$task_file" status)"
+  [[ "$task_status" == active ]] ||
+    die "Task 상태가 active가 아닙니다(현재 $task_status). quota-retry는 active Task에만 적용됩니다."
+
+  local used_marker="$root/.harness/runtime/$task_id-$role.auto-retry-used"
+  [[ ! -f "$used_marker" ]] ||
+    die "이 Task/Role에는 이미 자동 재시도를 1회 사용했습니다(flapping 방지). handover_required로 전이한 뒤 사람이 직접 처리하세요: $used_marker"
+
+  local confirm_needed=2 cooldown=300 stale_seconds=600 configured
+  configured="$(_runtime_yaml_scalar "$policy_file" low_confirm_count)"
+  [[ "$configured" =~ ^[0-9]+$ ]] && confirm_needed="$configured"
+  configured="$(_runtime_yaml_scalar "$policy_file" cooldown_seconds)"
+  [[ "$configured" =~ ^[0-9]+$ ]] && cooldown="$configured"
+  configured="$(_runtime_yaml_scalar "$policy_file" stale_lock_seconds)"
+  [[ "$configured" =~ ^[0-9]+$ ]] && stale_seconds="$configured"
+
+  local streak_file="$root/.harness/runtime/$task_id-$role.quota-streak"
+  [[ -f "$streak_file" ]] ||
+    die "연속 저쿼터 기록이 없습니다. 먼저 herdr-harness quota-check PATH $task_id $role 을 실행하세요: $streak_file"
+  local streak_count last_low_at first_low_at
+  streak_count="$(_runtime_meta_value "$streak_file" count)"
+  last_low_at="$(_runtime_meta_value "$streak_file" last_low_at)"
+  first_low_at="$(_runtime_meta_value "$streak_file" first_low_at)"
+  [[ "$streak_count" =~ ^[0-9]+$ ]] || streak_count=0
+  (( streak_count >= confirm_needed )) ||
+    die "연속 저쿼터 판정이 부족합니다($streak_count/$confirm_needed). quota-check를 다시 실행해 확인하세요."
+  if [[ -n "$first_low_at" && -n "$last_low_at" ]]; then
+    local first_epoch last_epoch
+    first_epoch="$(date -u -d "$first_low_at" +%s 2>/dev/null || printf 0)"
+    last_epoch="$(date -u -d "$last_low_at" +%s 2>/dev/null || printf 0)"
+    (( last_epoch - first_epoch >= cooldown )) ||
+      die "연속 저쿼터 판정 간격이 cooldown(${cooldown}초)보다 짧습니다. 시간을 두고 quota-check를 다시 실행하세요."
+  fi
+
+  local token
+  token="$(_runtime_lock_acquire "$root" "$task_id" quota-retry "$stale_seconds")" ||
+    die "Task Lock 획득에 실패했습니다: $task_id"
+  trap "_runtime_lock_release '$root' '$task_id' '$token'" EXIT INT TERM
+
+  append_event "$root" quota_retry_start "$task_id" "$task_status" "" "role=$role"
+
+  cmd_close_agent "$root" "$task_id" "$role" --force
+
+  local role_key current_provider next_provider
+  if [[ "$role" == worker ]]; then role_key=primary_worker; else role_key=reviewer; fi
+  current_provider="$(_runtime_yaml_scalar "$task_file" "$role_key")"
+  next_provider="$(_runtime_next_fallback_provider "$task_file" "$current_provider")" ||
+    die "Task의 fallback_chain에서 다음 Provider를 찾지 못했습니다: $task_file"
+
+  _runtime_set_task_provider "$task_file" "$role_key" "$next_provider"
+  cmd_transition "$root" "$task_id" handover_required --note "quota-retry: $current_provider -> $next_provider"
+
+  _runtime_atomic_text "$used_marker" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  rm -f -- "$streak_file"
+
+  append_event "$root" quota_retry_done "$task_id" "$task_status" handover_required "provider $current_provider -> $next_provider"
+
+  printf 'quota_retry: %s(%s) provider %s -> %s, 상태 handover_required\n' "$task_id" "$role" "$current_provider" "$next_provider"
+  printf '다음 단계(사람 몫): .harness/decisions/%s-failover-approval.md 에 "승인: yes"를 쓴 뒤 herdr-harness transition %s %s ready 를 직접 실행하세요.\n' \
+    "$task_id" "$path" "$task_id"
+}
+
+# ---------------------------------------------------------------------------
+# auto-step — opt-in. 유한 턴(정책 상한 이하) 동안만 동작하는 스텝 실행기다.
+# 상주 루프가 아니다: 호출 1회가 반드시 끝난다. Turn 1에서만 dispatch로
+# Pane 하나를 새로 만들고, 이후 턴은 그 같은 Agent를 observe로만 재조회한다
+# (dispatch를 반복하면 매번 새 Pane이 생겨 이전 Pane이 고아가 된다 — 그래서
+# 반복하지 않는다). settled/blocked/agent_lost/error 중 하나에 도달하면
+# 판단을 사람에게 넘기고 즉시 멈춘다. reviewing·awaiting_approval·completed
+# 로 이어지는 호출은 이 함수 안에 존재하지 않는다.
+# ---------------------------------------------------------------------------
+
+cmd_auto_step() {
+  local path="${1:-}" task_id="${2:-}" max_turns=0
+  [[ -n "$path" && -n "$task_id" ]] || die "사용법: auto-step PATH TASK_ID [--max-turns N]"
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --max-turns)
+        [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || die "--max-turns에는 양의 정수가 필요합니다."
+        max_turns="$2"; shift 2 ;;
+      *) die "알 수 없는 auto-step 옵션: $1" ;;
+    esac
+  done
+  _runtime_require_id "$task_id"
+
+  local root task_file policy_file
+  root="$(project_root "$path")"
+  task_file="$root/.harness/tasks/$task_id.yaml"
+  [[ -f "$task_file" ]] || die "Task YAML을 찾을 수 없습니다: $task_file"
+
+  policy_file="$root/.harness/policies/loop-policy.yaml"
+  [[ -f "$policy_file" ]] || die "loop-policy.yaml이 없습니다: $policy_file"
+  local enabled
+  enabled="$(_runtime_yaml_scalar "$policy_file" enabled)"
+  [[ "$enabled" == "true" ]] ||
+    die "auto-step가 꺼져 있습니다(.harness/policies/loop-policy.yaml). opt-in 기능입니다."
+
+  local ceiling=5 stale_seconds=600 configured
+  configured="$(_runtime_yaml_scalar "$policy_file" max_turns_ceiling)"
+  [[ "$configured" =~ ^[0-9]+$ ]] && ceiling="$configured"
+  configured="$(_runtime_yaml_scalar "$policy_file" stale_lock_seconds)"
+  [[ "$configured" =~ ^[0-9]+$ ]] && stale_seconds="$configured"
+  [[ "$max_turns" -gt 0 ]] || max_turns="$ceiling"
+  (( max_turns <= ceiling )) ||
+    die "--max-turns($max_turns)이 정책 상한(max_turns_ceiling=$ceiling)을 넘었습니다."
+
+  local task_status
+  task_status="$(yaml_scalar "$task_file" status)"
+  case "$task_status" in
+    ready|active) ;;
+    *) die "Task 상태가 ready/active가 아닙니다(현재 $task_status). auto-step은 이 두 상태에서만 동작합니다." ;;
+  esac
+
+  local token
+  token="$(_runtime_lock_acquire "$root" "$task_id" auto-step "$stale_seconds")" ||
+    die "Task Lock 획득에 실패했습니다: $task_id"
+  trap "_runtime_lock_release '$root' '$task_id' '$token'" EXIT INT TERM
+
+  if [[ "$task_status" == ready ]]; then
+    cmd_transition "$root" "$task_id" active --note "auto-step"
+  fi
+
+  local turn=1 result
+  set +e
+  result="$(cmd_dispatch "$root" "$task_id" worker)"
+  set -e
+  result="${result#*dispatch_result=}"
+  append_event "$root" auto_step_turn "$task_id" active "$result" "turn=$turn/$max_turns action=dispatch"
+
+  local continue_states=" stalled timeout "
+  while :; do
+    if [[ "$continue_states" != *" $result "* ]]; then
+      printf 'auto_step: turn=%s result=%s — 정지(사람 확인 필요)\n' "$turn" "$result"
+      return 0
+    fi
+    if (( turn >= max_turns )); then
+      printf 'auto_step: max_turns(%s) 소진, 마지막 result=%s — 정지\n' "$max_turns" "$result"
+      return 0
+    fi
+    turn=$((turn + 1))
+    set +e
+    result="$(cmd_observe "$root" "$task_id" worker)"
+    set -e
+    result="${result#*observe_result=}"
+    append_event "$root" auto_step_turn "$task_id" active "$result" "turn=$turn/$max_turns action=observe"
+  done
 }
 
 _runtime_json_escape() {
@@ -2816,6 +3145,78 @@ HARNESS_YAML_CHECK
   expect_fail "close-agent 기록 없는 Task" \
     bash "$SELF_PATH" close-agent "$test_project" task-999
 
+  # --- Task Lock: 동시 획득 거부, release, stale 회수 -----------------------
+  local task2="$test_project/.harness/tasks/task-002.yaml"
+  sed -e 's/^task_id: .*/task_id: task-002/' \
+      -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+      -e 's/^status: .*/status: active/' \
+      "$test_project/.harness/tasks/TEMPLATE.yaml" >"$task2"
+
+  local lock_token1 lock_token2 lock_status
+  lock_token1="$(_runtime_lock_acquire "$test_project" task-002 test-a 600)" ||
+    die "Task Lock 최초 획득 실패"
+  set +e
+  lock_token2="$(_runtime_lock_acquire "$test_project" task-002 test-b 600)"
+  lock_status=$?
+  set -e
+  [[ "$lock_status" -ne 0 ]] || die "Task Lock이 동시 획득을 막지 못했습니다."
+  _runtime_lock_release "$test_project" task-002 "$lock_token1"
+  [[ ! -d "$(_runtime_lock_dir "$test_project" task-002)" ]] ||
+    die "Task Lock이 release 후에도 남아 있습니다."
+
+  ( : ) &
+  local dead_pid=$!
+  wait "$dead_pid" 2>/dev/null || true
+  lock_token1="$(_runtime_lock_acquire "$test_project" task-002 test-c 600)" ||
+    die "Task Lock 재획득 실패"
+  printf 'owner=test-c\npid=%s\nacquired_at=2000-01-01T00:00:00Z\ntoken=stale-token\n' "$dead_pid" \
+    >"$(_runtime_lock_dir "$test_project" task-002)/holder"
+  lock_token2="$(_runtime_lock_acquire "$test_project" task-002 test-d 1)" ||
+    die "Stale Task Lock을 회수하지 못했습니다."
+  _runtime_lock_release "$test_project" task-002 "$lock_token2"
+  [[ ! -d "$(_runtime_lock_dir "$test_project" task-002)" ]] ||
+    die "Task Lock이 release 후에도 남아 있습니다(stale 회수 후)."
+
+  # --- quota-retry / auto-step opt-in 게이트 --------------------------------
+  expect_fail "quota-retry 기본값(automatic_failover:false)에서 거부" \
+    bash "$SELF_PATH" quota-retry "$test_project" task-002 worker
+  expect_fail "auto-step 기본값(loop-policy enabled:false)에서 거부" \
+    bash "$SELF_PATH" auto-step "$test_project" task-002
+
+  sed -i 's/^  automatic_failover: false$/  automatic_failover: true/' \
+    "$test_project/.harness/policies/quota-policy.yaml"
+  expect_fail "quota-retry: 연속 저쿼터 기록 없음" \
+    bash "$SELF_PATH" quota-retry "$test_project" task-002 worker
+
+  printf 'count=1\nfirst_low_at=2026-01-01T00:00:00Z\nlast_low_at=2026-01-01T00:00:00Z\n' \
+    >"$test_project/.harness/runtime/task-002-worker.quota-streak"
+  expect_fail "quota-retry: 연속 확인 횟수 미달" \
+    bash "$SELF_PATH" quota-retry "$test_project" task-002 worker
+
+  printf 'count=2\nfirst_low_at=2026-01-01T00:00:00Z\nlast_low_at=2026-01-01T00:00:00Z\n' \
+    >"$test_project/.harness/runtime/task-002-worker.quota-streak"
+  expect_fail "quota-retry: cooldown 미달" \
+    bash "$SELF_PATH" quota-retry "$test_project" task-002 worker
+
+  rm -f "$test_project/.harness/runtime/task-002-worker.quota-streak"
+  sed -i 's/^  automatic_failover: true$/  automatic_failover: false/' \
+    "$test_project/.harness/policies/quota-policy.yaml"
+
+  sed -i 's/^  enabled: false$/  enabled: true/' "$test_project/.harness/policies/loop-policy.yaml"
+  expect_fail "auto-step: --max-turns가 정책 상한을 넘음" \
+    bash "$SELF_PATH" auto-step "$test_project" task-002 --max-turns 99
+  sed -i 's/^  enabled: true$/  enabled: false/' "$test_project/.harness/policies/loop-policy.yaml"
+
+  # --- 안전 불변식: auto-step/quota-retry 함수 본문에 completed/reviewing/
+  #     awaiting_approval/ready 전이 호출이 없어야 한다(구조적 회귀 방지) ----
+  local auto_step_body quota_retry_body
+  auto_step_body="$(awk '/^cmd_auto_step\(\) \{$/{flag=1} flag{print} flag && /^}$/{exit}' "$SELF_PATH")"
+  printf '%s' "$auto_step_body" | grep -qE 'cmd_transition[^\n]*\b(completed|reviewing|awaiting_approval)\b' &&
+    die "auto_step 안전 불변식 위반: completed/reviewing/awaiting_approval 전이 호출이 발견됐습니다."
+  quota_retry_body="$(awk '/^cmd_quota_retry\(\) \{$/{flag=1} flag{print} flag && /^}$/{exit}' "$SELF_PATH")"
+  printf '%s' "$quota_retry_body" | grep -qE 'cmd_transition[^\n]*\b(completed|ready)\b' &&
+    die "quota_retry 안전 불변식 위반: completed/ready 전이 호출이 발견됐습니다."
+
   local completion_script
   completion_script="$(bash "$SELF_PATH" completion bash)"
   printf '%s' "$completion_script" | bash -n /dev/stdin ||
@@ -2827,7 +3228,7 @@ HARNESS_YAML_CHECK
   trap - EXIT
 
   printf 'PASS: Bash 문법\n'
-  printf 'PASS: Harness 파일 생성 (20종 템플릿)\n'
+  printf 'PASS: Harness 파일 생성 (21종 템플릿)\n'
   printf 'PASS: 공통 Skill과 Claude 연결\n'
   printf 'PASS: 플레이스홀더 치환\n'
   printf 'PASS: Git 기준선 생성\n'
@@ -2839,6 +3240,9 @@ HARNESS_YAML_CHECK
   printf 'PASS: 스텝 명령 인자 검증\n'
   printf 'PASS: Agent 호출 없음\n'
   printf 'PASS: 탭 완성 스크립트 문법\n'
+  printf 'PASS: Task Lock (동시 획득 거부/release/stale 회수)\n'
+  printf 'PASS: quota-retry/auto-step opt-in 게이트\n'
+  printf 'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출)\n'
 }
 
 cmd_completion() {
@@ -2868,7 +3272,7 @@ _herdr_harness_completions() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local subcommands="init start status doctor test uninstall validate transition dispatch observe close-agent quota-check completion"
+  local subcommands="init start status doctor test uninstall validate transition dispatch observe close-agent quota-check quota-retry auto-step completion"
 
   if (( COMP_CWORD == 1 )); then
     COMPREPLY=($(compgen -W "$subcommands" -- "$cur"))
@@ -2920,7 +3324,7 @@ _herdr_harness_completions() {
         COMPREPLY=($(compgen -W "--note" -- "$cur"))
       fi
       ;;
-    dispatch|observe|close-agent|quota-check)
+    dispatch|observe|close-agent|quota-check|quota-retry)
       if (( COMP_CWORD == 2 )); then
         COMPREPLY=($(compgen -d -- "$cur"))
       elif (( COMP_CWORD == 3 )) && [[ "$cmd" == quota-check && "$cur" == --* ]]; then
@@ -2937,6 +3341,17 @@ _herdr_harness_completions() {
         COMPREPLY=($(compgen -W "--timeout" -- "$cur"))
       elif [[ "$cmd" == close-agent ]]; then
         COMPREPLY=($(compgen -W "--force" -- "$cur"))
+      fi
+      ;;
+    auto-step)
+      if (( COMP_CWORD == 2 )); then
+        COMPREPLY=($(compgen -d -- "$cur"))
+      elif (( COMP_CWORD == 3 )); then
+        _herdr_harness_task_ids "${COMP_WORDS[2]}" "$cur"
+      elif [[ "$prev" == --max-turns ]]; then
+        :
+      else
+        COMPREPLY=($(compgen -W "--max-turns" -- "$cur"))
       fi
       ;;
     uninstall)
@@ -3026,6 +3441,8 @@ main() {
     observe) cmd_observe "$@" ;;
     close-agent) cmd_close_agent "$@" ;;
     quota-check) cmd_quota_check "$@" ;;
+    quota-retry) cmd_quota_retry "$@" ;;
+    auto-step) cmd_auto_step "$@" ;;
     completion) cmd_completion "$@" ;;
     doctor) cmd_doctor "$@" ;;
     test) cmd_test "$@" ;;

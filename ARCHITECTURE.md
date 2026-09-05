@@ -12,7 +12,7 @@ Interview → SPEC → Reference → Plan → Work → Verify → Review → Use
 
 무인 실행, 트랜잭션, 물리적 Sandbox를 의미하지는 않습니다.
 
-핵심 실행 원칙은 "Bash는 한 스텝, Agent가 루프"입니다. `harness.sh`는 호출 한 번에 검증, 상태 전이 또는 Agent 한 턴만 수행합니다. Orchestrator Agent가 그 결과와 사용자 응답을 해석해 다음 명령을 선택하며, 상주 루프·자동 failover·자동 완료 승인은 수행하지 않습니다.
+핵심 실행 원칙은 "Bash는 한 스텝, Agent가 루프"입니다. `harness.sh`는 호출 한 번에 검증, 상태 전이 또는 Agent 한 턴만 수행합니다. Orchestrator Agent가 그 결과와 사용자 응답을 해석해 다음 명령을 선택하며, 상주 루프·자동 완료 승인은 수행하지 않습니다. `quota-retry`/`auto-step`(§8.1, §8.2)이 opt-in으로 유한한 자동화를 더하지만, 둘 다 호출 1회가 반드시 끝나는 배치이고 Provider 교체 후 재개나 `completed`는 여전히 사람이 승인합니다 — 상주 Controller나 무조건적 자동 failover는 아닙니다.
 
 ## 2. 구성요소
 
@@ -135,6 +135,21 @@ Provider를 바꾸지 않습니다** — 아래 확인된 실패 조건과 별�
 
 정상 실행 중 비교 목적으로 모든 Provider를 동시에 호출하지 않습니다.
 
+### 8.1 quota-retry (opt-in, 제약된 자동화)
+
+`.harness/policies/quota-policy.yaml`의 `automatic_failover: true`로 켜면 `herdr-harness quota-retry PATH TASK_ID ROLE`을 쓸 수 있습니다. 이건 위 교체 순서의 앞부분(실패 확인 → Handover)만 자동화한 것이지, 순서 자체를 없앤 게 아닙니다:
+
+1. `quota-check`가 남긴 연속 `low` 판정이 `low_confirm_count`회 이상, 판정 간격이 `cooldown_seconds` 이상이어야 진행합니다(오탐 한 번으로 움직이지 않음).
+2. Task Lock을 잡고, 기존 `close-agent --force`·`transition`을 그대로 호출해 Provider를 `fallback_chain`의 다음 값으로 바꾼 뒤 `handover_required`까지 전이합니다.
+3. **거기서 멈춥니다.** `ready`로 재개(=Fallback Attempt 시작)하는 건 여전히 사람 몫입니다 — `.harness/decisions/TASK_ID-failover-approval.md`에 `승인: yes`를 쓰고 `transition ... ready`를 직접 실행해야 합니다. `approval.provider_failover: user_required`(project.yaml)를 실제로 지키는 지점이 여기입니다.
+4. Task당 1회만 허용합니다. 두 번째 실패는 사람이 직접 처리해야 합니다(Provider가 계속 튕기는 flapping 방지).
+
+### 8.2 auto-step (opt-in, 유한 루프)
+
+`.harness/policies/loop-policy.yaml`의 `enabled: true`로 켜면 `herdr-harness auto-step PATH TASK_ID [--max-turns N]`을 쓸 수 있습니다. 이것도 §1의 "Bash는 한 스텝" 원칙을 어기지 않습니다 — 호출 1회가 정책 상한(`max_turns_ceiling`, 기본 5) 안에서 반드시 끝나는 유한 배치일 뿐, 상주 루프가 아닙니다. 1턴째만 `dispatch`로 Pane을 하나 만들고 이후 턴은 같은 Agent를 `observe`로만 재조회합니다(반복 dispatch는 Pane을 고아로 만듭니다). `settled`·`blocked`·`agent_lost`·`error` 중 하나에 닿으면 즉시 멈추고 사람에게 넘깁니다 — `reviewing`·`awaiting_approval`·`completed`로 이어지는 호출은 코드에 존재하지 않습니다.
+
+두 명령 모두 실행 전 mkdir 기반 Task Lock(`.harness/runtime/TASK_ID.lock`)을 잡습니다. 이건 quota-retry/auto-step 두 자동화 경로끼리의 충돌만 막는 권고적 잠금이며, SQLite Lease나 Fencing Token(§13)이 아닙니다 — 사람이 같은 Task에 수동으로 `dispatch`/`transition`을 실행하는 것까지 막지는 않으므로, 자동 명령이 도는 동안은 `status --live`로 확인하고 수동 개입을 삼가야 합니다.
+
 ## 9. Context Packet
 
 `dispatch`는 Worker와 Reviewer에게 전체 대화 대신 `.harness/runtime/TASK-context-ROLE.md` Context Packet을 한 번 전달합니다.
@@ -190,13 +205,13 @@ Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않�
 
 ### 선택적 고도화
 
-- Event Log와 Replay
+- Event Log와 Replay — `append_event`로 상태 전이(`transition`)와 신규 `quota-retry`/`auto-step`/Task Lock 이벤트는 `.harness/evidence/events.tsv`에 남지만, `dispatch`/`observe`/`quota-check` 자체는 아직 기록하지 않고 Replay 도구도 없습니다 — 부분 구현.
 - SQLite Lease와 Controller Epoch
-- Fencing Token
+- Fencing Token — §8.1/§8.2의 Task Lock(`mkdir` 기반)이 최소 버전으로 구현되어 있습니다. PID 생존 확인과 stale 회수까지만 하는 권고적 잠금이며, SQLite Lease/Epoch 수준의 완전한 Fencing Token은 아닙니다.
 - Atomic Outbox
 - Worktree와 Integration Lock
 - Sealed Verification Bundle
-- 자동 Failover
+- ~~자동 Failover~~ — §8.1 `quota-retry`로 "탐지→정리→handover"까지만 부분 구현. Provider 교체 후 재개는 여전히 사람 승인이 필수라 완전 자동 Failover는 아닙니다.
 - Container 또는 별도 OS 사용자 격리
 
-상주 Controller와 자동 Failover는 현재 Harness의 범위가 아닙니다.
+상주 Controller는 여전히 현재 Harness의 범위가 아닙니다. `quota-retry`/`auto-step`은 상주 프로세스가 아니라 호출 1회가 유한 시간 안에 반드시 끝나는 opt-in 명령이며, 둘 다 `completed`/`awaiting_approval`/`reviewing` 전이와 Provider 교체 후 재개 승인은 사람 몫으로 남겨둡니다.

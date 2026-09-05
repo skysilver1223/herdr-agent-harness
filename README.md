@@ -380,10 +380,19 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness status [PATH] --live [--json]` | 문서·Herdr·Git 실시간 상태 대조 |
 | `herdr-harness quota-check PATH TASK_ID worker\|reviewer` | 실행 중인 Agent의 쿼터 확인(claude·codex는 `/status` 전송, agy는 `--print "/usage"`) |
 | `herdr-harness quota-check PATH --provider agy` | Task 없이 agy 쿼터만 바로 확인 |
+| `herdr-harness quota-retry PATH TASK_ID worker\|reviewer` | (opt-in) 연속 저쿼터 확인 시 Provider 교체를 `handover_required`까지 자동 처리 |
+| `herdr-harness auto-step PATH TASK_ID [--max-turns N]` | (opt-in) 유한 턴 동안 dispatch 1회 + observe 반복 |
 
 `dispatch`는 재시도, 상태 전이, blocked 응답 또는 Provider failover를 수행하지 않습니다. Orchestrator는 반환된 `dispatch_result`를 확인한 뒤 사용자 승인 경계를 지키며 다음 스텝을 호출합니다.
 
 `quota-check`도 자동으로 아무것도 바꾸지 않습니다. claude·codex는 비대화형 조회 수단이 없어 실행 중인 Agent Pane에 `/status`를 보내고 그 출력에서 알려진 경고 문구("... N% of your weekly limit ..." 등)를 스캔합니다. agy는 `agy --print "/usage"`로 정확한 잔여 퍼센트를 바로 얻습니다. 판정 기준(`low`로 볼 임계값)은 `.harness/policies/quota-policy.yaml`의 `low_warning_threshold_pct`로 조정하며, `dispatch`·`observe`도 Agent 출력을 지나가는 김에 스캔해 Evidence에 참고용 경고를 남깁니다(`passive_scan_on_dispatch`).
+
+### `quota-retry`, `auto-step` — opt-in 제약된 자동화
+
+두 명령 모두 기본은 꺼져 있고(opt-in), 완전 자율 실행이 아니라 **유한하고 되돌릴 수 있는 범위**만 자동화합니다. 둘 다 실행 전에 같은 Task에 대한 mkdir 기반 Task Lock(`.harness/runtime/TASK_ID.lock`)을 잡아, `quota-retry`/`auto-step` 두 자동화 경로끼리 같은 Task에 동시에 들어가는 것을 막습니다 — SQLite Lease나 Fencing Token 같은 완전한 락은 아니며, 사람이 그 사이에 수동으로 `dispatch`/`transition`을 실행하는 것까지 막지는 않으므로 자동 명령이 도는 동안은 `status --live`로 확인하고 수동 개입을 삼가세요.
+
+- **`quota-retry`**: `.harness/policies/quota-policy.yaml`의 `automatic_failover: true`로 켜야 동작합니다. `quota-check`가 남긴 연속 `low` 판정이 `low_confirm_count`회 이상, 그 간격이 `cooldown_seconds` 이상일 때만 진행하며, Task당 1회만 허용합니다(flapping 방지). 진행 시 기존 `close-agent`/`transition`을 그대로 호출해 Provider를 `fallback_chain`의 다음 값으로 바꾸고 `handover_required`까지 전이한 뒤 **거기서 멈춥니다**. `ready`로 재개하려면 사람이 `.harness/decisions/TASK_ID-failover-approval.md`에 `승인: yes`를 쓰고 `transition ... ready`를 직접 실행해야 합니다 — `completed`는 물론 이 재개 단계도 자동화하지 않습니다.
+- **`auto-step`**: `.harness/policies/loop-policy.yaml`의 `enabled: true`로 켜야 동작하고, `--max-turns`는 `max_turns_ceiling`(기본 5)을 넘을 수 없습니다. 상주 루프가 아니라 호출 1회가 반드시 끝납니다: 1턴째만 `dispatch`로 Pane을 새로 만들고, 이후 턴은 같은 Agent를 `observe`로만 재조회합니다(반복 dispatch는 Pane을 고아로 만들기 때문에 하지 않습니다). `settled`/`blocked`/오류에 도달하면 즉시 멈추고 판단을 사람에게 넘깁니다 — `reviewing`·`awaiting_approval`·`completed`로 이어지는 코드 경로 자체가 없습니다.
 
 ## 생성되는 프로젝트 구조
 
