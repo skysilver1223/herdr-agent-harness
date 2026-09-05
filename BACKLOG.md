@@ -166,6 +166,68 @@ SPEC이 200줄을 넘으면 Acceptance Criteria나 제약이 Worker·Reviewer에
 
 ---
 
+## 8. [MED · 재현됨] 기존 프로젝트가 harness.sh 갱신을 따라가지 못한다 — 실사례로 발견됨
+
+`init`은 신규 프로젝트 전용이다(대상 경로가 비어 있지 않으면 die). 그런데 기존
+프로젝트의 `.agents/skills/*/SKILL.md`·`.claude/skills/*/SKILL.md`·
+`.agents/roles/*.agent.md`·`AGENTS.md`를 **최신 템플릿으로 재동기화하는 명령이
+없다.** Agent Loop(`dispatch`/`observe`/`transition`/`close-agent`/`validate`
+/`status --live`)가 나중에 추가되면서 `cmd_init`이 쓰는 `harness-orchestrate`
+SKILL.md 템플릿은 크게 두꺼워졌지만(사전조건→7단계 절차→결과계약→사후조건
+체크리스트), **그보다 먼저 만들어진 프로젝트는 그 내용을 영영 못 받는다.**
+
+재현(실사례): `tube-index-refactor` 프로젝트(Agent Loop 기능 이전 버전의
+`init`으로 생성)의 `.agents/skills/harness-orchestrate/SKILL.md`와
+`.claude/skills/harness-orchestrate/SKILL.md`를 지금 이 저장소의 `harness.sh`가
+`cmd_init`에서 쓰는 heredoc과 대조하면 완전히 다르다 — 그 프로젝트의 두 파일은
+"HERDR_ENV를 확인하고 승인된 Wave만 실행하며 STATE를 갱신한다"는 8줄짜리 stub뿐이고
+(둘이 서로 byte-identical이라 애초에 상세 절차가 반영된 적이 없다는 뜻이다),
+`dispatch`·`observe`·`transition`·`close-agent`라는 단어 자체가 그 프로젝트의
+`AGENTS.md`·어떤 skill 파일에도 없다(`quota-check`만 `AGENTS.md`에 언급됨).
+
+실제로 벌어진 일: 그 프로젝트에서 작업한 Claude Orchestrator 세션이
+`herdr-harness dispatch`류의 존재를 전혀 모른 채, raw `herdr pane split` +
+`herdr agent start`/`agent prompt`로 Worker·Reviewer를 직접 우회 배정했다.
+Task Lock 미획득, `.harness/evidence/events.tsv` 이벤트 로그 없음,
+`.harness/attempts/*.md`·`.harness/reviews/*.md` 정식 기록 없음(Reviewer의
+전체 재현검증 내용은 Herdr pane을 닫는 순간 원본이 사라졌다) — 이 프로젝트가
+갖추려던 안전장치·감사 트레일이 통째로 빠진 채 한 Task 라운드가 완료·검수까지
+갔다. 대조군: Agent Loop 이후 `init`으로 만든 `harness-ui-audit` 프로젝트는
+`.harness/runtime/*.meta`·`.result`·`.closed`, `evidence/events.tsv`,
+`attempts/*.md`, `reviews/*.md`가 정상적으로 남아 있다 — 같은 `harness.sh`를
+쓰는 두 프로젝트가 생성 시점 버전 차이만으로 완전히 다르게 동작한 것이다.
+
+수정 위치 제안: `harness.sh`에 `sync-templates PATH`(가칭) 명령 추가.
+- Harness가 소유한 파일만 재생성한다: `.agents/skills/`, `.claude/skills/`,
+  `.agents/roles/`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`. 사용자 데이터
+  (`.harness/SPEC.md`·`STATE.md`·`tasks/`·`decisions/`·`waves/` 등)는 건드리지
+  않는다 — `cmd_init`의 write 목록과 사용자 데이터 목록을 코드 레벨에서
+  분리해 두면 이 구분이 유지보수 중 갈라지지 않는다.
+- `--dry-run`으로 diff 미리보기를 기본 동작으로 하고, 실제 적용은 `cmd_init`과
+  같은 Git 기준선 확인(작업 트리 unclean이면 die)을 공유한다.
+- 최소한 `herdr-harness doctor`나 `status --live`가 "이 프로젝트의 skill
+  템플릿이 현재 harness.sh보다 오래됐다"는 경고만이라도 내면(diff 유무만 검사),
+  `sync-templates` 구현 전에도 이번 것과 같은 무인지 상태(agent가 구버전
+  skill을 읽고도 그런 줄 모르는 것)는 막을 수 있다.
+
+발견 세션: https://claude.ai/code/session_01BH9fokbznniajMF4nZDozY
+
+**처리 완료.** `sync-templates PATH [--apply]` 명령을 추가했다 — 기본은 diff
+미리보기, `--apply`로 `.agents/skills/`·`.agents/roles/`·`.harness/*/TEMPLATE.*`·
+`.claude/skills/` 심볼릭 링크만 최신 템플릿으로 갱신한다. `AGENTS.md`·
+`CLAUDE.md`·`GEMINI.md`는 프로젝트가 손으로 고쳤을 수 있어 자동 갱신하지
+않고 diff만 보여준다(실제로 이 gap을 겪은 프로젝트의 AGENTS.md가 그런
+경우였다). 구현 중 실제로 버그 2건이 나왔다 — `emit_doc`이 `| write_file`로
+서브셸에서 돌아 sync 모드의 카운트 배열이 호출자에게 안 돌아오던 것,
+`diff`(차이 있으면 exit 1)가 가드 없이 파이프에 물려 `set -e` 아래서
+AGENTS.md에 실제 차이가 있을 때만 스크립트 전체가 조용히 죽던 것. 둘 다
+고쳤고 `cmd_test`에 회귀 테스트를 추가했다(PASS 16→17). `tube-index-refactor`
+프로젝트에 실제로 적용해 20개 파일(skill 9·role 6·TEMPLATE 5) 전부 갱신을
+확인했다.
+커밋: `harness.sh`(+286/-34), `BACKLOG.md`
+
+---
+
 ## 참고: 이번 작업에서 확정한 설계 원칙
 
 Codex는 처음 `run-wave` 자율 루프를 제안했고 AGY는 설계 철학(`unattended_execution: false`) 위반이라

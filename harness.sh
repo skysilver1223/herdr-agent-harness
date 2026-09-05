@@ -11,6 +11,7 @@ Herdr Agent/Skills Harness
 사용법:
   $SCRIPT_NAME help | -h | --help  이 도움말 출력(인자 없이 실행해도 같다)
   $SCRIPT_NAME init PATH [옵션]   새 프로젝트 Harness 생성
+  $SCRIPT_NAME sync-templates PATH [--apply]  기존 프로젝트의 skill·role 파일을 지금 버전 템플릿으로 재동기화(기본은 diff 미리보기)
   $SCRIPT_NAME start [PATH]       Herdr Session 시작
   $SCRIPT_NAME status [PATH]      현재 STATE.md 출력
   $SCRIPT_NAME status --live      문서·Herdr·Git 상태 대조 (DRIFT 표시)
@@ -77,10 +78,37 @@ write_file() {
   local parent temporary
   parent="$(dirname "$destination")"
   mkdir -p "$parent"
-  [[ ! -e "$destination" ]] || die "기존 파일을 덮어쓰지 않습니다: $destination"
   temporary="$(mktemp "$parent/.harness-write.XXXXXX")"
   cat >"$temporary"
   chmod 0644 "$temporary"
+
+  # sync-templates가 켜는 모드. init의 "있으면 거부" 규칙과 달리, 알려진
+  # Harness 소유 템플릿 파일만 대상으로 값을 대조해 갱신한다(호출자가
+  # 대상 경로를 이미 고정 목록으로 골라 놓았다는 전제). HH_SYNC_DRYRUN이면
+  # 아무것도 쓰지 않고 diff만 보여준다.
+  if [[ "${HH_SYNC_MODE:-0}" -eq 1 ]]; then
+    if [[ -e "$destination" ]] && cmp -s "$temporary" "$destination"; then
+      rm -f "$temporary"
+      SYNC_UNCHANGED+=("$relative")
+      return 0
+    fi
+    if [[ "${HH_SYNC_DRYRUN:-0}" -eq 1 ]]; then
+      if [[ -e "$destination" ]]; then
+        printf -- '--- %s (현재)\n+++ %s (최신 템플릿)\n' "$relative" "$relative"
+        diff -u "$destination" "$temporary" | tail -n +3 || true
+      else
+        printf '  (신규 파일) %s\n' "$relative"
+      fi
+      SYNC_WOULD_CHANGE+=("$relative")
+      rm -f "$temporary"
+      return 0
+    fi
+    mv "$temporary" "$destination"
+    SYNC_CHANGED+=("$relative")
+    return 0
+  fi
+
+  [[ ! -e "$destination" ]] || { rm -f "$temporary"; die "기존 파일을 덮어쓰지 않습니다: $destination"; }
   mv "$temporary" "$destination"
 }
 
@@ -103,12 +131,16 @@ prompt_default() {
 
 emit_doc() {
   local root="$1" relative="$2"
-  sed -e "s|@@WORKER@@|${DOC_WORKER}|g" \
+  local rendered
+  # write_file를 파이프(`| write_file`)로 부르면 오른쪽이 서브셸에서 돌아
+  # write_file 안의 전역 배열 갱신(SYNC_* — sync-templates가 씀)이 호출자에게
+  # 안 돌아온다. 여기 리다이렉션(<<<)으로 부르면 서브셸이 생기지 않는다.
+  rendered="$(sed -e "s|@@WORKER@@|${DOC_WORKER}|g" \
       -e "s|@@REVIEWER@@|${DOC_REVIEWER}|g" \
       -e "s|@@ORCHESTRATOR@@|${DOC_ORCHESTRATOR}|g" \
       -e "s|@@FALLBACK@@|${DOC_FALLBACK}|g" \
-      -e "s|@@NAME@@|${DOC_NAME}|g" \
-    | write_file "$root" "$relative"
+      -e "s|@@NAME@@|${DOC_NAME}|g")"
+  write_file "$root" "$relative" <<<"$rendered"
 }
 
 write_project_docs() {
@@ -1103,6 +1135,49 @@ HARNESS_DOC_EOF
 
 }
 
+# ---------------------------------------------------------------------------
+# 프로젝트 루트 진입 문서 (AGENTS.md/CLAUDE.md/GEMINI.md)
+# init과 sync-templates의 diff 미리보기가 같은 내용을 봐야 하므로 함수로
+# 뽑아 둔다 — 두 곳에 나눠 적으면 시간이 지나며 서로 갈라진다.
+# ---------------------------------------------------------------------------
+
+_entry_doc_agents() {
+  local name="$1" orchestrator="$2" worker="$3" reviewer="$4" fallback="$5"
+  cat <<EOF
+# Agent Instructions: $name
+
+이 프로젝트는 Herdr Agent/Skills Harness로 운영한다.
+
+반드시 \`.harness/SPEC.md\`, \`.harness/STATE.md\`, 현재 Task YAML, 현재 역할 문서와 관련 Skill을 읽는다.
+
+- 승인된 SPEC과 Task 없이 구현하지 않는다.
+- 하나의 Task는 하나의 목적만 가진다.
+- Task당 쓰기 가능한 Primary Worker는 한 명이다.
+- 기존 코드·데이터·문서·Dump를 먼저 확인한다.
+- Worker는 \`submitted\`까지만 제안하고 사용자가 \`completed\`를 승인한다.
+- 실패·쿼터 확인 후 Handover와 사용자 승인을 거쳐 Provider를 교체한다.
+- 위험한 명령, 배포, 외부 쓰기는 사용자 승인을 받는다.
+
+기본 배정: Orchestrator=$orchestrator, Worker=$worker, Reviewer=$reviewer, Fallback=$fallback
+EOF
+}
+
+_entry_doc_claude() {
+  cat <<'EOF'
+# Claude Code Entry
+
+`AGENTS.md`를 공통 정책으로 사용한다. 현재 역할에 맞는 `.agents/roles/*.agent.md`와 `.claude/skills/`의 Harness Skill을 읽는다. Herdr Pane 제어는 `HERDR_ENV=1`일 때만 수행한다.
+EOF
+}
+
+_entry_doc_gemini() {
+  cat <<'EOF'
+# Antigravity Entry
+
+`AGENTS.md`를 공통 정책으로 사용한다. 현재 역할에 맞는 `.agents/roles/*.agent.md`와 `.agents/skills/`의 Harness Skill을 읽는다. Herdr Pane 제어는 `HERDR_ENV=1`일 때만 수행한다.
+EOF
+}
+
 cmd_init() {
   local target="${1:-}"
   [[ -n "$target" && "$target" != -* ]] || die "init에는 새 프로젝트 경로가 필요합니다."
@@ -1163,35 +1238,9 @@ __pycache__/
 node_modules/
 EOF
 
-  write_file "$target" "AGENTS.md" <<EOF
-# Agent Instructions: $name
-
-이 프로젝트는 Herdr Agent/Skills Harness로 운영한다.
-
-반드시 \`.harness/SPEC.md\`, \`.harness/STATE.md\`, 현재 Task YAML, 현재 역할 문서와 관련 Skill을 읽는다.
-
-- 승인된 SPEC과 Task 없이 구현하지 않는다.
-- 하나의 Task는 하나의 목적만 가진다.
-- Task당 쓰기 가능한 Primary Worker는 한 명이다.
-- 기존 코드·데이터·문서·Dump를 먼저 확인한다.
-- Worker는 \`submitted\`까지만 제안하고 사용자가 \`completed\`를 승인한다.
-- 실패·쿼터 확인 후 Handover와 사용자 승인을 거쳐 Provider를 교체한다.
-- 위험한 명령, 배포, 외부 쓰기는 사용자 승인을 받는다.
-
-기본 배정: Orchestrator=$orchestrator, Worker=$worker, Reviewer=$reviewer, Fallback=$fallback
-EOF
-
-  write_file "$target" "CLAUDE.md" <<'EOF'
-# Claude Code Entry
-
-`AGENTS.md`를 공통 정책으로 사용한다. 현재 역할에 맞는 `.agents/roles/*.agent.md`와 `.claude/skills/`의 Harness Skill을 읽는다. Herdr Pane 제어는 `HERDR_ENV=1`일 때만 수행한다.
-EOF
-
-  write_file "$target" "GEMINI.md" <<'EOF'
-# Antigravity Entry
-
-`AGENTS.md`를 공통 정책으로 사용한다. 현재 역할에 맞는 `.agents/roles/*.agent.md`와 `.agents/skills/`의 Harness Skill을 읽는다. Herdr Pane 제어는 `HERDR_ENV=1`일 때만 수행한다.
-EOF
+  write_file "$target" "AGENTS.md" <<<"$(_entry_doc_agents "$name" "$orchestrator" "$worker" "$reviewer" "$fallback")"
+  write_file "$target" "CLAUDE.md" <<<"$(_entry_doc_claude)"
+  write_file "$target" "GEMINI.md" <<<"$(_entry_doc_gemini)"
 
   write_file "$target" ".harness/project.yaml" <<EOF
 schema_version: '1.0'
@@ -1466,6 +1515,127 @@ EOF
 
   info "생성 완료: $target"
   info "다음 단계: cd '$target' && herdr-harness start ."
+}
+
+# ---------------------------------------------------------------------------
+# sync-templates — 기존 프로젝트를 지금 harness.sh 버전의 skill/role 템플릿과
+# 맞춘다. init은 신규 프로젝트 전용(대상이 비어 있지 않으면 die)이라, 그보다
+# 먼저 만들어진 프로젝트는 나중에 추가된 Agent Loop 절차(dispatch/observe/
+# transition/close-agent)를 skill 파일이 한 줄도 언급하지 않는 채로 영영
+# 남는다 — 실사례로 발견됐다(BACKLOG.md 항목 8). 이 명령이 그 gap을 메운다.
+#
+# Harness 소유 파일만 건드린다: .agents/skills/, .agents/roles/,
+# .claude/skills/ 심볼릭 링크. AGENTS.md/CLAUDE.md/GEMINI.md는 프로젝트가
+# 손으로 문구를 덧붙였을 수 있어(실제로 한 프로젝트가 그랬다) 자동 갱신하지
+# 않고 diff만 보여준다 — 병합은 사람이 판단한다.
+# ---------------------------------------------------------------------------
+
+cmd_sync_templates() {
+  local root_arg="." apply=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --apply) apply=1; shift ;;
+      --dry-run) apply=0; shift ;;
+      -h|--help)
+        printf '사용법: %s sync-templates [PATH] [--apply]\n' "$SCRIPT_NAME"
+        printf '기본은 미리보기(diff)만 한다. 실제로 파일을 갱신하려면 --apply를 준다.\n'
+        return 0
+        ;;
+      -*) die "알 수 없는 sync-templates 옵션: $1" ;;
+      *) root_arg="$1"; shift ;;
+    esac
+  done
+
+  local root
+  root="$(project_root "$root_arg")"
+  require_git_baseline "$root"
+
+  local name orchestrator worker reviewer fallback
+  name="$(project_field "$root" project name)"
+  orchestrator="$(project_field "$root" providers orchestrator)"
+  worker="$(project_field "$root" providers primary_worker)"
+  reviewer="$(project_field "$root" providers reviewer)"
+  fallback="$(awk -F'[][]' '/^  fallback_chain:/{print $2; exit}' "$root/.harness/project.yaml")"
+
+  SYNC_CHANGED=()
+  SYNC_UNCHANGED=()
+  SYNC_WOULD_CHANGE=()
+  HH_SYNC_MODE=1
+  if [[ "$apply" -eq 1 ]]; then
+    HH_SYNC_DRYRUN=0
+    info "적용 모드 — .agents/skills/, .agents/roles/, .claude/skills/ 심볼릭 링크를 현재 템플릿으로 갱신합니다."
+  else
+    HH_SYNC_DRYRUN=1
+    info "미리보기 모드(기본값) — 실제로 갱신하려면 --apply. 아래는 바뀌었을 내용이다."
+  fi
+
+  write_project_docs "$root" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback"
+
+  # .claude/skills/* 심볼릭 링크 — 없는 것만 만든다. 이미 있으면(정상 링크든,
+  # 사용자가 다른 곳을 가리키게 바꿔 놓은 것이든) 손대지 않는다.
+  local skill_dir skill_name link_path
+  mkdir -p "$root/.claude/skills"
+  for skill_dir in "$root"/.agents/skills/*; do
+    [[ -d "$skill_dir" ]] || continue
+    skill_name="$(basename "$skill_dir")"
+    link_path="$root/.claude/skills/$skill_name"
+    [[ -e "$link_path" || -L "$link_path" ]] && continue
+    if [[ "$apply" -eq 1 ]]; then
+      ln -s "../../.agents/skills/$skill_name" "$link_path"
+      SYNC_CHANGED+=(".claude/skills/$skill_name (신규 심볼릭 링크)")
+    else
+      printf '  (신규 심볼릭 링크) .claude/skills/%s\n' "$skill_name"
+      SYNC_WOULD_CHANGE+=(".claude/skills/$skill_name (신규 심볼릭 링크)")
+    fi
+  done
+
+  # AGENTS.md/CLAUDE.md/GEMINI.md — 참고용 diff만. 자동으로 쓰지 않는다.
+  printf '\n[참고용 — 자동 갱신 안 함] AGENTS.md / CLAUDE.md / GEMINI.md\n'
+  printf '이 세 파일은 프로젝트가 고유 규칙을 덧붙였을 수 있어 sync-templates가 건드리지 않는다.\n'
+  printf '아래에 diff가 보이면 최신 템플릿과 달라졌다는 뜻이니 필요한 부분만 손으로 병합한다.\n'
+  local entry_doc entry_generator
+  for entry_doc in AGENTS.md CLAUDE.md GEMINI.md; do
+    case "$entry_doc" in
+      AGENTS.md) entry_generator="_entry_doc_agents \"\$name\" \"\$orchestrator\" \"\$worker\" \"\$reviewer\" \"\$fallback\"" ;;
+      CLAUDE.md) entry_generator="_entry_doc_claude" ;;
+      GEMINI.md) entry_generator="_entry_doc_gemini" ;;
+    esac
+    local generated="$root/.harness/runtime/.sync-preview-$entry_doc"
+    mkdir -p "$root/.harness/runtime"
+    eval "$entry_generator" >"$generated"
+    if [[ ! -e "$root/$entry_doc" ]]; then
+      printf '  %s: 파일 없음 — sync-templates는 새로 만들지 않는다(직접 만들 것)\n' "$entry_doc"
+    elif cmp -s "$generated" "$root/$entry_doc"; then
+      printf '  %s: 최신 템플릿과 동일\n' "$entry_doc"
+    else
+      printf -- '  %s: 최신 템플릿과 다름 —\n' "$entry_doc"
+      # diff는 다르면 종료코드 1을 낸다 — set -e 아래서 `|| true` 없이 파이프에
+      # 물리면 여기서 스크립트 전체가 조용히 죽는다(요약 줄·이벤트 로그가
+      # 통째로 안 나오는 형태로 재현됨). 반드시 이 가드를 유지한다.
+      { diff -u "$root/$entry_doc" "$generated" | sed 's/^/    /'; } || true
+    fi
+    rm -f "$generated"
+  done
+
+  # dry-run에서는 SYNC_WOULD_CHANGE에, apply에서는 SYNC_CHANGED에 쌓인다 —
+  # 둘 다 아니라 SYNC_CHANGED만 세면 dry-run 요약이 항상 "변경 0"으로
+  # 거짓 보고된다(실제로 이 자리에서 그렇게 재현됐다).
+  local change_count
+  if [[ "$apply" -eq 1 ]]; then
+    change_count=${#SYNC_CHANGED[@]}
+  else
+    change_count=${#SYNC_WOULD_CHANGE[@]}
+  fi
+
+  printf '\n요약: 변경 %d · 동일 %d' "$change_count" "${#SYNC_UNCHANGED[@]}"
+  if [[ "$apply" -eq 1 ]]; then
+    printf '\n'
+  else
+    printf ' · 미리보기뿐이라 실제로는 안 바뀜(적용하려면 --apply)\n'
+  fi
+
+  append_event "$root" sync_templates "-" "" "" \
+    "mode=$([[ "$apply" -eq 1 ]] && echo apply || echo dry-run) changed=$change_count unchanged=${#SYNC_UNCHANGED[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -3224,6 +3394,45 @@ HARNESS_YAML_CHECK
   printf '%s' "$completion_script" | grep -q '^complete -F .* herdr-harness$' ||
     die "completion bash 출력에 complete 등록 줄이 없습니다."
 
+  # --- sync-templates: 기존 프로젝트를 최신 skill/role 템플릿과 재동기화 -----
+  local sync_out
+  sync_out="$(bash "$SELF_PATH" sync-templates "$test_project")"
+  printf '%s' "$sync_out" | grep -q '요약: 변경 0' ||
+    die "sync-templates: 방금 init한 프로젝트인데 dry-run이 변경 0이 아닙니다."
+
+  cat >"$test_project/.agents/skills/harness-orchestrate/SKILL.md" <<'EOF'
+---
+name: harness-orchestrate
+description: old stub (자체 테스트용 인위적 구버전)
+---
+old content
+EOF
+  printf '\n## 프로젝트 고유 규칙\ncustom rule appended\n' >>"$test_project/AGENTS.md"
+  cp "$test_project/.harness/STATE.md" "$test_root/state-before-sync.md"
+
+  sync_out="$(bash "$SELF_PATH" sync-templates "$test_project")"
+  printf '%s' "$sync_out" | grep -q '요약: 변경 1' ||
+    die "sync-templates: 구버전 skill 하나를 dry-run이 감지하지 못했습니다."
+  grep -q "old content" "$test_project/.agents/skills/harness-orchestrate/SKILL.md" ||
+    die "sync-templates: dry-run인데 실제로 파일을 갱신했습니다."
+
+  sync_out="$(bash "$SELF_PATH" sync-templates "$test_project" --apply)"
+  printf '%s' "$sync_out" | grep -q '요약: 변경 1' ||
+    die "sync-templates --apply: 변경 건수가 예상과 다릅니다."
+  if grep -q "old content" "$test_project/.agents/skills/harness-orchestrate/SKILL.md"; then
+    die "sync-templates --apply: 구버전 skill이 갱신되지 않았습니다."
+  fi
+  grep -q "herdr-harness dispatch" "$test_project/.agents/skills/harness-orchestrate/SKILL.md" ||
+    die "sync-templates --apply: 갱신된 skill에 최신 절차(dispatch)가 없습니다."
+  grep -q "custom rule appended" "$test_project/AGENTS.md" ||
+    die "sync-templates --apply: AGENTS.md의 프로젝트 고유 규칙이 사라졌습니다(자동 갱신하면 안 되는 파일입니다)."
+  cmp -s "$test_root/state-before-sync.md" "$test_project/.harness/STATE.md" ||
+    die "sync-templates --apply: 관련 없는 STATE.md가 바뀌었습니다(범위를 벗어났습니다)."
+
+  sync_out="$(bash "$SELF_PATH" sync-templates "$test_project" --apply)"
+  printf '%s' "$sync_out" | grep -q '요약: 변경 0' ||
+    die "sync-templates --apply: 같은 내용을 다시 적용했는데 멱등이 아닙니다."
+
   rm -rf -- "$test_root"
   trap - EXIT
 
@@ -3243,6 +3452,7 @@ HARNESS_YAML_CHECK
   printf 'PASS: Task Lock (동시 획득 거부/release/stale 회수)\n'
   printf 'PASS: quota-retry/auto-step opt-in 게이트\n'
   printf 'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출)\n'
+  printf 'PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범)\n'
 }
 
 cmd_completion() {
@@ -3272,7 +3482,7 @@ _herdr_harness_completions() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local subcommands="init start status doctor test uninstall validate transition dispatch observe close-agent quota-check quota-retry auto-step completion"
+  local subcommands="init sync-templates start status doctor test uninstall validate transition dispatch observe close-agent quota-check quota-retry auto-step completion"
 
   if (( COMP_CWORD == 1 )); then
     COMPREPLY=($(compgen -W "$subcommands" -- "$cur"))
@@ -3309,6 +3519,13 @@ _herdr_harness_completions() {
         :
       else
         COMPREPLY=($(compgen -W "--wave --no-git" -- "$cur"))
+      fi
+      ;;
+    sync-templates)
+      if (( COMP_CWORD == 2 )); then
+        COMPREPLY=($(compgen -d -- "$cur"))
+      else
+        COMPREPLY=($(compgen -W "--apply --dry-run" -- "$cur"))
       fi
       ;;
     transition)
@@ -3433,6 +3650,7 @@ main() {
   [[ $# -eq 0 ]] || shift
   case "$command" in
     init) cmd_init "$@" ;;
+    sync-templates) cmd_sync_templates "$@" ;;
     start) cmd_start "$@" ;;
     status) cmd_status "$@" ;;
     validate) cmd_validate "$@" ;;
