@@ -358,8 +358,12 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness observe PATH TASK_ID [worker\|reviewer]` | 기존 Agent를 재조회하고 Evidence에 추가 |
 | `herdr-harness close-agent PATH TASK_ID [worker\|reviewer] [--force]` | Harness runtime에 등록된 Pane만 정리 |
 | `herdr-harness status [PATH] --live [--json]` | 문서·Herdr·Git 실시간 상태 대조 |
+| `herdr-harness quota-check PATH TASK_ID worker\|reviewer` | 실행 중인 Agent의 쿼터 확인(claude·codex는 `/status` 전송, agy는 `--print "/usage"`) |
+| `herdr-harness quota-check PATH --provider agy` | Task 없이 agy 쿼터만 바로 확인 |
 
 `dispatch`는 재시도, 상태 전이, blocked 응답 또는 Provider failover를 수행하지 않습니다. Orchestrator는 반환된 `dispatch_result`를 확인한 뒤 사용자 승인 경계를 지키며 다음 스텝을 호출합니다.
+
+`quota-check`도 자동으로 아무것도 바꾸지 않습니다. claude·codex는 비대화형 조회 수단이 없어 실행 중인 Agent Pane에 `/status`를 보내고 그 출력에서 알려진 경고 문구("... N% of your weekly limit ..." 등)를 스캔합니다. agy는 `agy --print "/usage"`로 정확한 잔여 퍼센트를 바로 얻습니다. 판정 기준(`low`로 볼 임계값)은 `.harness/policies/quota-policy.yaml`의 `low_warning_threshold_pct`로 조정하며, `dispatch`·`observe`도 Agent 출력을 지나가는 김에 스캔해 Evidence에 참고용 경고를 남깁니다(`passive_scan_on_dispatch`).
 
 ## 생성되는 프로젝트 구조
 

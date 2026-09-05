@@ -115,6 +115,13 @@ Worker는 `completed`를 선언하지 않습니다. Reviewer는 품질 판정을
 
 Provider 교체는 실패가 확인된 경우에만 수행합니다.
 
+쿼터 확인은 `herdr-harness quota-check`로 능동적으로 할 수 있습니다 — claude·codex는
+실행 중인 Agent Pane에 `/status`를 보내 읽고, agy는 `agy --print "/usage"`로 바로
+조회합니다(둘 다 비파괴적 읽기). `dispatch`·`observe`도 Agent 출력에서 알려진 쿼터
+경고 문구를 지나가는 김에 스캔해 Evidence에 남깁니다. **어느 경로도 그 자체로는
+Provider를 바꾸지 않습니다** — 아래 확인된 실패 조건과 별개이며, 판단은 Orchestrator나
+사용자가 합니다.
+
 - Rate Limit 또는 Quota 오류
 - Agent 프로세스 종료
 - 반복 검증 실패

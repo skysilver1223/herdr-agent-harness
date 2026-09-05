@@ -23,6 +23,8 @@ Agent Loop 스텝 명령 (호출 1회 = 1스텝, 상주 루프 없음):
   $SCRIPT_NAME dispatch PATH TASK_ID ROLE         Agent 한 턴 실행
   $SCRIPT_NAME observe PATH TASK_ID [ROLE]        기존 Agent 재조회
   $SCRIPT_NAME close-agent PATH TASK_ID [ROLE]    Harness가 만든 Pane 정리
+  $SCRIPT_NAME quota-check PATH TASK_ID ROLE       실행 중인 Agent의 쿼터 확인(claude/codex는 /status, agy는 --print)
+  $SCRIPT_NAME quota-check PATH --provider agy    Task 없이 agy 쿼터만 바로 확인
 
 init 옵션:
   --name NAME                     프로젝트명
@@ -1324,6 +1326,23 @@ quota_policy:
   automatic_failover: false
   require_handover: true
   require_user_approval: true
+
+  # 능동 확인: `herdr-harness quota-check PATH TASK_ID ROLE`
+  # (claude/codex는 실행 중인 Agent에 /status를 보내 읽고, agy는
+  # `agy --print "/usage"`로 바로 조회한다 — Task 없이 확인하려면
+  # `quota-check PATH --provider agy`). 어느 경우에도 자동으로 Provider를
+  # 바꾸지 않는다 — 위 strategy: failure_only 원칙 그대로다.
+  #
+  # 수동 확인: `agy --print "/usage"` (agy), Agent Pane 안에서 `/status`
+  # 입력(claude, codex).
+  #
+  # 경보 임계값(quota-check가 low로 판정하는 기준). 이 값을 낮추면 더 여유
+  # 있을 때부터 low로 뜬다 — 코드가 아니라 여기서 조정한다.
+  low_warning_threshold_pct: 25
+
+  # dispatch/observe는 Agent 출력에서 알려진 쿼터 경고 문구를 지나가는 김에
+  # 스캔해 evidence에 "쿼터 신호(자동 감지)" 절로 남긴다(확정 아님, 참고용).
+  passive_scan_on_dispatch: true
 EOF
 
   write_file "$target" ".harness/profiles/generic.yaml" <<'EOF'
@@ -1927,6 +1946,23 @@ _runtime_has_secret() {
   LC_ALL=C grep -Eqi 'AKIA[0-9A-Z]{8,}|BEGIN[[:space:]]+(RSA |EC |OPENSSH )?PRIVATE KEY|password[[:space:]]*=|token[[:space:]]*=|api[_-]?key[[:space:]]*=' "$1"
 }
 
+# 쿼터 경고 신호 스캔. 자동으로 Provider를 바꾸지 않는다 — 확인만 하고 정보로
+# 남긴다(ARCHITECTURE.md §8 "Provider 교체는 실패가 확인된 경우에만"). 못 찾으면
+# 아무것도 출력하지 않는다: 감지 실패를 "쿼터 여유 있음"으로 착각하면 안 된다.
+_runtime_scan_quota_signal() {
+  local text="$1" pct
+  pct="$(printf '%s' "$text" | grep -Eio '[0-9]+% of your (weekly|daily|five.hour) limit' | grep -Eo '^[0-9]+' | sort -n | head -n 1)"
+  if [[ -n "$pct" ]]; then
+    printf '남은 한도 %s%% 부근 경고 문구 감지("...%s%% of your ... limit")' "$pct" "$pct"
+    return 0
+  fi
+  if printf '%s' "$text" | grep -Eqi 'usage limit reached|rate.?limit exceeded|quota.?exceeded|429 too many requests'; then
+    printf '쿼터·Rate Limit 소진 문구 감지'
+    return 0
+  fi
+  return 1
+}
+
 _runtime_next_attempt() {
   local root="$1" task_id="$2" path base number maximum=0
   shopt -s nullglob
@@ -2184,6 +2220,9 @@ cmd_dispatch() {
     result="$(_runtime_normalize_state "$get_status" "$get_output" "$prompt_status" "$prompt_output")"
   fi
 
+  local quota_signal
+  quota_signal="$(_runtime_scan_quota_signal "$prompt_output"$'\n'"$read_output" || true)"
+
   evidence_file="$root/.harness/evidence/$task_id-$role-attempt-$attempt.md"
   temporary="$(mktemp "$root/.harness/evidence/.capture.XXXXXX")"
   {
@@ -2196,6 +2235,9 @@ cmd_dispatch() {
     printf '\n## Agent state\n\n%s\n' "$get_output"
     printf '\n## Dispatch 명령 출력\n\n%s\n' "$prompt_output"
     printf '\n## Agent output\n\n%s\n' "$read_output"
+    if [[ -n "$quota_signal" ]]; then
+      printf '\n## 쿼터 신호(자동 감지 — 확정 아님)\n\n%s\n\n실패로 확정되지 않았으므로 이 신호만으로 Provider를 바꾸지 않는다. `herdr-harness quota-check`로 확인 후 판단한다.\n' "$quota_signal"
+    fi
   } >"$temporary"
   if _runtime_has_secret "$temporary"; then
     : >"$temporary"
@@ -2230,12 +2272,17 @@ cmd_observe() {
   read_status=$?
   set -e
   result="$(_runtime_normalize_state "$get_status" "$get_output" 0 "")"
+  local quota_signal
+  quota_signal="$(_runtime_scan_quota_signal "$read_output" || true)"
   evidence="$root/.harness/evidence/$task_id-$role-attempt-$attempt.md"
   addition="$(mktemp "$root/.harness/evidence/.observe.XXXXXX")"
   {
     printf '\n## Observation %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
     printf -- '- Result: %s\n- Pane ID: %s\n- Agent get exit: %s\n- Agent read exit: %s\n\n' "$result" "$pane_id" "$get_status" "$read_status"
     printf '### Agent state\n\n%s\n\n### Agent output\n\n%s\n' "$get_output" "$read_output"
+    if [[ -n "$quota_signal" ]]; then
+      printf '\n### 쿼터 신호(자동 감지 — 확정 아님)\n\n%s\n' "$quota_signal"
+    fi
   } >"$addition"
   _runtime_append_evidence "$evidence" "$addition"
   rm -f -- "$addition"
@@ -2291,6 +2338,116 @@ _runtime_state_tasks() {
       if (task != "Task" && task !~ /^-+$/ && task != "") print task "\t" status
     }
   ' "$state_file"
+}
+
+cmd_quota_check() {
+  # 능동 쿼터 확인. agy는 --print "/usage"로 바로 조회하지만 claude·codex는
+  # 비대화형 조회 수단이 없어 이미 떠 있는 Agent Pane에 "/status"를 보내 읽는다
+  # (그래서 claude·codex는 TASK_ID ROLE로 실행 중인 Agent를 지정해야 한다).
+  # 자동으로 아무것도 바꾸지 않는다 — 결과를 evidence에 남기고 판단은 사람 몫이다.
+  local path="${1:-}" task_id="" role="" provider="" root
+  [[ -n "$path" ]] || die "사용법: quota-check PATH TASK_ID ROLE(worker|reviewer) | quota-check PATH --provider PROVIDER"
+  shift
+  if [[ "${1:-}" == --provider ]]; then
+    [[ $# -ge 2 ]] || die "--provider 값이 필요합니다."
+    provider="$2"
+  else
+    task_id="${1:-}"; role="${2:-}"
+    [[ -n "$task_id" && -n "$role" ]] || die "사용법: quota-check PATH TASK_ID ROLE(worker|reviewer) | quota-check PATH --provider PROVIDER"
+    [[ "$role" == worker || "$role" == reviewer ]] || die "ROLE은 worker 또는 reviewer여야 합니다."
+    _runtime_require_id "$task_id"
+  fi
+  root="$(project_root "$path")"
+
+  if [[ -z "$provider" ]]; then
+    local task_file
+    task_file="$root/.harness/tasks/$task_id.yaml"
+    [[ -f "$task_file" ]] || die "Task YAML을 찾을 수 없습니다: $task_file"
+    if [[ "$role" == worker ]]; then
+      provider="$(_runtime_yaml_scalar "$task_file" primary_worker)"
+    else
+      provider="$(_runtime_yaml_scalar "$task_file" reviewer)"
+    fi
+  fi
+  [[ "$provider" =~ ^(claude|codex|agy)$ ]] || die "Provider가 유효하지 않습니다: $provider"
+
+  # low_warning_threshold_pct는 quota-policy.yaml이 정본이다 — 여기 상수를
+  # 못박지 않는다(설정과 코드가 따로 노는 함정을 피한다). 정책 파일이나 키가
+  # 없으면 25로 물러난다.
+  local low_threshold=25 policy_file
+  policy_file="$root/.harness/policies/quota-policy.yaml"
+  if [[ -f "$policy_file" ]]; then
+    local configured
+    configured="$(_runtime_yaml_scalar "$policy_file" low_warning_threshold_pct || true)"
+    [[ "$configured" =~ ^[0-9]+$ ]] && low_threshold="$configured"
+  fi
+
+  local output status status_word=unknown detail min_pct evidence_file addition
+  case "$provider" in
+    agy)
+      command -v agy >/dev/null 2>&1 || die "agy 명령을 찾을 수 없습니다."
+      set +e
+      output="$(agy --print "/usage" 2>&1)"
+      status=$?
+      set -e
+      if (( status == 0 )); then
+        # 탭 구분 표: <모델군> <지표명> <남은%> <초기화시각>. 세 번째 열의
+        # 최솟값을 대표값으로 쓰되, 전체 표는 evidence에 그대로 남긴다.
+        min_pct="$(printf '%s\n' "$output" | awk -F'\t' '
+          NF>=3 { v=$3; gsub(/%/,"",v); v=v+0; if (seen==0 || v<min) { min=v; seen=1 } }
+          END { if (seen==1) print min }
+        ')"
+        if [[ -n "$min_pct" ]]; then
+          detail="최소 남은 한도 ${min_pct}%(임계값 ${low_threshold}%, agy --print /usage 전체 내역은 evidence 참고)"
+          if (( min_pct < low_threshold )); then status_word=low; else status_word=ok; fi
+        else
+          detail="agy --print /usage 출력 형식을 해석하지 못했습니다(원문은 evidence 참고)"
+        fi
+      else
+        detail="agy --print /usage 호출 실패(exit $status)"
+      fi
+      ;;
+    claude|codex)
+      [[ -n "$task_id" ]] || die "claude/codex 쿼터 확인은 실행 중인 Task Agent가 필요합니다: quota-check PATH TASK_ID ROLE"
+      command -v herdr >/dev/null 2>&1 || die "herdr 명령을 찾을 수 없습니다."
+      [[ "${HERDR_ENV:-}" == 1 ]] || die "quota-check(claude/codex)는 Herdr Pane 안에서 실행해야 합니다."
+      local meta agent_name
+      meta="$root/.harness/runtime/$task_id-$role.meta"
+      [[ -f "$meta" ]] || die "Runtime 기록을 찾을 수 없습니다(먼저 dispatch로 Agent를 띄우세요): $meta"
+      agent_name="$(_runtime_meta_value "$meta" agent_name)"
+      [[ -n "$agent_name" ]] || die "Runtime 기록이 손상되었습니다: $meta"
+      set +e
+      herdr agent prompt "$agent_name" "/status" --wait --timeout 30000 >/dev/null 2>&1
+      output="$(herdr agent read "$agent_name" --source recent-unwrapped --lines 80 2>&1)"
+      status=$?
+      set -e
+      local scan
+      scan="$(_runtime_scan_quota_signal "$output" || true)"
+      if [[ -n "$scan" ]]; then
+        detail="$scan"
+        status_word=low
+      else
+        detail="/status 출력에서 알려진 경고 문구를 못 찾음 — 여유가 있거나 문구 형식이 다른 것일 수 있다(원문은 evidence 참고)"
+      fi
+      ;;
+  esac
+
+  if [[ -n "$task_id" ]]; then
+    evidence_file="$root/.harness/evidence/$task_id-$role-quota.md"
+  else
+    evidence_file="$root/.harness/evidence/quota-$provider.md"
+  fi
+  mkdir -p "$root/.harness/evidence"
+  addition="$(mktemp "$root/.harness/evidence/.quota.XXXXXX")"
+  {
+    printf '## 쿼터 확인 %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    printf -- '- Provider: %s\n- 판정: %s\n- 근거: %s\n\n' "$provider" "$status_word" "$detail"
+    printf '### 원문\n\n%s\n' "$output"
+  } >"$addition"
+  _runtime_append_evidence "$evidence_file" "$addition"
+  rm -f -- "$addition"
+
+  printf 'quota_check: provider=%s status=%s detail=%s\n' "$provider" "$status_word" "$detail"
 }
 
 _runtime_json_escape() {
@@ -2747,6 +2904,7 @@ main() {
     dispatch) cmd_dispatch "$@" ;;
     observe) cmd_observe "$@" ;;
     close-agent) cmd_close_agent "$@" ;;
+    quota-check) cmd_quota_check "$@" ;;
     doctor) cmd_doctor "$@" ;;
     test) cmd_test "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
