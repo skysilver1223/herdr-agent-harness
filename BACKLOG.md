@@ -192,10 +192,21 @@ Task Lock 미획득, `.harness/evidence/events.tsv` 이벤트 로그 없음,
 `.harness/attempts/*.md`·`.harness/reviews/*.md` 정식 기록 없음(Reviewer의
 전체 재현검증 내용은 Herdr pane을 닫는 순간 원본이 사라졌다) — 이 프로젝트가
 갖추려던 안전장치·감사 트레일이 통째로 빠진 채 한 Task 라운드가 완료·검수까지
-갔다. 대조군: Agent Loop 이후 `init`으로 만든 `harness-ui-audit` 프로젝트는
-`.harness/runtime/*.meta`·`.result`·`.closed`, `evidence/events.tsv`,
-`attempts/*.md`, `reviews/*.md`가 정상적으로 남아 있다 — 같은 `harness.sh`를
-쓰는 두 프로젝트가 생성 시점 버전 차이만으로 완전히 다르게 동작한 것이다.
+갔다. 대조군: `harness-ui-audit` 프로젝트는 `.harness/runtime/*.meta`·`.result`
+·`.closed`, `evidence/events.tsv`, `attempts/*.md`, `reviews/*.md`가 정상적으로
+남아 있다 — 그 프로젝트의 세션은 `dispatch`류를 실제로 썼다는 뜻이다.
+
+**정정(구현 뒤 재확인):** 위 "생성 시점 버전 차이" 설명은 확인 안 하고 쓴
+추정이었다 — 실측하니 틀렸다. `sync-templates`로 `harness-ui-audit`를 직접
+대조해보니 그 프로젝트의 skill 파일도 `harness-refactor`와 **똑같이** 20개
+전부 outdated였다(`harness-orchestrate/SKILL.md` 21줄짜리 구버전, 둘 다
+"migrate: ... 이관" 커밋으로 생성됨 — `init`을 직접 쓴 적이 없다). 즉 그
+프로젝트가 `dispatch`류를 쓴 건 skill 파일이 최신이라서가 아니라, 그 세션이
+`herdr-harness --help`를 스스로 찾아봤거나 사용자가 직접 알려줬기 때문일
+가능성이 높다 — 확인 안 된 채 남는다. **결론은 안 바뀐다**: skill 파일에
+`dispatch`가 안 적혀 있으면 몰라도 되는 게 아니라 몰라도 이상하지 않다는
+뜻이고, 그래서 `sync-templates`가 필요하다는 진단 자체는 유효하다. 다만
+"버전 차이가 원인"이라는 인과관계는 근거 없이 쓴 것이었으므로 정정한다.
 
 수정 위치 제안: `harness.sh`에 `sync-templates PATH`(가칭) 명령 추가.
 - Harness가 소유한 파일만 재생성한다: `.agents/skills/`, `.claude/skills/`,
