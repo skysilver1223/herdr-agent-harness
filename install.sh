@@ -68,6 +68,9 @@ case ":$PATH:" in
     ;;
 esac
 
+printf '\n탭 완성(Bash)을 쓰려면 다음 한 줄을 ~/.bashrc에 추가하세요.\n'
+printf 'source <(herdr-harness completion bash)\n'
+
 if [[ "$WITH_HERDR_SKILL" -eq 1 ]]; then
   if command -v npx >/dev/null 2>&1; then
     npx --yes skills add herdrdev/herdr --skill herdr -g || {

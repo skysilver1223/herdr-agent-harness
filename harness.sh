@@ -16,6 +16,7 @@ Herdr Agent/Skills Harness
   $SCRIPT_NAME doctor             설치 상태 확인
   $SCRIPT_NAME test               Agent 쿼터 없는 자체 테스트
   $SCRIPT_NAME uninstall [--yes]  설치된 Harness 명령 제거
+  $SCRIPT_NAME completion bash    Bash 탭 완성 스크립트 출력(설치: source <(herdr-harness completion bash))
 
 Agent Loop 스텝 명령 (호출 1회 = 1스텝, 상주 루프 없음):
   $SCRIPT_NAME validate [PATH] [--wave ID]        읽기 전용 사전 검증
@@ -2814,6 +2815,13 @@ HARNESS_YAML_CHECK
   expect_fail "close-agent 기록 없는 Task" \
     bash "$SELF_PATH" close-agent "$test_project" task-999
 
+  local completion_script
+  completion_script="$(bash "$SELF_PATH" completion bash)"
+  printf '%s' "$completion_script" | bash -n /dev/stdin ||
+    die "completion bash 출력이 유효한 Bash 문법이 아닙니다."
+  printf '%s' "$completion_script" | grep -q '^complete -F .* herdr-harness$' ||
+    die "completion bash 출력에 complete 등록 줄이 없습니다."
+
   rm -rf -- "$test_root"
   trap - EXIT
 
@@ -2829,6 +2837,118 @@ HARNESS_YAML_CHECK
   printf 'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)\n'
   printf 'PASS: 스텝 명령 인자 검증\n'
   printf 'PASS: Agent 호출 없음\n'
+  printf 'PASS: 탭 완성 스크립트 문법\n'
+}
+
+cmd_completion() {
+  local shell="${1:-}"
+  [[ "$shell" == bash ]] || die "사용법: completion bash  (지원 Shell은 현재 bash뿐입니다)"
+  cat <<'HARNESS_BASH_COMPLETION'
+# herdr-harness bash completion
+# 설치: ~/.bashrc에 다음 한 줄을 추가하세요.
+#   source <(herdr-harness completion bash)
+
+_herdr_harness_task_ids() {
+  local root="$1" cur="$2" dir f base ids=()
+  dir="$root/.harness/tasks"
+  [[ -d "$dir" ]] || return 0
+  for f in "$dir"/*.yaml; do
+    [[ -f "$f" ]] || continue
+    base="${f##*/}"; base="${base%.yaml}"
+    [[ "$base" == TEMPLATE ]] && continue
+    ids+=("$base")
+  done
+  COMPREPLY+=($(compgen -W "${ids[*]}" -- "$cur"))
+}
+
+_herdr_harness_completions() {
+  local cur prev cmd
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+  local subcommands="init start status doctor test uninstall validate transition dispatch observe close-agent quota-check completion"
+
+  if (( COMP_CWORD == 1 )); then
+    COMPREPLY=($(compgen -W "$subcommands" -- "$cur"))
+    return 0
+  fi
+
+  cmd="${COMP_WORDS[1]}"
+  case "$cmd" in
+    init)
+      case "$prev" in
+        --profile) COMPREPLY=($(compgen -W "generic python-timeseries network-device" -- "$cur")) ;;
+        --orchestrator|--worker|--reviewer) COMPREPLY=($(compgen -W "claude codex agy" -- "$cur")) ;;
+        --name|--goal|--fallback) ;;
+        *)
+          if (( COMP_CWORD == 2 )); then
+            COMPREPLY=($(compgen -d -- "$cur"))
+          else
+            COMPREPLY=($(compgen -W "--name --goal --profile --orchestrator --worker --reviewer --fallback" -- "$cur"))
+          fi
+          ;;
+      esac
+      ;;
+    start|status)
+      if (( COMP_CWORD == 2 )); then
+        COMPREPLY=($(compgen -d -- "$cur"))
+      else
+        COMPREPLY=($(compgen -W "--live --json" -- "$cur"))
+      fi
+      ;;
+    validate)
+      if (( COMP_CWORD == 2 )); then
+        COMPREPLY=($(compgen -d -- "$cur"))
+      elif [[ "$prev" == --wave ]]; then
+        :
+      else
+        COMPREPLY=($(compgen -W "--wave --no-git" -- "$cur"))
+      fi
+      ;;
+    transition)
+      if (( COMP_CWORD == 2 )); then
+        COMPREPLY=($(compgen -d -- "$cur"))
+      elif (( COMP_CWORD == 3 )); then
+        _herdr_harness_task_ids "${COMP_WORDS[2]}" "$cur"
+      elif (( COMP_CWORD == 4 )); then
+        COMPREPLY=($(compgen -W "draft ready active submitted blocked handover_required reviewing changes_requested awaiting_approval completed" -- "$cur"))
+      elif [[ "$prev" == --note ]]; then
+        :
+      else
+        COMPREPLY=($(compgen -W "--note" -- "$cur"))
+      fi
+      ;;
+    dispatch|observe|close-agent|quota-check)
+      if (( COMP_CWORD == 2 )); then
+        COMPREPLY=($(compgen -d -- "$cur"))
+      elif (( COMP_CWORD == 3 )) && [[ "$cmd" == quota-check && "$cur" == --* ]]; then
+        COMPREPLY=($(compgen -W "--provider" -- "$cur"))
+      elif [[ "$prev" == --provider ]]; then
+        COMPREPLY=($(compgen -W "claude codex agy" -- "$cur"))
+      elif (( COMP_CWORD == 3 )); then
+        _herdr_harness_task_ids "${COMP_WORDS[2]}" "$cur"
+      elif (( COMP_CWORD == 4 )); then
+        COMPREPLY=($(compgen -W "worker reviewer" -- "$cur"))
+      elif [[ "$cmd" == dispatch && "$prev" == --timeout ]]; then
+        :
+      elif [[ "$cmd" == dispatch ]]; then
+        COMPREPLY=($(compgen -W "--timeout" -- "$cur"))
+      elif [[ "$cmd" == close-agent ]]; then
+        COMPREPLY=($(compgen -W "--force" -- "$cur"))
+      fi
+      ;;
+    uninstall)
+      COMPREPLY=($(compgen -W "--yes" -- "$cur"))
+      ;;
+    completion)
+      COMPREPLY=($(compgen -W "bash" -- "$cur"))
+      ;;
+  esac
+}
+
+complete -F _herdr_harness_completions herdr-harness
+HARNESS_BASH_COMPLETION
 }
 
 cmd_uninstall() {
@@ -2905,6 +3025,7 @@ main() {
     observe) cmd_observe "$@" ;;
     close-agent) cmd_close_agent "$@" ;;
     quota-check) cmd_quota_check "$@" ;;
+    completion) cmd_completion "$@" ;;
     doctor) cmd_doctor "$@" ;;
     test) cmd_test "$@" ;;
     uninstall) cmd_uninstall "$@" ;;

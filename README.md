@@ -219,6 +219,25 @@ command -v herdr-harness
 /home/<사용자명>/.local/bin/herdr-harness
 ```
 
+### 8-1. 탭 완성 (선택)
+
+```bash
+grep -qxF 'source <(herdr-harness completion bash)' ~/.bashrc ||
+echo 'source <(herdr-harness completion bash)' >> ~/.bashrc
+
+source ~/.bashrc
+```
+
+확인:
+
+```bash
+herdr-harness <TAB><TAB>
+```
+
+서브커맨드뿐 아니라 `init --profile`·`--orchestrator` 등의 옵션 값, `transition`의
+Task ID·상태, `dispatch`·`quota-check`의 Task ID·`worker`/`reviewer`도 완성됩니다.
+Bash만 지원합니다.
+
 ### 9. 설치 진단
 
 ```bash
@@ -257,6 +276,7 @@ PASS: 이벤트 로그 기록
 PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
 PASS: 스텝 명령 인자 검증
 PASS: Agent 호출 없음
+PASS: 탭 완성 스크립트 문법
 ```
 
 이 테스트는 실제 Claude, Codex, AGY를 호출하지 않으므로 Agent 쿼터를 사용하지 않습니다.
