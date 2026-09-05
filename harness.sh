@@ -9,6 +9,7 @@ usage() {
 Herdr Agent/Skills Harness
 
 사용법:
+  $SCRIPT_NAME help | -h | --help  이 도움말 출력(인자 없이 실행해도 같다)
   $SCRIPT_NAME init PATH [옵션]   새 프로젝트 Harness 생성
   $SCRIPT_NAME start [PATH]       Herdr Session 시작
   $SCRIPT_NAME status [PATH]      현재 STATE.md 출력
