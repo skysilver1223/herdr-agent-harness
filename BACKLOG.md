@@ -137,6 +137,35 @@ SPEC이 200줄을 넘으면 Acceptance Criteria나 제약이 Worker·Reviewer에
 
 ---
 
+## 7. 2026-09-05 후속 — quota-retry/auto-step opt-in 예외 추가
+
+아래 "참고: 이번 작업에서 확정한 설계 원칙"의 "절대 만들지 않는 것"(자율 반복 루프,
+자동 Provider failover 연쇄 호출)에 대해 사용자 요청으로 위험을 먼저 검토했고,
+원칙 자체를 뒤집지 않는 범위에서 **opt-in·유한·되돌릴 수 있는 예외**만 추가했다.
+
+- 두 명령 모두 정책 파일(`quota-policy.yaml`의 `automatic_failover`,
+  `loop-policy.yaml`의 `enabled`)에서 명시적으로 켜야만 동작한다(기본 false).
+- `quota-retry`는 연속 저쿼터 확인(`low_confirm_count` + `cooldown_seconds`) 후
+  Provider를 fallback_chain의 다음 값으로 바꾸고 `handover_required`까지만
+  자동 전이한다. `ready` 재개는 여전히 사람이
+  `.harness/decisions/TASK_ID-failover-approval.md`에 `승인: yes`를 쓰고
+  직접 한다. Task당 1회 한정(flapping 방지).
+- `auto-step`은 정책 상한(`max_turns_ceiling`) 안에서만 도는 유한 배치다.
+  1턴째만 dispatch로 Pane을 만들고 이후 턴은 같은 Agent를 observe로만
+  재조회한다(반복 dispatch가 Pane을 고아로 만드는 문제를 피하기 위함).
+  `completed`·`reviewing`·`awaiting_approval`로 이어지는 코드 경로는 아예
+  없다 — 자체 테스트가 이걸 구조적으로 검증한다.
+- 두 명령 다 mkdir 기반 Task Lock(`.harness/runtime/TASK_ID.lock`)을 잡는다.
+  다만 이건 quota-retry/auto-step 두 자동화 경로끼리만 충돌을 막는 권고적
+  잠금이지, 사람이 수동으로 dispatch/transition을 실행하는 것까지 막는
+  SQLite Lease/Fencing Token(§13 선택적 고도화)은 아니다 — 남은 한계로
+  README.md·ARCHITECTURE.md §8.1·§8.2에 명시했다.
+
+검토·설계 세션: https://claude.ai/code/session_012SdWRBBfDUadCsZYbAPhNh
+커밋: `4386afb feat: quota-retry/auto-step opt-in 제약된 자동화 + Task Lock 추가`
+
+---
+
 ## 참고: 이번 작업에서 확정한 설계 원칙
 
 Codex는 처음 `run-wave` 자율 루프를 제안했고 AGY는 설계 철학(`unattended_execution: false`) 위반이라
