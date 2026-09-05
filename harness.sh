@@ -1824,6 +1824,7 @@ cmd_transition() {
   # --- 원자적 갱신 ---
   local temporary
   temporary="$(mktemp "$(dirname "$path")/.harness-transition.XXXXXX")"
+  trap "rm -f -- '$temporary'" RETURN
   awk -v to="$to_state" '
     !done_flag && index($0, "status:") == 1 { print "status: " to; done_flag = 1; next }
     { print }
@@ -1880,10 +1881,23 @@ _runtime_atomic_text() {
 
 _runtime_json_field() {
   local input="$1" field="$2" value=""
+  # herdr 호출은 전부 2>&1로 캡처한다. 경고 한 줄이 stderr에 섞여도 파싱이
+  # 죽지 않도록, 첫 '{'부터 마지막 '}'까지만 남기고 자른다(BACKLOG.md #3).
+  if [[ "$input" == *"{"* && "$input" == *"}"* ]]; then
+    input="${input#*\{}"
+    input="{${input}"
+    input="${input%\}*}"
+    input="${input}}"
+  fi
   if command -v jq >/dev/null 2>&1; then
     value="$(printf '%s' "$input" | jq -r ".. | objects | .$field? // empty" 2>/dev/null | head -n 1 || true)"
   else
-    value="$(printf '%s' "$input" | tr -d '\n' | sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1)"
+    # 앞쪽 탐욕적 .* 는 같은 키가 여러 번 나오면 마지막 값을 뽑는다(BACKLOG.md #2).
+    # grep -o 로 겹치지 않는 첫 매치만 취해 jq 경로(첫 값)와 결과를 맞춘다.
+    value="$(printf '%s' "$input" | tr -d '\n' \
+      | grep -o "\"$field\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
+      | head -n 1 \
+      | sed -n 's/.*:[[:space:]]*"\([^"]*\)"/\1/p')"
   fi
   printf '%s' "$value"
 }
@@ -1957,6 +1971,7 @@ _runtime_meta_value() {
 _runtime_append_evidence() {
   local evidence="$1" addition="$2" temporary
   temporary="$(mktemp "$(dirname "$evidence")/.evidence.XXXXXX")"
+  trap "rm -f -- '$temporary'" RETURN
   [[ ! -f "$evidence" ]] || cp -- "$evidence" "$temporary"
   cat -- "$addition" >>"$temporary"
   if _runtime_has_secret "$temporary"; then
@@ -1992,14 +2007,35 @@ _runtime_normalize_state() {
   esac
 }
 
+_runtime_spec_section() {
+  # init이 만드는 SPEC.md는 "## N. 제목" 형식의 고정 섹션 7개로 구성된다.
+  # 번호(N)로 매칭해 그 섹션을 다음 "## " 헤더 전까지 그대로 출력한다.
+  local file="$1" number="$2"
+  awk -v n="$number" '
+    $0 ~ "^## " n "\\." { printing=1 }
+    printing && /^## / && $0 !~ "^## " n "\\." { exit }
+    printing { print }
+  ' "$file"
+}
+
 _runtime_context_packet() {
   local root="$1" task_id="$2" role="$3" task_file="$4" destination="$5"
-  local temporary
+  local temporary spec_file
   temporary="$(mktemp "$root/.harness/runtime/.context.XXXXXX")"
+  trap "rm -f -- '$temporary'" RETURN
+  spec_file="$root/.harness/SPEC.md"
   {
     printf '# Context Packet: %s / %s\n\n' "$task_id" "$role"
     printf '## Specification excerpt\n\n'
-    sed -n '1,200p' "$root/.harness/SPEC.md"
+    if [[ -f "$spec_file" ]]; then
+      # 줄 수로 자르지 않는다(200줄을 넘으면 Acceptance Criteria·제약이 통째로
+      # 빠지던 결함 — BACKLOG.md #5). 실행에 필요한 절만 번호로 골라 전부 담는다.
+      local section_number
+      for section_number in 1 3 4 5 6; do
+        _runtime_spec_section "$spec_file" "$section_number"
+        printf '\n'
+      done
+    fi
     printf '\n## Task Contract\n\n'
     cat "$task_file"
     printf '\n## Write scope\n\n'
@@ -2096,7 +2132,8 @@ cmd_dispatch() {
   attempt="$(_runtime_next_attempt "$root" "$task_id")"
   started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
   baseline="$(git -C "$root" rev-parse HEAD 2>/dev/null || printf 'unborn')"
-  agent_name="hh-${task_id//[^A-Za-z0-9_-]/-}-${role:0:1}-$attempt"
+  local task_slug="${task_id,,}"
+  agent_name="hh-${task_slug//[^a-z0-9_-]/-}-${role:0:1}-$attempt"
   agent_name="${agent_name:0:32}"
   [[ "$agent_name" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "생성된 Agent 이름이 유효하지 않습니다: $agent_name"
 
@@ -2284,6 +2321,7 @@ cmd_status_live() {
   mkdir -p "$root/.harness/runtime"
   records_file="$(mktemp "$root/.harness/runtime/.status-records.XXXXXX")"
   pending_file="$(mktemp "$root/.harness/runtime/.status-pending.XXXXXX")"
+  trap "rm -f -- '$records_file' '$pending_file'" RETURN
 
   shopt -s nullglob
   for meta in "$root"/.harness/runtime/*.meta; do

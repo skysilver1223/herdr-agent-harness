@@ -4,6 +4,11 @@
 Claude(통합·상태머신), Codex(런타임), AGY(Skill·문서 → 독립 리뷰) 세 Pane으로 진행했고,
 아래 1~5는 AGY의 독립 리뷰에서 나온 것이다.
 
+**2026-09-05 — 1~6 전부 처리 완료.** 아래 각 항목에 처리 내역을 남겼다.
+`bash harness.sh test` 12개 PASS 재확인, 재현된 결함은 원래 재현 조건으로 다시
+돌려 수정을 확인했다(uppercase Task ID, jq 없는 환경의 첫 값 추출, 200줄 초과
+SPEC.md).
+
 진행 상황 요약 페이지: https://claude.ai/code/artifact/d705d3c2-0186-4083-aa13-c1b327511b76
 
 **재현 여부를 구분해 적었다. "재현됨"은 실제로 실행해 확인한 것이고, "미재현"은 리뷰 지적이지만
@@ -31,6 +36,10 @@ local task_slug="${task_id,,}"
 agent_name="hh-${task_slug//[^a-z0-9_-]/-}-${role:0:1}-$attempt"
 ```
 
+**처리 완료.** 위 코드 그대로 반영. `task_id=TASK-UP`으로 재현 조건을 다시 돌려
+`agent_name=hh-task-up-w-1`이 herdr 이름 규칙(`^[a-z][a-z0-9_-]{0,31}$`)을
+통과하는 것을 확인했다.
+
 ---
 
 ## 2. [MED · 재현됨] jq 없는 환경에서 greedy 정규식이 마지막 값을 뽑음
@@ -51,6 +60,11 @@ w1:p99          # jq 경로는 w1:p2
 수정 위치: `harness.sh` · `_runtime_json_field`의 sed 분기.
 앞쪽 `.*`를 `[^{]*` 등으로 제한하고 첫 줄만 취한다.
 
+**처리 완료.** `.*` greedy 매치 대신 `grep -o`로 겹치지 않는 첫 매치만 취하고
+그 조각에서만 값을 뽑도록 바꿨다(jq 경로와 동일하게 첫 값을 취한다). 재현
+입력(`{"pane":{"pane_id":"w1:p2"},"other":{"pane_id":"w1:p99"}}`)으로 다시
+돌려 `w1:p2`가 나오는 것을 확인했다.
+
 ---
 
 ## 3. [MED · 미재현] stderr 혼입 시 JSON 파싱 전면 실패
@@ -64,6 +78,11 @@ herdr 호출을 전부 `2>&1`로 캡처한다. CLI나 터미널 환경이 경고
 수정 위치: `harness.sh` · `_runtime_json_field` 및 herdr 호출부.
 파서에 넘기기 전 첫 `{`부터 마지막 `}`까지만 잘라낸다.
 
+**처리 완료.** 호출부 6곳을 각각 고치는 대신 `_runtime_json_field` 진입
+지점 한 곳에서 첫 `{`~마지막 `}`로 잘라내 모든 호출부가 자동으로 방어를
+받도록 했다. 여전히 미재현이라 회귀 재현은 못 했지만, 임의로 만든 stderr
+혼입 입력으로 트리밍 로직 자체는 확인했다.
+
 ---
 
 ## 4. [LOW] mktemp 임시 파일 trap cleanup 부재
@@ -75,6 +94,13 @@ herdr 호출을 전부 `2>&1`로 캡처한다. CLI나 터미널 환경이 경고
 수정 위치: `cmd_transition`, `cmd_status_live`, `_runtime_append_evidence`,
 `_runtime_context_packet`. 함수 진입 시 `trap 'rm -f ...' RETURN` 등록.
 
+**처리 완료(변형 적용).** `trap 'rm -f -- "$temporary"' RETURN`처럼 변수를
+홑따옴표로 지연 평가하면 함수가 실제로 반환하는 시점에 `local` 변수가 이미
+스코프를 벗어나 `set -u`가 `unbound variable`로 죽는다(자체 테스트로 실제
+재현됨). `trap "rm -f -- '$temporary'" RETURN`처럼 겹따옴표로 등록 시점에
+경로를 즉시 전개해 문제를 피했다. 4곳 전부 적용 후 `bash harness.sh test`
+12개 PASS(전이 14케이스 포함) 재확인.
+
 ---
 
 ## 5. [LOW] Context Packet의 SPEC 200줄 하드코딩 잘림
@@ -83,6 +109,13 @@ herdr 호출을 전부 `2>&1`로 캡처한다. CLI나 터미널 환경이 경고
 SPEC이 200줄을 넘으면 Acceptance Criteria나 제약이 Worker·Reviewer에게 전달되지 않는다.
 
 줄 수 자르기 대신 섹션 헤더 기반 발췌가 맞다.
+
+**처리 완료.** `_runtime_spec_section`을 추가해 `## N.` 헤더로 섹션을 찾아
+다음 헤더 전까지 통째로 뽑는다. Context Packet에는 실행에 필요한 절(1 핵심
+목표·3 기술 스택 및 제약·4 요구사항·5 Acceptance Criteria·6 제외 범위)을
+번호로 모두 담고, 체크리스트성 절(2 기존 자료 판단)과 승인 메타(7)는 뺐다.
+272줄짜리 SPEC.md로 재현해, 옛 방식(`1,200p`)이면 5·6번 섹션이 통째로
+잘려 나가던 것을 확인하고 새 방식이 둘 다 담는 것을 확인했다.
 
 ---
 
@@ -99,6 +132,8 @@ SPEC이 200줄을 넘으면 Acceptance Criteria나 제약이 Worker·Reviewer에
 - 생성물이 5종 → 20종 템플릿, 파일 116개
 
 섹션별 교체 계획은 아래 부록에 있다.
+
+**처리 완료.** 아래 부록 계획 그대로 README.md·ARCHITECTURE.md에 반영했다.
 
 ---
 

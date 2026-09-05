@@ -12,17 +12,20 @@ Interview → SPEC → Reference → Plan → Work → Verify → Review → Use
 
 무인 실행, 트랜잭션, 물리적 Sandbox를 의미하지는 않습니다.
 
+핵심 실행 원칙은 "Bash는 한 스텝, Agent가 루프"입니다. `harness.sh`는 호출 한 번에 검증, 상태 전이 또는 Agent 한 턴만 수행합니다. Orchestrator Agent가 그 결과와 사용자 응답을 해석해 다음 명령을 선택하며, 상주 루프·자동 failover·자동 완료 승인은 수행하지 않습니다.
+
 ## 2. 구성요소
 
 | 구성요소 | 책임 |
 |---|---|
 | Herdr | Workspace, Pane, Agent 프로세스와 상태 표시 |
+| `harness.sh` 스텝 명령 | 정적 검증, 상태 전이 강제, Agent 한 턴 실행, Evidence와 런타임 관측 |
 | `AGENTS.md` | Provider 공통 운영 정책 |
 | `CLAUDE.md`, `GEMINI.md` | Provider별 짧은 진입 지침 |
 | `.agents/roles/` | 역할·책임·금지사항 정본 |
 | `.agents/skills/` | 재사용 가능한 실행 절차 |
 | `.claude/skills/` | Claude가 공통 Skill을 읽기 위한 연결 |
-| `.harness/` | SPEC, 계획, 상태, Task, Evidence, Review, Handover |
+| `.harness/` | SPEC, Wave, Task, Attempt, Evidence, Review, Handover, Decision, Runtime 상태 |
 | 사용자 | SPEC, Wave, Failover, Integration, 완료 승인 |
 
 ## 3. 역할
@@ -77,6 +80,8 @@ stateDiagram-v2
 
 Worker는 `completed`를 선언하지 않습니다. Reviewer는 품질 판정을 기록하고 사용자가 완료를 승인합니다.
 
+상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`만 사용합니다. `submitted`에는 Attempt와 Evidence, `awaiting_approval`에는 `판정: APPROVED`인 Review, `completed`에는 `.harness/decisions/TASK-approval.md`의 `승인: yes`가 필요합니다.
+
 ## 6. Skills
 
 | Skill | 역할 |
@@ -95,16 +100,16 @@ Worker는 `completed`를 선언하지 않습니다. Reviewer는 품질 판정을
 
 ## 7. 실행 흐름
 
-1. `herdr-harness init`으로 새 프로젝트를 생성합니다.
-2. `herdr-harness start`로 Herdr Session을 시작합니다.
-3. Orchestrator가 기존 자료를 확인하고 SPEC을 작성합니다.
-4. 사용자가 SPEC을 승인합니다.
-5. Planner가 Milestone과 Task를 만듭니다.
-6. 사용자가 현재 Wave를 승인합니다.
-7. Primary Worker가 Task 하나를 수행합니다.
-8. Worker가 자체 검증과 Attempt를 기록합니다.
-9. 다른 Provider가 읽기 전용 Review를 수행합니다.
-10. 사용자가 Integration과 완료를 승인합니다.
+1. `init`이 프로젝트 파일과 Git 저장소를 만들고 가능한 경우 기준 commit을 생성합니다.
+2. Interview와 Plan 후 사용자가 SPEC과 Wave를 승인합니다.
+3. Orchestrator가 `validate [PATH] --wave ID`로 실행 전제를 검사합니다.
+4. `transition ... active` 후 `dispatch ... worker`로 Worker 한 턴만 실행합니다.
+5. `blocked`, `timeout`, `stalled`이면 `observe`로 상태를 재조회하고 Orchestrator가 사용자 질문, 대기 또는 중단을 결정합니다.
+6. Attempt와 Evidence가 준비되면 `transition ... submitted`, 이어서 `transition ... reviewing`을 수행합니다.
+7. `dispatch ... reviewer`로 다른 Provider의 읽기 전용 Review 한 턴을 실행합니다.
+8. Review 판정에 따라 `changes_requested` 또는 `awaiting_approval`로 전이합니다.
+9. 사용자가 승인 파일에 `승인: yes`를 기록한 뒤에만 `completed`로 전이합니다.
+10. 등록된 Agent는 `close-agent`, 전체 상태는 `status --live`로 정리·관측합니다.
 
 ## 8. 실패와 쿼터
 
@@ -125,15 +130,15 @@ Provider 교체는 실패가 확인된 경우에만 수행합니다.
 
 ## 9. Context Packet
 
-Fallback Worker와 Reviewer에게 전체 대화를 전달하지 않습니다.
+`dispatch`는 Worker와 Reviewer에게 전체 대화 대신 `.harness/runtime/TASK-context-ROLE.md` Context Packet을 한 번 전달합니다.
 
 - 승인된 SPEC 관련 부분
 - 현재 Task Contract
-- Reference Inventory 관련 항목
-- Git Diff
-- 검증 결과
-- Handover
+- write scope, 참조와 입력
+- Acceptance Criteria와 검증 방법
 - 다음 한 단계
+
+Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않고 해당 dispatch를 실패시킵니다.
 
 ## 10. 병렬 실행
 
@@ -174,23 +179,9 @@ Fallback Worker와 Reviewer에게 전체 대화를 전달하지 않습니다.
 
 ## 13. 향후 고도화
 
-현재 운영에서 실제 필요가 확인될 때만 추가합니다.
+현재 Harness는 이미 YAML/상태 검증, Evidence 기록, Secret 패턴 차단, 경로 충돌 검사와 Herdr Pane·Agent 스텝 실행을 제공합니다. 다음 기능은 실제 필요가 확인될 때만 별도 고도화합니다.
 
-### Level 1: Skill Helper Script
-
-- YAML 검사
-- 검증 로그 저장
-- Secret Pattern 검사
-- 경로 중복 검사
-
-### Level 2: Herdr CLI Wrapper
-
-- Pane 자동 생성
-- Agent 상태 확인
-- Context Packet 전달
-- 완료 알림
-
-### Level 3: 무인 Controller
+### 선택적 고도화
 
 - Event Log와 Replay
 - SQLite Lease와 Controller Epoch
@@ -201,4 +192,4 @@ Fallback Worker와 Reviewer에게 전체 대화를 전달하지 않습니다.
 - 자동 Failover
 - Container 또는 별도 OS 사용자 격리
 
-Controller는 현재 Harness의 필수 조건이 아니라 선택적 고도화입니다.
+상주 Controller와 자동 Failover는 현재 Harness의 범위가 아닙니다.

@@ -246,9 +246,16 @@ herdr-harness test
 
 ```text
 PASS: Bash 문법
-PASS: Harness 파일 생성
+PASS: Harness 파일 생성 (20종 템플릿)
 PASS: 공통 Skill과 Claude 연결
+PASS: 플레이스홀더 치환
+PASS: Git 기준선 생성
 PASS: 신규 프로젝트 보호
+PASS: 비대화형 명시적 실패
+PASS: 상태 전이표 강제 (14개 케이스)
+PASS: 이벤트 로그 기록
+PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
+PASS: 스텝 명령 인자 검증
 PASS: Agent 호출 없음
 ```
 
@@ -306,7 +313,7 @@ herdr-harness init ~/Projects/timeseries-inference \
 | 활성 Task | 최대 5개 |
 | 병렬 Worker | 최대 2개 |
 
-스크립트는 신규·빈 디렉터리에서만 작동하며 기존 파일을 덮어쓰지 않습니다.
+스크립트는 신규·빈 디렉터리에서만 작동하며 기존 파일을 덮어쓰지 않습니다. 생성 후 `git init`과 Harness 파일 staging을 자동 수행합니다. Git 사용자 이름과 이메일이 설정되어 있으면 기준 commit도 생성합니다. 설정이 없어 commit을 만들지 못한 경우 안내된 `git commit`을 완료해야 Task를 `active`로 전이할 수 있습니다.
 
 ## 운영 시작
 
@@ -333,7 +340,26 @@ SPEC 승인 전에는 구현하지 마.
 
 ```bash
 herdr-harness status ~/Projects/snmp-normalizer
+herdr-harness status ~/Projects/snmp-normalizer --live
+herdr-harness status ~/Projects/snmp-normalizer --live --json
 ```
+
+기본 상태 명령은 `STATE.md`를 출력합니다. `--live`는 문서 상태와 Herdr Agent, Git 상태를 함께 대조하여 `DRIFT`와 `ORPHAN`을 표시합니다. 상태를 자동 수정하지는 않습니다.
+
+## Agent Loop 스텝 명령
+
+Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니다. Bash 명령은 호출 한 번에 한 단계의 검증·실행·기록만 담당하고, Orchestrator Agent가 결과를 읽어 다음 단계를 선택합니다.
+
+| 명령 | 책임 |
+|---|---|
+| `herdr-harness validate [PATH] [--wave ID] [--no-git]` | Git 기준선, Task/Wave, Provider, 의존성, 실행 상한과 write scope를 읽기 전용 검증 |
+| `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제 |
+| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS]` | Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록 |
+| `herdr-harness observe PATH TASK_ID [worker\|reviewer]` | 기존 Agent를 재조회하고 Evidence에 추가 |
+| `herdr-harness close-agent PATH TASK_ID [worker\|reviewer] [--force]` | Harness runtime에 등록된 Pane만 정리 |
+| `herdr-harness status [PATH] --live [--json]` | 문서·Herdr·Git 실시간 상태 대조 |
+
+`dispatch`는 재시도, 상태 전이, blocked 응답 또는 Provider failover를 수행하지 않습니다. Orchestrator는 반환된 `dispatch_result`를 확인한 뒤 사용자 승인 경계를 지키며 다음 스텝을 호출합니다.
 
 ## 생성되는 프로젝트 구조
 
@@ -355,14 +381,22 @@ project/
     ├── policies/
     ├── profiles/
     ├── tasks/
+    ├── waves/
     ├── references/
+    ├── attempts/
     ├── evidence/
     ├── reviews/
-    └── handovers/
+    ├── handovers/
+    ├── decisions/
+    └── archive/
 ```
+
+`dispatch` 실행 시 Git 제외 영역인 `.harness/runtime/`이 추가로 생성됩니다.
 
 ## 운영 원칙
 
+- Bash는 한 스텝의 실행·검증·기록만 담당하고 Orchestrator Agent가 다음 스텝을 선택합니다.
+- 상태는 Task YAML을 직접 편집하지 않고 `herdr-harness transition`으로 전이합니다.
 - 하나의 Task는 하나의 목적만 가집니다.
 - Task당 쓰기 가능한 Primary Worker는 한 명입니다.
 - 기존 코드·데이터·문서·Dump를 먼저 조사합니다.
