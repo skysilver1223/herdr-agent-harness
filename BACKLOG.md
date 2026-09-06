@@ -471,6 +471,31 @@ caveat) 여부는 감량 SPEC에서 확정. 9-6-1(제거 스킬 마이그레이�
 `HARNESS_START.md`·`ARCHITECTURE.md §1·§6·§7`·`README.md` 갱신. `bash harness.sh
 test` 18 PASS, `init` 샘플 생성·`validate` 통과 확인.
 
+### 9-12. harness.sh 로직부 lib/ 분할 (2026-09-06, 브랜치 `fix/drift-9-3`)
+
+9-5에서 A안(템플릿 추출만)을 골랐지만 이후 사용자가 로직부도 기능 단위로
+쪼개길 원해 **런타임 source 방식**으로 진행했다(9-5 B안의 concat 빌드는 아님).
+`install.sh`가 이미 `templates/`를 복사하므로 `lib/` 추가 복사는 대칭이라
+"설치가 다중 파일이 된다"는 원래 반대 근거가 약해졌다.
+
+- `harness.sh` 2,789줄 → **27줄 런처**. `readlink -f`로 실제 위치를 풀어
+  `$HARNESS_LIB_DIR/*.sh`(파일명 숫자 접두사 순)를 source하고 `main "$@"` 호출.
+  `HARNESS_LIB_DIR`·`HARNESS_TEMPLATE_DIR` 환경변수로 override 가능.
+- `lib/` 13개 (평균 ~200줄): `10-lib` / `20-generate` / `30-yaml` / `35-git` /
+  `40-transition` / `50-runtime` / `55-dispatch` / `60-automation` / `70-status` /
+  `80-selftest` / `85-completion` / `90-uninstall` / `99-main`.
+- **회귀 검증**: `header(1-13) + lib/*.sh(주석 헤더 제거) + 'main "$@"'`를 이어붙이면
+  분할 전 `harness.sh`와 byte-identical(diff 0). 분할 전/후 `init` 산출물도
+  자기 경로 한 줄 외 동일.
+- `install.sh`: `lib/` 존재 확인 + 각 `lib/*.sh` `bash -n` + `cp -R lib/`.
+  uninstall 두 경로 모두 `lib/` 제거.
+- `cmd_test`: 모든 `lib/*.sh` `bash -n` 추가, auto-step/quota-retry 안전 불변식
+  스캔 대상을 `$SELF_PATH` → `$HARNESS_LIB_DIR/60-automation.sh`로 변경.
+- 샌드박스 install → 심볼릭 링크 실행 → `validate` → `test`(18 PASS) → uninstall 통과.
+
+빌드 스텝·CI diff 검사·생성물 커밋 없음. 잃는 것: `curl .../harness.sh` 단일 파일
+배포 여지(README는 git clone이라 무관).
+
 ---
 
 ## 참고: 이번 작업에서 확정한 설계 원칙

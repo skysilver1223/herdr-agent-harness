@@ -2,17 +2,18 @@
 
 Claude, Codex, AGY를 Herdr에서 역할과 Skill 기반으로 운영하기 위한 Ubuntu·WSL용 프로젝트 생성 도구입니다.
 
-저장소에서 사용자가 다룰 파일은 네 개입니다.
+저장소 구성:
 
 ```text
 install.sh       # 최초 설치
-harness.sh       # 생성·실행·상태·진단·테스트
+harness.sh       # 얇은 런처 — lib/*.sh 를 source하고 main 호출
+lib/             # 기능 단위로 나뉜 실제 로직 (10-lib, 20-generate, 40-transition, 50-runtime, …)
 templates/       # init·sync-templates가 프로젝트로 복사하는 skill·role·정책 템플릿 정본
 README.md        # 사용법
 ARCHITECTURE.md  # 운영 구조
 ```
 
-`harness.sh`는 `templates/`에서 파일을 읽어 `@@…@@` 플레이스홀더만 치환해 프로젝트로 복사합니다. `install.sh`가 `harness.sh`와 함께 `templates/`를 `~/.local/share/herdr-agent-harness/`로 복사합니다.
+`harness.sh`는 자기 옆 `lib/*.sh`(파일명 숫자 접두사 순서)를 source하고, 프로젝트 생성 시 `templates/`에서 파일을 읽어 `@@…@@` 플레이스홀더만 치환해 복사합니다. `install.sh`가 `harness.sh`와 함께 `lib/`·`templates/`를 `~/.local/share/herdr-agent-harness/`로 복사합니다. 로직을 고칠 때는 해당 `lib/*.sh`를 편집하면 되고(빌드 스텝 없음), `HARNESS_LIB_DIR`·`HARNESS_TEMPLATE_DIR` 환경변수로 위치를 덮어쓸 수 있습니다.
 
 `LICENSE`는 공개 배포를 위한 기존 MIT 라이선스입니다.
 
@@ -484,6 +485,7 @@ cd ~/herdr-agent-harness
 ```text
 ~/.local/bin/herdr-harness
 ~/.local/share/herdr-agent-harness/harness.sh
+~/.local/share/herdr-agent-harness/lib/
 ~/.local/share/herdr-agent-harness/templates/
 ```
 
