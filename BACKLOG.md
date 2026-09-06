@@ -239,13 +239,49 @@ AGENTS.md에 실제 차이가 있을 때만 스크립트 전체가 조용히 죽
 
 ---
 
-## 9. [검토 · 미착수] 구성 과잉 검토 — 3자 리뷰 결과와 감량안
+## 9. [완료] 구성 과잉 검토 — 3자 리뷰 결과와 감량
 
 **2026-09-06.** "스킬·명령을 너무 많이 넣으면 모델 성능이 저하된다"는 우려로
 Claude·AGY·Codex 3자가 저장소를 교차 검토했다. Codex는 `bash harness.sh test`와
 `init` 샘플 생성을 실제로 돌려 확인했다.
 
 검토 세션: https://claude.ai/code/session_01RJKTEvVpFVde4RKM9qXLaX
+
+---
+
+### 9-★ 최종 완료 상태 (2026-09-06)
+
+전체 감량이 **PR #2로 `main`에 머지 완료**(`d18acf9`). 브랜치 `fix/drift-9-3`
+삭제. 커밋 4개, 아래 세부 절(9-9~9-12)에 각각 처리 내역.
+
+| # | 항목 | 결과 | 커밋 |
+|---|---|---|---|
+| 9-3 | 드리프트 3건 (quota-retry handover 누락 / 검토항목 7↔8 / 템플릿 종수) | `cmd_transition`에 `handover_required` 게이트 + quota-retry stub 자동생성, "8대"로 정합, "21종/16개"로 정합 | `47e55f5` |
+| 9-5 A | 템플릿 heredoc → `templates/**` 실제 파일 | `emit_doc`이 파일 읽어 `@@…@@` 치환. 회귀: 산출물 byte-identical | `dd841f7` |
+| 9-4 | 스킬 **9 → 6**, 8섹션 → 4섹션 | interview+reference→`harness-spec`, verify→`harness-work`, status 삭제. 스킬 595줄→201줄 | `8501993` |
+| 9-2 | Context Packet 내부 중복 제거 | Task YAML 재추출 3블록 삭제, 미사용 `_runtime_yaml_block` 제거 | `8501993` |
+| 9-12 | `harness.sh` 로직부 → `lib/*.sh` 13개 분할 (런타임 source) | `harness.sh` 2,789줄 → 27줄 런처. 회귀: 이어붙이면 분할 전과 byte-identical | `6ee5f40` |
+| 마이그레이션 | `sync-templates`에 통합·삭제 스킬 정리(제거 + 매핑 안내) | `--apply` 시 옛 스킬 dir·링크 제거하고 매핑표 출력 | `8501993` |
+
+**최종 형태**
+- `harness.sh` 27줄 런처 + `lib/` 13개(평균 ~200줄) + `templates/` 21개 파일
+- 생성 프로젝트: 스킬 6개(spec/plan/orchestrate/work/review/handover), 각 4섹션
+- `bash harness.sh test` 18 PASS, 샌드박스 install→실행→validate→test→uninstall 통과
+
+**기존 프로젝트 적용 완료**
+- `002.tube_index/harness-refactor` → 커밋 `ad2fee3` (9스킬 → 6스킬, validate 통과)
+- `002.tube_index/harness-ui-audit` → 커밋 `62cd9ad` (동일). 진행 중이던
+  `task-overview-cross-domain`(CHANGES_REQUESTED)은 불변
+- `lib/` 분할은 `templates/`를 안 건드리므로 두 프로젝트 재sync 불필요(dry-run 변경 0)
+
+**안 한 것 (결정에 따름)**
+- 9-5 B안(`src/*.sh` concat 빌드) — 런타임 source로 대체(9-12). `install.sh`가 이미
+  `templates/`를 복사하므로 `lib/` 추가는 대칭이라 빌드 스텝 불필요
+- `curl .../harness.sh` 단일 파일 배포 여지는 포기(README는 git clone)
+
+아래 9-0 ~ 9-12는 검토 당시 원본 기록이며 진단 근거로 보존한다.
+
+---
 
 ### 9-0. 결론
 
