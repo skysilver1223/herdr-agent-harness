@@ -463,24 +463,27 @@ compatibility: Herdr pane, Git repository, project-local .harness directory
 1. `AGENTS.md`
 2. `.agents/roles/worker.agent.md`
 3. 현재 대상 Task 계약 파일 (`.harness/tasks/task-*.yaml`)
-4. `.harness/SPEC.md`
-5. `.harness/references/inventory.md`
-6. 이전 Attempt가 있을 경우 최신 Attempt 및 Review 파일
+4. 해당 Task의 Intent 문서 (`.harness/intents/task-*-intent.md`) — Why/What/Not/Constraints/Invariants/Open Questions 정본
+5. `.harness/SPEC.md`
+6. `.harness/references/inventory.md`
+7. 이전 Attempt가 있을 경우 최신 Attempt 및 Review 파일
 
 ## 3. 절차
 1. Task YAML의 `objective`, `target_files`, `write_scope`, `acceptance_criteria`를 정독한다.
-2. 구현 전 `git status`로 현재 기준선을 확인한다.
-3. `write_scope`에 지정된 파일 및 경로 내에서만 코드를 작성하거나 수정한다. 허용되지 않은 파일(설정, 다른 모듈, 정책 문서)은 절대 수정하지 않는다.
-4. `acceptance_criteria`의 각 항목에 연결된 검증 명령(`verified_by`)을 실행하여 자가 검증을 수행한다 (`harness-verify` 참조).
-5. 기존 테스트 및 회귀 테스트를 실행하여 부작용이 없음을 확인한다.
-6. `.harness/attempts/task-XXX-attempt-N.md` 파일을 작성한다 (N은 001부터 순차 증가).
+2. Intent 문서의 `Not`·`Constraints`·`Invariants`를 정독한다. `Open Questions / Decision Gates`에 미해소 항목이 있으면 구현을 시작하지 않고 즉시 Orchestrator에게 알린다.
+3. 구현 전 `git status`로 현재 기준선을 확인한다.
+4. `write_scope`에 지정된 파일 및 경로 내에서만 코드를 작성하거나 수정한다. 허용되지 않은 파일(설정, 다른 모듈, 정책 문서)은 절대 수정하지 않는다. `write_scope`에 포함되어 있어도 Intent의 `Not`에 명시된 범위는 침범하지 않는다.
+5. `acceptance_criteria`의 각 항목에 연결된 검증 명령(`verified_by`)을 실행하여 자가 검증을 수행한다 (`harness-verify` 참조).
+6. 기존 테스트 및 회귀 테스트를 실행하여 부작용이 없음을 확인한다.
+7. `.harness/attempts/task-XXX-attempt-N.md` 파일을 작성한다 (N은 001부터 순차 증가).
    - 작업 변경 요약
    - 수정한 파일 목록 및 `git diff --stat`
    - 자체 검증 명령, 실행 결과, 종료 코드
-   - Reviewer를 위한 중점 검토 포인트
-7. 구현 및 문서 작성이 완료되면 `submitted` 상태로의 전이를 요청한다.
+   - Reviewer를 위한 중점 검토 포인트 (Intent의 Not/Invariants 대비 확인 포인트 포함)
+8. 구현 및 문서 작성이 완료되면 `submitted` 상태로의 전이를 요청한다.
 
 ## 4. 중단·승인 요청 조건
+- Intent 문서의 `Not`·`Constraints`가 Task YAML의 지시와 상충하거나, `Open Questions / Decision Gates`가 미해소 상태이면 구현을 시작하지 않고 즉시 중단한다.
 - `write_scope` 외부 파일 수정이 불가피한 경우 작업을 중단하고 Orchestrator에게 계약 수정을 요청한다.
 - 외부 API 키, 인증 정보 등 시크릿이 필요하거나 모호한 정책 판단이 필요한 경우 즉시 작업을 멈추고 `blocked` 상태를 알린다.
 - 동일 원인으로 검증이 3회 이상 실패하거나 쿼터 소진 징후가 보이면 `harness-handover`를 호출하고 작업을 중단한다.
@@ -499,8 +502,8 @@ compatibility: Herdr pane, Git repository, project-local .harness directory
 - 차단사유: 없음 (차단 시 blocked 사유 및 필요 자원 명시)
 
 ## 7. 사후조건 체크리스트
+- [ ] Intent 문서의 `Not`에 명시된 범위를 침범하지 않았는가?
 - [ ] write_scope 외부의 파일이 수정되지 않았는가 (`git status` 확인)?
-- [ ] acceptance_criteria의 모든 검증 명령이 성공(exit code 0)하였는가?
 - [ ] Attempt 문서에 diff stat과 검증 결과가 충실히 기록되었는가?
 - [ ] 완료 보고 시 completed가 아닌 submitted를 제안하였는가?
 
@@ -589,22 +592,24 @@ Primary Worker와 독립된 제3의 Provider 관점에서 코드 변경사항(Di
 2. `.agents/roles/reviewer.agent.md`
 3. `.harness/policies/review-policy.yaml`
 4. 현재 대상 Task YAML (`.harness/tasks/task-*.yaml`)
-5. 최신 Attempt 문서 (`.harness/attempts/task-XXX-attempt-N.md`)
-6. 최신 Evidence 문서 (`.harness/evidence/task-XXX-evidence-N.md`)
-7. `git diff` 결과
+5. 해당 Task의 Intent 문서 (`.harness/intents/task-*-intent.md`) — Not/Constraints/Invariants/Verification Intent 정본
+6. 최신 Attempt 문서 (`.harness/attempts/task-XXX-attempt-N.md`)
+7. 최신 Evidence 문서 (`.harness/evidence/task-XXX-evidence-N.md`)
+8. `git diff` 결과
 
 ## 3. 절차
 1. 독립성 확인: 자신이 Worker와 동일한 Provider인지 확인하고, 동일할 경우 즉시 검토를 거부하고 보고한다.
 2. 읽기 전용 원칙 준수: 소스코드나 설정 파일을 절대 직접 수정하지 않는다.
 3. `git diff`를 정밀 검토하여 변경 내용이 Task의 `write_scope` 내에 한정되어 있는지 검사한다.
-4. `review-policy.yaml`에 정의된 7대 집중 검토 항목을 순서대로 채점한다.
-   - `requirement_coverage`: 요구사항과 Acceptance Criteria를 빠짐없이 만족하는가?
+4. `review-policy.yaml`에 정의된 8대 집중 검토 항목을 순서대로 채점한다.
+   - `requirement_coverage`: 요구사항과 Acceptance Criteria를 빠짐없이 만족하는가? Intent의 `Verification Intent`와 실제 AC 목록이 어긋나지 않는가?
    - `correctness`: 논리적 오류, 엣지 케이스 처리, 예외 처리가 올바른가?
    - `regression_risk`: 기존 기능이나 타 모듈을 파괴할 잠재적 위험이 없는가?
    - `security_and_secrets`: 하드코딩된 Secret, 주입 공격, 안전하지 않은 권한이 없는가?
    - `maintainability`: 가독성, 코딩 컨벤션, 모듈화 수준이 적절한가?
    - `verification_quality`: 자체 검증(Evidence)이 실질적이고 신뢰할 수 있는가?
    - `documentation_and_handover`: 변경 설명과 주석이 명확한가?
+   - `intent_alignment`: 구현이 Intent 문서의 `Not`을 침범하지 않았는가? `Invariants`가 유지됐는가?
 5. `.harness/reviews/TEMPLATE.md` 규격에 맞춰 `.harness/reviews/task-XXX-review-N.md`를 작성한다.
    - 최종 판정은 오직 `APPROVED` 또는 `CHANGES_REQUESTED` 중 하나만 기록한다.
    - 잔여 리스크와 구체적인 수정 요구사항을 명시한다.
@@ -612,7 +617,7 @@ Primary Worker와 독립된 제3의 Provider 관점에서 코드 변경사항(Di
 
 ## 4. 중단·승인 요청 조건
 - 소스코드 수정이 필요하다고 해서 Reviewer가 직접 코드를 고치는 행위는 절대 금지되며, 발견 시 즉시 작업을 중단해야 한다.
-- 심각한 보안 결함이나 회귀 위험이 1건이라도 발견되면 즉시 `CHANGES_REQUESTED` 판정을 내리고 구체적 수정 지침을 기술한다.
+- `review-policy.yaml`의 `immediate_rejection`에 해당하는 사안(Intent `Not` 위반, 심각한 보안 결함)이 1건이라도 발견되면 다른 항목 판정과 무관하게 즉시 `CHANGES_REQUESTED` 판정을 내리고 구체적 수정 지침을 기술한다.
 
 ## 5. 산출물
 - `.harness/reviews/task-XXX-review-N.md`: 정형 검토 보고서 정본
@@ -621,14 +626,15 @@ Primary Worker와 독립된 제3의 Provider 관점에서 코드 변경사항(Di
 작업 종료 시 사용자 및 Orchestrator에게 반드시 다음 형식의 단일 보고 블록을 제출한다.
 - 결과상태: SUCCESS (검토 완료) 또는 BLOCKED (동일 Provider 배정 등으로 검토 불가)
 - 산출물경로: .harness/reviews/task-XXX-review-N.md
-- 검증결과: 판정 (APPROVED 또는 CHANGES_REQUESTED) 및 7대 항목 요약
+- 검증결과: 판정 (APPROVED 또는 CHANGES_REQUESTED) 및 8대 항목 요약
 - 차단사유: 없음 (독립성 위반 시 사유 명시)
 
 ## 7. 사후조건 체크리스트
 - [ ] Worker와 Reviewer의 Provider가 실제로 다른가?
 - [ ] 소스코드가 단 한 글자도 수정되지 않았는가 (`git status` 깨끗함)?
 - [ ] 최종 판정이 APPROVED 또는 CHANGES_REQUESTED 로 명시되었는가?
-- [ ] 7대 검토 항목별 평가가 빠짐없이 기록되었는가?
+- [ ] 8대 검토 항목별 평가가 빠짐없이 기록되었는가? (`intent_alignment` 포함)
+- [ ] Intent의 `Not` 위반 여부를 명시적으로 확인했는가?
 
 ## 8. 멱등성 규칙
 - 동일 Task에 대한 재검토 시 기존 Review 문서를 덮어쓰지 않고 일련번호(review-002 등)를 증가시킨다.
@@ -987,11 +993,12 @@ HARNESS_DOC_EOF
 
 ## 2. 검토한 산출물 목록 (Reviewed Artifacts)
 - [ ] Task Contract: `.harness/tasks/{{TASK_ID}}.yaml`
+- [ ] Intent 문서: `.harness/intents/{{TASK_ID}}-intent.md`
 - [ ] Attempt 문서: `.harness/attempts/{{TASK_ID}}-attempt-{{ATTEMPT_NUMBER}}.md`
 - [ ] Evidence 문서: `.harness/evidence/{{TASK_ID}}-evidence-{{ATTEMPT_NUMBER}}.md`
 - [ ] Git Diff 변경분
 
-## 3. 7대 정책 기준 검토 (Review Focus Checklist)
+## 3. 8대 정책 기준 검토 (Review Focus Checklist)
 
 ### 1) requirement_coverage (요구사항 및 기준 충족도)
 - 판정: PASS / FAIL / NA
@@ -1020,6 +1027,11 @@ HARNESS_DOC_EOF
 ### 7) documentation_and_handover (문서화 및 인계 품질)
 - 판정: PASS / FAIL / NA
 - 상세 의견:
+
+### 8) intent_alignment (Intent 문서 Not/Invariants 대조)
+- 판정: PASS / FAIL / NA
+- 상세 의견:
+- Not 위반 발견 시 다른 항목 판정과 무관하게 최종 판정은 CHANGES_REQUESTED (`review-policy.yaml` immediate_rejection)
 
 ## 4. 잔여 리스크 (Remaining Risks)
 - 배포 또는 병합 전 주의해야 할 잠재적 리스크:
@@ -1131,6 +1143,154 @@ Task: task-000
 - [ ] 잔여 리스크 수용 가능
 
 `승인: yes` 로 바꾸기 전에는 `herdr-harness transition ... completed` 가 거부된다.
+HARNESS_DOC_EOF
+
+  emit_doc "$root" ".harness/intents/TEMPLATE.md" <<'HARNESS_DOC_EOF'
+# Intent: {{TASK_ID}}
+
+## 메타데이터
+- Task ID: {{TASK_ID}}
+- 작성 시각: {{TIMESTAMP}}
+- 작성자: {{AUTHOR}}
+- 연결 Task Contract: `.harness/tasks/{{TASK_ID}}.yaml`
+
+## Why
+[이 Task가 지금 필요한 이유 — 사업/운영 동기. SPEC.md·BOARD.md·사용자 결정 등 근거를 인용한다]
+
+## What
+[산출물 요약 — Task YAML의 target_files/write_scope와 1:1 대응하는 산문 설명]
+
+## Not
+[명시적 제외 — 이 Task가 절대 건드리지 않는 것. "안 정해서 못 함"이 아니라 "정해서 안 함"을 적는다]
+
+## Constraints
+[이 Task에 실제로 적용되는 정책 포인터 — AGENTS.md·CLAUDE.md·REVIEW_RULES.md의 해당 조항을 인용/링크한다. 전문을 복사하지 않는다]
+
+## Invariants
+[구현 전후로 절대 깨지면 안 되는 성질 — 예: "판별력이 리팩터링 전보다 떨어지면 안 된다", "결측을 0으로 채우지 않는다"]
+
+## Open Questions / Decision Gates
+[착수를 막는 미결정 사항 목록. 각 항목은 해소 시 `.harness/decisions/{{TASK_ID}}-decisions-NN.md`로 연결한다]
+
+- [ ] {{질문 1}} — 해소 시 참조: `.harness/decisions/...`
+- [ ] {{질문 2}} — 해소 시 참조: `.harness/decisions/...`
+
+> 이 목록이 모두 체크되기 전에는 Task 상태를 `ready`로 전환하지 않는다.
+> Acceptance Criteria에 착수 게이트를 다시 적지 않는다 — 게이트는 여기서만 관리한다.
+
+## Verification Intent
+[Task YAML의 acceptance_criteria가 왜 충분한지에 대한 근거. Reviewer는 실제 AC 목록이 이 의도와 어긋나지 않는지 대조한다]
+
+## 이 문서의 역할
+이 Task의 Why/What/Not/Constraints/Invariants/착수 게이트 정본은 이 파일이다.
+Task YAML의 `objective`·`acceptance_criteria`는 검증 가능한 목적과 기준만 담고,
+착수 조건·제외 범위·불변식 판단은 이 문서를 참조한다.
+HARNESS_DOC_EOF
+
+  emit_doc "$root" ".harness/intents/README.md" <<'HARNESS_DOC_EOF'
+# Intents
+
+이 디렉터리는 Task 단위 사전 의도(Intent) 문서를 보존한다. Anthropic의
+AI-Native SDLC 개념에서 "코드를 쓰기 전에 Why/What/Not/Constraints를
+정의"하는 관행을 이 하네스의 Task 레벨에 도입한 것이다.
+
+## 역할
+
+`SPEC.md`가 프로젝트 레벨의 Why/What/Not/Constraints라면, `intents/`는
+**Task 레벨**에서 같은 역할을 한다. Task YAML의 `objective` 문단·인라인
+주석·`acceptance_criteria` 문장에 착수 게이트와 제외 범위 판단을 섞어 두면
+Worker와 Reviewer가 매번 산문을 재해석해야 한다. Intent 문서는 이를
+필드별로 분리해 바로 대조할 수 있게 한다.
+
+## 명명 규칙
+
+```
+.harness/intents/task-<task_id>-intent.md
+```
+
+- Task 1개당 Intent 1개. `attempts/`·`reviews/`와 달리 버전 번호(-N)를
+  붙이지 않는다 — 착수 전 합의된 단일 계약이며, 개정은 git 히스토리로
+  추적한다.
+- 범위가 실제로 바뀌면(Task 재정의 수준) 이 파일을 갱신하고 `STATE.md`에
+  개정 사실을 남긴다.
+
+## 필수 필드
+
+`TEMPLATE.md` 참고: Why · What · Not · Constraints · Invariants ·
+Open Questions / Decision Gates · Verification Intent.
+
+핵심은 뒤 두 필드다:
+- **Open Questions / Decision Gates**: 착수를 막는 미결정 사항. 해소되면
+  `.harness/decisions/`의 결정 기록으로 연결한다. 이 목록이 이 Task의
+  착수 게이트 정본이며, Task YAML의 `acceptance_criteria`에는 착수 게이트를
+  다시 적지 않는다.
+- **Verification Intent**: acceptance_criteria가 왜 충분한지에 대한 근거.
+  Reviewer가 실제 AC 목록과 이 의도가 어긋났는지 대조하는 기준이 된다.
+
+## 연결 규칙
+
+- Task YAML에 `intent: .harness/intents/task-<id>-intent.md` 필드로 연결한다.
+- Task 상태를 `draft` → `ready`로 전환하려면 Intent의 Open Questions가 모두
+  해소되어 있어야 한다.
+- `harness-work`는 착수 전 Intent의 Not/Constraints/Invariants를 정독하고
+  Task YAML과 상충하면 중단한다.
+- `harness-review`는 `review-policy.yaml`의 `intent_alignment` 항목으로
+  Not 위반 여부를 검수하며, 위반이 1건이라도 있으면 다른 항목과 무관하게
+  즉시 `CHANGES_REQUESTED`를 판정한다.
+HARNESS_DOC_EOF
+
+}
+
+write_project_templates() {
+  local root="$1"
+  DOC_NAME="$2" DOC_ORCHESTRATOR="$3" DOC_WORKER="$4" DOC_REVIEWER="$5" DOC_FALLBACK="$6"
+
+  emit_doc "$root" ".harness/policies/review-policy.yaml" <<'HARNESS_DOC_EOF'
+review:
+  default_provider: '@@REVIEWER@@'
+  provider_must_differ_from_worker: true
+  focus:
+    - requirement_coverage
+    - correctness
+    - regression_risk
+    - security_and_secrets
+    - maintainability
+    - verification_quality
+    - documentation_and_handover
+    - intent_alignment  # 구현이 해당 Task .harness/intents/task-*-intent.md의 Not·Invariants를 지켰는지 대조
+  immediate_rejection:
+    # 다른 7개 항목 판정과 무관하게 1건이라도 발견되면 즉시 CHANGES_REQUESTED
+    - intent_not_violation           # intent.md "Not(제외 범위)"을 침범
+    - security_and_secrets_finding   # 심각한 보안 결함·시크릿 노출
+HARNESS_DOC_EOF
+
+  emit_doc "$root" ".harness/tasks/TEMPLATE.yaml" <<'HARNESS_DOC_EOF'
+schema_version: '1.0'
+task_id: task-000
+milestone_id: milestone-000
+title: Task 제목
+objective: 하나의 검증 가능한 목적
+# intent: 필수 — Why/What/Not/Constraints/Invariants/Open Questions/Verification Intent 정본. 작성 가이드: .harness/intents/TEMPLATE.md
+intent: .harness/intents/task-000-intent.md
+# status: intent.md의 "Open Questions / Decision Gates"가 모두 해소되기 전에는 ready로 전환하지 않는다
+status: draft
+primary_worker: '@@WORKER@@'
+reviewer: '@@REVIEWER@@'
+fallback_chain: [@@FALLBACK@@]
+dependencies: []
+target_files: []
+write_scope: []
+resources: []
+inputs:
+  references: []
+  artifacts: []
+acceptance_criteria:
+  - criterion_id: AC-001
+    statement: 검증 가능한 완료 조건  # 착수 게이트(선행 결정·조건)는 여기 적지 않는다 — intent.md의 Open Questions / Decision Gates로
+    verified_by:
+      type: manual-review
+      instruction: 구체적인 확인 방법
+review_focus: [requirement_coverage, correctness, regression_risk]
 HARNESS_DOC_EOF
 
 }
@@ -1358,20 +1518,6 @@ references:
   require_reference_inventory: true
 EOF
 
-  write_file "$target" ".harness/policies/review-policy.yaml" <<EOF
-review:
-  default_provider: '$reviewer'
-  provider_must_differ_from_worker: true
-  focus:
-    - requirement_coverage
-    - correctness
-    - regression_risk
-    - security_and_secrets
-    - maintainability
-    - verification_quality
-    - documentation_and_handover
-EOF
-
   write_file "$target" ".harness/policies/quota-policy.yaml" <<'EOF'
 quota_policy:
   # 정상 실행 중에는 다른 Provider를 호출하지 않는다.
@@ -1444,32 +1590,6 @@ reference_inputs: [snmp_dumps, mib_files, vendor_docs, receiver_configs, existin
 review_focus: [canonical_schema, oid_provenance, counter_reset, units, timestamps, unknown_oid, dump_regression]
 EOF
 
-  write_file "$target" ".harness/tasks/TEMPLATE.yaml" <<EOF
-schema_version: '1.0'
-task_id: task-000
-milestone_id: milestone-000
-title: Task 제목
-objective: 하나의 검증 가능한 목적
-status: draft
-primary_worker: '$worker'
-reviewer: '$reviewer'
-fallback_chain: [$fallback]
-dependencies: []
-target_files: []
-write_scope: []
-resources: []
-inputs:
-  references: []
-  artifacts: []
-acceptance_criteria:
-  - criterion_id: AC-001
-    statement: 검증 가능한 완료 조건
-    verified_by:
-      type: manual-review
-      instruction: 구체적인 확인 방법
-review_focus: [requirement_coverage, correctness, regression_risk]
-EOF
-
   write_file "$target" ".harness/references/inventory.md" <<'EOF'
 # Reference Inventory
 
@@ -1486,6 +1606,7 @@ EOF
   done
 
   write_project_docs "$target" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback"
+  write_project_templates "$target" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback"
 
   mkdir -p "$target/.claude/skills"
   local skill_dir skill_name
@@ -1570,6 +1691,7 @@ cmd_sync_templates() {
   fi
 
   write_project_docs "$root" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback"
+  write_project_templates "$root" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback"
 
   # .claude/skills/* 심볼릭 링크 — 없는 것만 만든다. 이미 있으면(정상 링크든,
   # 사용자가 다른 곳을 가리키게 바꿔 놓은 것이든) 손대지 않는다.
@@ -3166,6 +3288,8 @@ cmd_test() {
     .harness/waves/TEMPLATE.yaml .harness/attempts/TEMPLATE.md
     .harness/reviews/TEMPLATE.md .harness/handovers/TEMPLATE.md
     .harness/decisions/TEMPLATE.md
+    .harness/intents/TEMPLATE.md .harness/intents/README.md
+    .harness/policies/review-policy.yaml
     .agents/roles/orchestrator.agent.md .agents/roles/worker.agent.md .agents/roles/reviewer.agent.md
     .agents/roles/interviewer.agent.md .agents/roles/planner.agent.md .agents/roles/advisor.agent.md
     .agents/skills/harness-interview/SKILL.md .agents/skills/harness-reference/SKILL.md
