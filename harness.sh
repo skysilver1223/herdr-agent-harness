@@ -4,6 +4,13 @@ set -Eeuo pipefail
 SCRIPT_NAME="$(basename "$0")"
 SELF_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
+# 프로젝트 템플릿 정본은 harness.sh 옆 templates/ 에 있다. init·sync-templates가
+# 여기서 파일을 읽어 @@…@@ 플레이스홀더만 치환해 프로젝트로 복사한다.
+# 심볼릭 링크(~/.local/bin/herdr-harness → $INSTALL_DIR/harness.sh)로 실행될 때도
+# 실제 위치를 찾아야 하므로 readlink -f로 해석한다.
+_harness_real_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "$SELF_PATH")"
+HARNESS_TEMPLATE_DIR="${HARNESS_TEMPLATE_DIR:-$(dirname "$_harness_real_path")/templates}"
+
 usage() {
   cat <<EOF
 Herdr Agent/Skills Harness
@@ -131,6 +138,9 @@ prompt_default() {
 
 emit_doc() {
   local root="$1" relative="$2"
+  local source_file="$HARNESS_TEMPLATE_DIR/$relative"
+  [[ -f "$source_file" ]] ||
+    die "템플릿 파일을 찾을 수 없습니다: $source_file  (HARNESS_TEMPLATE_DIR=$HARNESS_TEMPLATE_DIR)"
   local rendered
   # write_file를 파이프(`| write_file`)로 부르면 오른쪽이 서브셸에서 돌아
   # write_file 안의 전역 배열 갱신(SYNC_* — sync-templates가 씀)이 호출자에게
@@ -139,1162 +149,59 @@ emit_doc() {
       -e "s|@@REVIEWER@@|${DOC_REVIEWER}|g" \
       -e "s|@@ORCHESTRATOR@@|${DOC_ORCHESTRATOR}|g" \
       -e "s|@@FALLBACK@@|${DOC_FALLBACK}|g" \
-      -e "s|@@NAME@@|${DOC_NAME}|g")"
+      -e "s|@@NAME@@|${DOC_NAME}|g" "$source_file")"
   write_file "$root" "$relative" <<<"$rendered"
 }
+
+# init과 sync-templates가 프로젝트로 복사하는 템플릿 파일 목록. 정본은 이
+# 저장소의 templates/ 아래 같은 상대경로에 있고, emit_doc이 @@…@@ 플레이스홀더만
+# 치환한다. 새 템플릿을 추가하면 이 배열에도 넣어야 cmd_test가 잡아낸다.
+HARNESS_DOC_TEMPLATES=(
+  ".agents/skills/harness-interview/SKILL.md"
+  ".agents/skills/harness-reference/SKILL.md"
+  ".agents/skills/harness-plan/SKILL.md"
+  ".agents/skills/harness-orchestrate/SKILL.md"
+  ".agents/skills/harness-work/SKILL.md"
+  ".agents/skills/harness-verify/SKILL.md"
+  ".agents/skills/harness-review/SKILL.md"
+  ".agents/skills/harness-handover/SKILL.md"
+  ".agents/skills/harness-status/SKILL.md"
+  ".agents/roles/interviewer.agent.md"
+  ".agents/roles/planner.agent.md"
+  ".agents/roles/orchestrator.agent.md"
+  ".agents/roles/worker.agent.md"
+  ".agents/roles/advisor.agent.md"
+  ".agents/roles/reviewer.agent.md"
+  ".harness/attempts/TEMPLATE.md"
+  ".harness/reviews/TEMPLATE.md"
+  ".harness/handovers/TEMPLATE.md"
+  ".harness/waves/TEMPLATE.yaml"
+  ".harness/decisions/TEMPLATE.md"
+  ".harness/intents/TEMPLATE.md"
+  ".harness/intents/README.md"
+)
+
+HARNESS_POLICY_TEMPLATES=(
+  ".harness/policies/review-policy.yaml"
+  ".harness/tasks/TEMPLATE.yaml"
+)
 
 write_project_docs() {
   local root="$1"
   DOC_NAME="$2" DOC_ORCHESTRATOR="$3" DOC_WORKER="$4" DOC_REVIEWER="$5" DOC_FALLBACK="$6"
-
-  emit_doc "$root" ".agents/skills/harness-interview/SKILL.md" <<'HARNESS_DOC_EOF'
----
-name: harness-interview
-description: 모호한 요구사항과 기존 자산을 인터뷰하여 정형화된 SPEC 초안을 작성한다.
-compatibility: Herdr pane, Git repository, project-local .harness directory
----
-
-# harness-interview
-
-모호한 사용자 요구와 기존 자산을 인터뷰하여 정합성 있는 `.harness/SPEC.md` 초안을 작성하고 승인을 준비한다.
-
-## 1. 사전조건
-- 프로젝트 디렉터리가 초기화되어 `.harness/`가 존재해야 한다.
-- `.harness/SPEC.md`의 상태가 `draft`이거나 신규 인터뷰가 요구되는 상태여야 한다.
-
-## 2. 읽어야 할 파일 목록
-다음 순서대로 파일을 정독하여 정책과 기존 정보를 확인한다.
-1. `AGENTS.md`
-2. `.harness/project.yaml`
-3. `.agents/roles/interviewer.agent.md`
-4. `.harness/policies/project-policy.yaml`
-5. `.harness/SPEC.md`
-
-## 3. 절차
-1. 작업 디렉터리 내 기존 소스코드, 데이터 덤프, 사양 문서, MIB 파일 유무를 파일시스템 도구로 탐색한다.
-2. 기존 자산이 확인되면 재사용 가능 여부와 제약사항을 정리한다.
-3. 사용자에게 한 번에 2~4개 이하의 핵심 질문만 전달하여 요구사항과 범위를 좁힌다.
-4. 인터뷰 결과를 종합하여 `.harness/SPEC.md`의 7대 섹션을 충실히 작성한다.
-   - 핵심 목표
-   - 기존 자료와 재사용 판단 (Confirmed, Inferred, Unknown 분류)
-   - 기술 스택 및 제약 (언어, 런타임, 변경 금지 영역)
-   - 요구사항 (기능 및 비기능)
-   - Acceptance Criteria (각 기준마다 검증 명령/수단 필수 연결)
-   - 제외 범위 (Out of Scope)
-   - 사용자 승인란 (상태는 `draft` 유지)
-5. `git diff .harness/SPEC.md`로 변경 내용을 검토한다.
-6. 작성된 SPEC 초안을 사용자에게 제시하고 명시적 승인을 요청한다.
-
-## 4. 중단·승인 요청 조건
-- 기존 자산 분석 중 권한 문제나 포맷 불명확으로 분석이 불가한 경우 즉시 중단하고 질문한다.
-- SPEC 초안 작성이 완료되면 에이전트 스스로 구현이나 계획 분할에 착수하지 말고 즉시 멈추고 사용자 승인을 요청한다.
-
-## 5. 산출물
-- `.harness/SPEC.md`: 7대 섹션이 누락 없이 채워진 정형 사양서 초안
-
-## 6. 결과 계약
-작업 종료 시 사용자에게 반드시 다음 형식의 단일 보고 블록을 제출한다.
-- 결과상태: SUCCESS 또는 BLOCKED
-- 산출물경로: .harness/SPEC.md
-- 검증결과: 7대 섹션 작성 완료 및 Acceptance Criteria별 검증 방법 매핑 여부
-- 차단사유: 없음 (차단 시 구체적 질문 및 차단 요인 기술)
-
-## 7. 사후조건 체크리스트
-- [ ] SPEC.md 내 모호한 TODO나 TBD가 방치되지 않았는가?
-- [ ] Acceptance Criteria마다 실행 가능한 검증 방법이 매핑되었는가?
-- [ ] 소스코드를 수정하지 않고 사양 문서만 변경하였는가?
-- [ ] 승인 상태가 임의로 approved로 바뀌지 않고 draft를 유지하는가?
-
-## 8. 멱등성 규칙
-- 이미 작성된 SPEC.md가 존재하더라도 기존 섹션을 무단 초기화하지 않는다.
-- 추가 인터뷰 시 기존 확인 사항은 보존하고 변경 및 추가 요구사항만 업데이트한다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/skills/harness-reference/SKILL.md" <<'HARNESS_DOC_EOF'
----
-name: harness-reference
-description: 기존 코드, 데이터, 문서, Dump를 탐색하고 목록화하여 Reference Inventory를 작성한다.
-compatibility: Herdr pane, Git repository, project-local .harness directory
----
-
-# harness-reference
-
-프로젝트 내외의 기존 자산을 체계적으로 수집·분류하고 재사용 가능성과 제약사항을 `.harness/references/inventory.md`에 기록한다.
-
-## 1. 사전조건
-- 프로젝트가 초기화되어 있고 Git 저장소가 유효해야 한다.
-- 요구사항 인터뷰 전후 또는 Task 구현 전 기존 자산 조사가 필요한 상태여야 한다.
-
-## 2. 읽어야 할 파일 목록
-1. `AGENTS.md`
-2. `.harness/project.yaml`
-3. `.agents/roles/interviewer.agent.md`
-4. `.harness/SPEC.md`
-5. `.harness/references/inventory.md`
-
-## 3. 절차
-1. 프로젝트 루트 및 지정된 외부 참조 디렉터리에서 다음 자산을 검색한다.
-   - 소스코드, 스크립트, 기존 구현체
-   - 데이터셋, 샘플 덤프, 로그 파일
-   - API 문서, MIB 정의, 아키텍처 다이어그램, 운영 매뉴얼
-2. 발견된 자산의 신뢰 수준을 3단계로 엄격히 분류한다.
-   - Confirmed: 실제 코드/데이터/공식 문서로 확인된 내용
-   - Inferred: 파일명, 주석, 관례로 추론된 내용
-   - Unknown: 확인되지 않아 추가 질의나 검증이 필요한 내용
-3. 자산별 재사용 판단(재사용, 부분참조, 폐기) 및 라이선스/보안 제약을 평가한다.
-4. `.harness/references/inventory.md` 표에 다음 컬럼 규격으로 행을 추가하거나 갱신한다.
-   - ID | 경로/URL | 유형 | 출처 | 재사용 판단 | 제약
-5. 발견된 핵심 샘플이나 참조 스키마의 경우 필요 시 요약 메모를 `.harness/references/` 아래에 보존한다.
-
-## 4. 중단·승인 요청 조건
-- 상용 라이선스 위반 소지가 있거나 민감 정보(개인정보, 비밀키)가 포함된 자산 발견 시 탐색을 멈추고 사용자에게 에스컬레이션한다.
-- 필수 자산이 누락되어 SPEC 검증이 불가능한 경우 즉시 작업을 중단하고 사용자에게 자산 제공을 요청한다.
-
-## 5. 산출물
-- `.harness/references/inventory.md`: 자산 인벤토리 정본 파일
-
-## 6. 결과 계약
-작업 종료 시 사용자에게 반드시 다음 형식의 단일 보고 블록을 제출한다.
-- 결과상태: SUCCESS 또는 BLOCKED
-- 산출물경로: .harness/references/inventory.md
-- 검증결과: 식별된 자산 수 및 Confirmed/Inferred/Unknown 분류 완료 여부
-- 차단사유: 없음 (자산 접근 불가 시 원인 기술)
-
-## 7. 사후조건 체크리스트
-- [ ] 식별된 자산마다 고유 식별자(REF-001 등)가 부여되었는가?
-- [ ] 출처와 제약사항(라이선스, 보안)이 기재되었는가?
-- [ ] 원본 자산을 임의로 이동하거나 수정하지 않았는가?
-
-## 8. 멱등성 규칙
-- 기존 inventory.md의 내용을 삭제하지 않고, 새 자산은 고유 ID를 증가시켜 덧붙인다.
-- 기존 자산의 경로 변경 시 해당 행의 상태만 업데이트한다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/skills/harness-plan/SKILL.md" <<'HARNESS_DOC_EOF'
----
-name: harness-plan
-description: 승인된 SPEC을 바탕으로 Milestone과 원자적 Task 계약을 분할하고 Wave를 수립한다.
-compatibility: Herdr pane, Git repository, project-local .harness directory
----
-
-# harness-plan
-
-사용자 승인이 완료된 `.harness/SPEC.md`를 바탕으로 중간 목표(Milestone)와 단일 목적을 가진 Task Contract들을 생성하고 실행 단위(Wave)를 정의한다.
-
-## 1. 사전조건
-- `.harness/SPEC.md`가 사용자 승인을 받은 상태여야 한다 (`- 상태: approved`).
-- `herdr-harness validate .` 명령이 오류 없이 통과해야 한다.
-
-## 2. 읽어야 할 파일 목록
-1. `AGENTS.md`
-2. `.harness/project.yaml`
-3. `.agents/roles/planner.agent.md`
-4. `.harness/policies/project-policy.yaml`
-5. `.harness/SPEC.md`
-6. `.harness/references/inventory.md`
-7. `.harness/MILESTONES.md`
-
-## 3. 절차
-1. SPEC의 요구사항을 검증 가능한 단위의 마일스톤으로 분할하여 `.harness/MILESTONES.md`를 작성한다.
-2. 각 마일스톤 아래에 독립적으로 수행 가능한 Task 목록을 도출한다.
-   - 단일 목적 원칙: 한 Task는 단 하나의 기능, 분석, 리팩토링 목적만 가진다.
-   - 활성 한도 준수: 현재 활성 Task는 최대 5개 이내로 제한한다.
-3. 도출된 Task마다 `.harness/tasks/task-XXX.yaml` 파일을 `.harness/tasks/TEMPLATE.yaml` 기반으로 작성한다.
-   - `primary_worker`: @@WORKER@@
-   - `reviewer`: @@REVIEWER@@ (반드시 Primary Worker와 다른 Provider 배정)
-   - `write_scope`: 수정이 허용된 파일/디렉터리 경로를 엄격히 한정
-   - `acceptance_criteria`: 구체적인 실행 검증 명령(`verified_by`) 명시
-4. 병렬 실행 가능성을 점검한다.
-   - 수정 경로(`write_scope`)가 겹치지 않고 의존성이 없는 Task끼리 동일 `parallel_group`으로 묶는다.
-   - 병렬 워커는 최대 2개로 제한한다.
-5. 첫 번째 실행 묶음인 `.harness/waves/wave-001.yaml`을 생성한다.
-6. `.harness/STATE.md`를 갱신하여 현재 마일스톤, 생성된 Task 목록, 대기 중인 결정을 반영한다.
-7. `herdr-harness validate .`를 실행하여 스키마 무결성과 제약조건을 점검한다.
-8. 수립된 계획과 Wave를 사용자에게 보고하고 실행 승인을 요청한다.
-
-## 4. 중단·승인 요청 조건
-- SPEC이 승인되지 않았거나 요구사항이 모호한 경우 계획 수립을 중단한다.
-- 활성 Task 수가 5개를 초과하거나 병렬 워커 수가 2개를 초과하면 설계를 조정하고 중단한다.
-- 계획 수립 완료 후에는 사용자가 Wave를 승인하기 전까지 절대 Worker를 기동하지 않는다.
-
-## 5. 산출물
-- `.harness/MILESTONES.md`
-- `.harness/tasks/task-*.yaml`
-- `.harness/waves/wave-*.yaml`
-- `.harness/STATE.md`
-
-## 6. 결과 계약
-작업 종료 시 사용자에게 반드시 다음 형식의 단일 보고 블록을 제출한다.
-- 결과상태: SUCCESS 또는 BLOCKED
-- 산출물경로: .harness/waves/wave-001.yaml, .harness/tasks/
-- 검증결과: herdr-harness validate . 성공 여부 및 생성된 Task 개수
-- 차단사유: 없음 (계획 충돌 또는 한도 초과 시 사유 기술)
-
-## 7. 사후조건 체크리스트
-- [ ] Worker와 Reviewer가 서로 다른 Provider로 배정되었는가?
-- [ ] Task마다 명확한 write_scope와 acceptance_criteria가 설정되었는가?
-- [ ] 병렬 Task 간 write_scope 충돌이 없는가?
-- [ ] herdr-harness validate . 검증이 통과하였는가?
-
-## 8. 멱등성 규칙
-- 기존에 존재하는 Task YAML 파일은 덮어쓰지 않고 새로운 일련번호(task-002, task-003 등)를 발급한다.
-- Wave 재계획 시 기존 완료된 Task는 유지하고 ready/draft 상태의 Task만 재편성한다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/skills/harness-orchestrate/SKILL.md" <<'HARNESS_DOC_EOF'
----
-name: harness-orchestrate
-description: Herdr 환경에서 승인된 Wave의 Task들을 단계별로 실행하고 상태를 관리한다.
-compatibility: Herdr pane, Git repository, project-local .harness directory
----
-
-# harness-orchestrate
-
-Herdr Multiplexer 환경에서 승인된 Wave를 실행한다. 스크립트 기반 1스텝 도구(`herdr-harness`)를 호출하여 Worker와 Reviewer를 디스패치하고, 라이프사이클과 상태 전이를 안전하게 제어한다.
-
-## 1. 사전조건
-- `test "${HERDR_ENV:-}" = 1` 환경 검증을 통과해야 한다.
-- `.harness/SPEC.md`와 실행 대상 Wave가 사용자 승인을 받은 상태여야 한다.
-- `herdr-harness validate .` 검증이 PASS 상태여야 한다.
-
-## 2. 읽어야 할 파일 목록
-1. `AGENTS.md`
-2. `.harness/project.yaml`
-3. `.agents/roles/orchestrator.agent.md`
-4. `.harness/policies/`
-5. `.harness/STATE.md`
-6. 현재 활성 Wave 파일 (`.harness/waves/wave-*.yaml`)
-7. 실행 대상 Task YAML (`.harness/tasks/task-*.yaml`)
-
-## 3. 절차
-
-### 1단계: 사전 검증 및 런타임 관측
-1. `herdr-harness validate .` 를 실행하여 Git 상태, 스키마, 권한, 정책을 검사한다. 실패 시 즉시 중단한다.
-2. `herdr-harness status --live .` 를 실행하여 실제 Herdr agent/pane 상태와 STATE.md 간의 Drift나 고아(orphan) 패널 유무를 확인한다.
-3. ORPHAN으로 판정된 등록 Agent는 `herdr-harness close-agent . <task_id> worker|reviewer` 로 정리한다.
-
-### 2단계: Task 선택 및 상태 전이 (ready -> active)
-1. 현재 승인된 Wave에서 의존성이 충족된 `ready` 상태의 Task를 선택한다.
-2. `herdr-harness transition . <task_id> active` 명령을 실행하여 상태를 원자적으로 전이한다.
-
-### 3단계: Worker 디스패치 및 1스텝 실행
-1. `herdr-harness dispatch . <task_id> worker` 명령을 호출한다.
-   - 내부적으로 Herdr 패널 분할(`pane split --no-focus`), Worker 기동(`agent start`), Context Packet 주입, 프롬프트 대기(`agent prompt --wait`)를 수행하고 결과를 정규화하여 반환한다.
-2. 반환 결과 코드에 따라 분기한다.
-   - `settled`: 정상 완료. 4단계로 진행한다.
-   - `blocked`: Worker가 사용자 입력이나 시크릿을 요구함. `herdr-harness observe . <task_id>`로 원인을 수집하고, `herdr-harness transition . <task_id> blocked` 실행 후 사용자에게 즉시 질문하고 루프를 일시 중지한다.
-   - `timeout` 또는 `stalled`: 응답 지연. `herdr-harness observe . <task_id>`로 출력 확인 후 재대기할지 중단할지 판단한다.
-   - `agent_lost` 또는 `error`: 에이전트 비정상 종료. `herdr-harness transition . <task_id> handover_required` 실행 후 사용자에게 보고한다.
-3. Fallback 처리: 만약 Herdr 터미널 Alternate Screen 등의 사유로 `agent read` 출력이 비어 있거나 잘린 경우, Worker에게 파일 산출(`.harness/attempts/<task_id>-attempt-N.md`)을 요청하고 해당 파일의 존재와 내용을 확인한다.
-
-### 4단계: 제출 검증 및 상태 전이 (active -> submitted)
-1. `.harness/attempts/<task_id>-attempt-*.md` 파일과 Evidence 파일이 생성되었는지 확인한다.
-2. `git status --short` 및 `git diff --stat`으로 write_scope 준수 여부를 확인한다.
-3. `herdr-harness transition . <task_id> submitted` 명령을 실행한다.
-4. 사용이 완료된 Worker 패널은 `herdr-harness close-agent . <task_id> worker` 로 안전하게 정리한다.
-
-### 5단계: Reviewer 디스패치 및 독립 검토 (submitted -> reviewing)
-1. `herdr-harness transition . <task_id> reviewing` 명령을 실행한다 (Worker != Reviewer 강제 검증).
-2. `herdr-harness dispatch . <task_id> reviewer` 명령을 호출한다.
-   - Reviewer는 읽기 전용으로 Diff, Attempt, Evidence를 `review-policy.yaml`의 8대 정책 기준(`focus`)에 맞춰 검토하고 `.harness/reviews/<task_id>-review-N.md`를 작성한다.
-   - Reviewer 응답이 `timeout` 또는 `stalled`이면 `herdr-harness observe . <task_id> reviewer`로 재조회한다.
-3. 검토 완료 후 `herdr-harness close-agent . <task_id> reviewer` 로 패널을 닫는다.
-
-### 6단계: 판정 처리 및 순환
-1. 생성된 Review 파일의 최종 `판정:`을 읽는다.
-2. 판정이 `CHANGES_REQUESTED`인 경우:
-   - `herdr-harness transition . <task_id> changes_requested` 실행.
-   - 피드백 반영을 위해 `herdr-harness transition . <task_id> ready` 실행 후 2단계로 되돌린다.
-3. 판정이 `APPROVED`인 경우:
-   - `herdr-harness transition . <task_id> awaiting_approval` 실행.
-
-### 7단계: 사용자 완료 승인 Gate (awaiting_approval -> completed)
-1. Wave 내 모든 Task가 `awaiting_approval` 상태에 도달하면 `herdr-harness status --live .` 결과를 종합하여 사용자에게 보고한다.
-2. 사용자가 `.harness/decisions/`에 승인 결정을 남기고 지시한 경우에만 `herdr-harness transition . <task_id> completed` 를 호출한다.
-3. Orchestrator는 절대 사용자를 대신하여 `completed`를 승인하지 않는다.
-
-## 4. 중단·승인 요청 조건
-- HERDR_ENV != 1 환경인 경우.
-- `herdr-harness validate .` 실패 시.
-- Worker가 `blocked` 상태이거나 시크릿 입력을 요구할 때.
-- Provider Failover가 필요한 장애 발생 시.
-- Wave 완료 후 `completed` 승인 대기 시점.
-
-## 5. 산출물
-- `.harness/STATE.md`: 실시간 갱신된 프로젝트 상태
-- `.harness/waves/`: 갱신된 Wave 상태
-- `.harness/runtime/`: 실행 로그 및 임시 메타데이터
-
-## 6. 결과 계약
-작업 종료 시 사용자에게 반드시 다음 형식의 단일 보고 블록을 제출한다.
-- 결과상태: SUCCESS 또는 BLOCKED
-- 산출물경로: .harness/STATE.md
-- 검증결과: 실행된 Task ID, 전환된 상태, 검토 판정 결과
-- 차단사유: 없음 (사용자 승인 대기, 에이전트 블록, 장애 발생 시 상세 원인 기재)
-
-## 7. 사후조건 체크리스트
-- [ ] Task 상태 전이가 오직 herdr-harness transition 명령으로만 수행되었는가?
-- [ ] Worker와 Reviewer가 서로 다른 Provider로 실행되었는가?
-- [ ] 작업 완료 후 불필요한 Herdr 패널이 close-agent로 정리되었는가?
-- [ ] completed 상태가 오직 사용자의 명시적 승인 하에서만 반영되었는가?
-
-## 8. 멱등성 규칙
-- 세션이 중간에 끊기더라도 새 세션에서 `herdr-harness status --live .`를 실행해 현재 STATE.md에 기록된 상태부터 안전하게 재개한다.
-- 이미 완료된 Task를 재실행하지 않으며, 실패한 Task는 새 Attempt 번호로 재진입한다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/skills/harness-work/SKILL.md" <<'HARNESS_DOC_EOF'
----
-name: harness-work
-description: 승인된 Task 하나를 수행하여 코드를 구현하거나 분석하고 자체 검증 및 Attempt를 작성한다.
-compatibility: Herdr pane, Git repository, project-local .harness directory
----
-
-# harness-work
-
-승인된 단 하나의 Task Contract를 엄격히 준수하여 구현, 분석, 수정을 수행하고, 자체 검증과 Attempt 문서를 작성하여 `submitted` 상태를 제안한다.
-
-## 1. 사전조건
-- Task 상태가 `active`여야 한다.
-- 자신이 해당 Task의 `primary_worker`로 지정되어 있어야 한다.
-- 작업 브랜치 또는 작업 트리가 깨끗하고 Git 추적 중이어야 한다.
-
-## 2. 읽어야 할 파일 목록
-1. `AGENTS.md`
-2. `.agents/roles/worker.agent.md`
-3. 현재 대상 Task 계약 파일 (`.harness/tasks/task-*.yaml`)
-4. 해당 Task의 Intent 문서 (`.harness/intents/task-*-intent.md`) — Why/What/Not/Constraints/Invariants/Open Questions 정본
-5. `.harness/SPEC.md`
-6. `.harness/references/inventory.md`
-7. 이전 Attempt가 있을 경우 최신 Attempt 및 Review 파일
-
-## 3. 절차
-1. Task YAML의 `objective`, `target_files`, `write_scope`, `acceptance_criteria`를 정독한다.
-2. Intent 문서의 `Not`·`Constraints`·`Invariants`를 정독한다. `Open Questions / Decision Gates`에 미해소 항목이 있으면 구현을 시작하지 않고 즉시 Orchestrator에게 알린다.
-3. 구현 전 `git status`로 현재 기준선을 확인한다.
-4. `write_scope`에 지정된 파일 및 경로 내에서만 코드를 작성하거나 수정한다. 허용되지 않은 파일(설정, 다른 모듈, 정책 문서)은 절대 수정하지 않는다. `write_scope`에 포함되어 있어도 Intent의 `Not`에 명시된 범위는 침범하지 않는다.
-5. `acceptance_criteria`의 각 항목에 연결된 검증 명령(`verified_by`)을 실행하여 자가 검증을 수행한다 (`harness-verify` 참조).
-6. 기존 테스트 및 회귀 테스트를 실행하여 부작용이 없음을 확인한다.
-7. `.harness/attempts/task-XXX-attempt-N.md` 파일을 작성한다 (N은 001부터 순차 증가).
-   - 작업 변경 요약
-   - 수정한 파일 목록 및 `git diff --stat`
-   - 자체 검증 명령, 실행 결과, 종료 코드
-   - Reviewer를 위한 중점 검토 포인트 (Intent의 Not/Invariants 대비 확인 포인트 포함)
-8. 구현 및 문서 작성이 완료되면 `submitted` 상태로의 전이를 요청한다.
-
-## 4. 중단·승인 요청 조건
-- Intent 문서의 `Not`·`Constraints`가 Task YAML의 지시와 상충하거나, `Open Questions / Decision Gates`가 미해소 상태이면 구현을 시작하지 않고 즉시 중단한다.
-- `write_scope` 외부 파일 수정이 불가피한 경우 작업을 중단하고 Orchestrator에게 계약 수정을 요청한다.
-- 외부 API 키, 인증 정보 등 시크릿이 필요하거나 모호한 정책 판단이 필요한 경우 즉시 작업을 멈추고 `blocked` 상태를 알린다.
-- 동일 원인으로 검증이 3회 이상 실패하거나 쿼터 소진 징후가 보이면 `harness-handover`를 호출하고 작업을 중단한다.
-- Worker는 어떠한 경우에도 스스로 `completed`를 선언하거나 승인하지 않는다.
-
-## 5. 산출물
-- `write_scope` 내 구현 및 수정 소스코드
-- `.harness/attempts/task-XXX-attempt-N.md`: 정형화된 시도 보고서
-- `.harness/evidence/task-XXX-evidence-N.md`: 자체 검증 로그 증적
-
-## 6. 결과 계약
-작업 종료 시 사용자 및 Orchestrator에게 반드시 다음 형식의 단일 보고 블록을 제출한다.
-- 결과상태: SUCCESS 또는 BLOCKED
-- 산출물경로: .harness/attempts/task-XXX-attempt-N.md
-- 검증결과: acceptance_criteria 검증 통과 여부 및 diff 요약
-- 차단사유: 없음 (차단 시 blocked 사유 및 필요 자원 명시)
-
-## 7. 사후조건 체크리스트
-- [ ] Intent 문서의 `Not`에 명시된 범위를 침범하지 않았는가?
-- [ ] write_scope 외부의 파일이 수정되지 않았는가 (`git status` 확인)?
-- [ ] acceptance_criteria의 모든 검증 명령이 성공(exit code 0)하였는가?
-- [ ] Attempt 문서에 diff stat과 검증 결과가 충실히 기록되었는가?
-- [ ] 완료 보고 시 completed가 아닌 submitted를 제안하였는가?
-
-## 8. 멱등성 규칙
-- 재작업 시 기존 Attempt 파일을 덮어쓰지 않고 새로운 번호(attempt-002 등)의 파일을 생성한다.
-- 이전 작업물의 유효한 부분은 Git 히스토리를 통해 안전하게 계승한다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/skills/harness-verify/SKILL.md" <<'HARNESS_DOC_EOF'
----
-name: harness-verify
-description: Task의 Acceptance Criteria에 정의된 검증을 실행하고 Evidence 기록을 작성한다.
-compatibility: Herdr pane, Git repository, project-local .harness directory
----
-
-# harness-verify
-
-Task Contract의 Acceptance Criteria와 연결된 검증 명령을 객관적으로 실행하고, 실행 명령, 종료 코드, 표준 입출력 요약을 증적(`.harness/evidence/`)으로 기록한다.
-
-## 1. 사전조건
-- 검증할 코드나 산출물이 파일시스템에 준비되어 있어야 한다.
-- Task Contract에 구체적인 `verified_by` 검증 방법이 정의되어 있어야 한다.
-
-## 2. 읽어야 할 파일 목록
-1. `AGENTS.md`
-2. `.harness/policies/project-policy.yaml`
-3. 대상 Task Contract (`.harness/tasks/task-*.yaml`)
-4. `.harness/SPEC.md`의 Acceptance Criteria 섹션
-
-## 3. 절차
-1. Task YAML의 `acceptance_criteria` 목록을 순회하며 각 항목의 `criterion_id`와 `verified_by` 명령어를 확인한다.
-2. `policies/project-policy.yaml`의 보안 규칙을 준수하는지 확인한다. 파괴적 명령(`rm -rf`, 드롭 테이블), 운영 배포, 외부 네트워크 쓰기 명령은 실행을 거부한다.
-3. 검증 명령(테스트 러너, 린터, 빌드 명령, 스키마 검증기 등)을 실행하고 표준 출력(stdout), 표준 에러(stderr), 프로세스 종료 코드(exit code)를 캡처한다.
-4. 비밀번호, API 토큰, 개인정보 패턴이 출력에 포함되어 있는지 스캔하고, 발견 시 마스킹(`***REDACTED***`) 처리한다.
-5. `.harness/evidence/task-XXX-evidence-N.md` 파일에 결과를 구조화하여 저장한다.
-   - 대상 Task ID 및 Criterion ID
-   - 실행 시각 및 실행 환경
-   - 실행된 실제 명령어 전문
-   - 종료 코드 (0: PASS, 비0: FAIL)
-   - 주요 출력 발췌 (최대 100줄 내외 핵심 로그)
-   - 미검증 항목 또는 수동 확인 필요 사항
-6. 모든 Criteria의 검증 결과를 종합 판정(ALL_PASS 또는 HAS_FAILURE)한다.
-
-## 4. 중단·승인 요청 조건
-- `allow_destructive_commands: false` 정책에 위배되는 위험 명령이 포함된 경우 즉시 실행을 거부하고 사용자에게 보고한다.
-- 검증 실행 중 인프라 다운, 권한 부족 등의 환경 장애 발생 시 중단하고 원인을 통보한다.
-
-## 5. 산출물
-- `.harness/evidence/task-XXX-evidence-N.md`: 불변 증적 파일
-
-## 6. 결과 계약
-작업 종료 시 사용자 및 Orchestrator에게 반드시 다음 형식의 단일 보고 블록을 제출한다.
-- 결과상태: SUCCESS 또는 FAILED
-- 산출물경로: .harness/evidence/task-XXX-evidence-N.md
-- 검증결과: 검증 통과 건수 / 전체 검증 건수 및 최종 판정
-- 차단사유: 없음 (위험 명령 거부 또는 환경 결함 시 사유 기술)
-
-## 7. 사후조건 체크리스트
-- [ ] 모든 Acceptance Criteria에 대해 증적이 빠짐없이 남겨졌는가?
-- [ ] 출력에 민감한 비밀키나 Secret이 마스킹되었는가?
-- [ ] 명령의 종료 코드가 정확히 기록되었는가?
-- [ ] 원본 소스코드를 수정하지 않았는가?
-
-## 8. 멱등성 규칙
-- 동일 Task에 대해 검증을 재실행할 경우 기존 Evidence 파일을 덮어쓰지 않고 일련번호(N)를 증가시켜 보존한다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/skills/harness-review/SKILL.md" <<'HARNESS_DOC_EOF'
----
-name: harness-review
-description: Primary Worker와 다른 독립적 Provider로서 Diff, Evidence, 품질을 읽기 전용으로 검토한다.
-compatibility: Herdr pane, Git repository, project-local .harness directory
----
-
-# harness-review
-
-Primary Worker와 독립된 제3의 Provider 관점에서 코드 변경사항(Diff), 자체 검증 보고서(Attempt), 증적(Evidence)을 정밀 검토하고 객관적인 판정(`.harness/reviews/`)을 내린다.
-
-## 1. 사전조건
-- Task 상태가 `submitted` 또는 `reviewing`이어야 한다.
-- 검토자는 해당 Task의 `primary_worker`와 반드시 다른 Provider여야 한다 (`provider_must_differ_from_worker: true`).
-- `.harness/attempts/` 및 `.harness/evidence/` 파일이 제출되어 있어야 한다.
-
-## 2. 읽어야 할 파일 목록
-1. `AGENTS.md`
-2. `.agents/roles/reviewer.agent.md`
-3. `.harness/policies/review-policy.yaml`
-4. 현재 대상 Task YAML (`.harness/tasks/task-*.yaml`)
-5. 해당 Task의 Intent 문서 (`.harness/intents/task-*-intent.md`) — Not/Constraints/Invariants/Verification Intent 정본
-6. 최신 Attempt 문서 (`.harness/attempts/task-XXX-attempt-N.md`)
-7. 최신 Evidence 문서 (`.harness/evidence/task-XXX-evidence-N.md`)
-8. `git diff` 결과
-
-## 3. 절차
-1. 독립성 확인: 자신이 Worker와 동일한 Provider인지 확인하고, 동일할 경우 즉시 검토를 거부하고 보고한다.
-2. 읽기 전용 원칙 준수: 소스코드나 설정 파일을 절대 직접 수정하지 않는다.
-3. `git diff`를 정밀 검토하여 변경 내용이 Task의 `write_scope` 내에 한정되어 있는지 검사한다.
-4. `review-policy.yaml`에 정의된 8대 집중 검토 항목을 순서대로 채점한다.
-   - `requirement_coverage`: 요구사항과 Acceptance Criteria를 빠짐없이 만족하는가? Intent의 `Verification Intent`와 실제 AC 목록이 어긋나지 않는가?
-   - `correctness`: 논리적 오류, 엣지 케이스 처리, 예외 처리가 올바른가?
-   - `regression_risk`: 기존 기능이나 타 모듈을 파괴할 잠재적 위험이 없는가?
-   - `security_and_secrets`: 하드코딩된 Secret, 주입 공격, 안전하지 않은 권한이 없는가?
-   - `maintainability`: 가독성, 코딩 컨벤션, 모듈화 수준이 적절한가?
-   - `verification_quality`: 자체 검증(Evidence)이 실질적이고 신뢰할 수 있는가?
-   - `documentation_and_handover`: 변경 설명과 주석이 명확한가?
-   - `intent_alignment`: 구현이 Intent 문서의 `Not`을 침범하지 않았는가? `Invariants`가 유지됐는가?
-5. `.harness/reviews/TEMPLATE.md` 규격에 맞춰 `.harness/reviews/task-XXX-review-N.md`를 작성한다.
-   - 최종 판정은 오직 `APPROVED` 또는 `CHANGES_REQUESTED` 중 하나만 기록한다.
-   - 잔여 리스크와 구체적인 수정 요구사항을 명시한다.
-6. 검토 결과를 Orchestrator에게 알린다.
-
-## 4. 중단·승인 요청 조건
-- 소스코드 수정이 필요하다고 해서 Reviewer가 직접 코드를 고치는 행위는 절대 금지되며, 발견 시 즉시 작업을 중단해야 한다.
-- `review-policy.yaml`의 `immediate_rejection`에 해당하는 사안(Intent `Not` 위반, 심각한 보안 결함)이 1건이라도 발견되면 다른 항목 판정과 무관하게 즉시 `CHANGES_REQUESTED` 판정을 내리고 구체적 수정 지침을 기술한다.
-
-## 5. 산출물
-- `.harness/reviews/task-XXX-review-N.md`: 정형 검토 보고서 정본
-
-## 6. 결과 계약
-작업 종료 시 사용자 및 Orchestrator에게 반드시 다음 형식의 단일 보고 블록을 제출한다.
-- 결과상태: SUCCESS (검토 완료) 또는 BLOCKED (동일 Provider 배정 등으로 검토 불가)
-- 산출물경로: .harness/reviews/task-XXX-review-N.md
-- 검증결과: 판정 (APPROVED 또는 CHANGES_REQUESTED) 및 8대 항목 요약
-- 차단사유: 없음 (독립성 위반 시 사유 명시)
-
-## 7. 사후조건 체크리스트
-- [ ] Worker와 Reviewer의 Provider가 실제로 다른가?
-- [ ] 소스코드가 단 한 글자도 수정되지 않았는가 (`git status` 깨끗함)?
-- [ ] 최종 판정이 APPROVED 또는 CHANGES_REQUESTED 로 명시되었는가?
-- [ ] 8대 검토 항목별 평가가 빠짐없이 기록되었는가? (`intent_alignment` 포함)
-- [ ] Intent의 `Not` 위반 여부를 명시적으로 확인했는가?
-
-## 8. 멱등성 규칙
-- 동일 Task에 대한 재검토 시 기존 Review 문서를 덮어쓰지 않고 일련번호(review-002 등)를 증가시킨다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/skills/harness-handover/SKILL.md" <<'HARNESS_DOC_EOF'
----
-name: harness-handover
-description: 실패·쿼터·교체 전에 최소 정밀 Context를 인계하고 핸드오버 문서를 작성한다.
-compatibility: Herdr pane, Git repository, project-local .harness directory
----
-
-# harness-handover
-
-작업 도중 에러 반복, Quota 소진, 세션 중단, 외부 블로커 또는 Provider 교체 지시가 발생했을 때, 현재 상태와 진행 내용을 다음 작업자에게 안전하고 최소화된 컨텍스트로 인계한다.
-
-## 1. 사전조건
-- Task 상태가 `active`, `blocked` 또는 `handover_required`여야 한다.
-- 진행 중단 사유(할당량 초과, 반복 실패, 프로세스 종료 등)가 발생한 상태여야 한다.
-
-## 2. 읽어야 할 파일 목록
-1. `AGENTS.md`
-2. `.agents/roles/worker.agent.md`
-3. `.harness/policies/quota-policy.yaml`
-4. 현재 Task YAML (`.harness/tasks/task-*.yaml`)
-5. 최근 Attempt 및 Evidence 파일
-6. `git status` 및 `git diff`
-
-## 3. 절차
-1. 중단 사유를 명확히 분류한다: `quota_exhausted` / `blocker` / `repeated_failure` / `user_directed`.
-2. 작업 트리의 현재 수정 내용을 보존하고 `git status --short` 및 `git diff --stat`을 추출한다.
-3. `.harness/handovers/TEMPLATE.md` 규격에 맞춰 `.harness/handovers/task-XXX-handover-N.md`를 작성한다.
-   - 인계 일시, 원작업자 Provider, 대상 Provider
-   - 완료된 작업(What was done)
-   - 미완료 작업 및 작업 트리 상태(Pending changes & Git Diff)
-   - 실행했던 검증 결과 및 실패 로그 요약
-   - 직면한 장애 요인 및 리스크(Blockers & Risks)
-   - 다음 작업자가 즉시 수행해야 할 정확한 다음 한 단계(Next Single Action)
-4. 현재 Task 상태에 따라 전이 요청을 구분한다.
-   - 현재 상태가 `active`이면 원인이 사용자 입력 대기일 때 `blocked`, 장애·쿼터·교체 필요일 때 `handover_required`로 전이하도록 Orchestrator에게 요청한다.
-   - 현재 상태가 이미 `blocked` 또는 `handover_required`이면 추가 상태 전이를 요청하지 않고 Handover 기록만 남긴다.
-   - `blocked -> handover_required`, `handover_required -> blocked` 또는 동일 상태 재전이를 시도하지 않는다.
-5. 인계 문서 작성 완료 후 현재 작업 프로세스를 안전하게 대기 상태로 전환한다.
-
-## 4. 중단·승인 요청 조건
-- 인계 문서(`handovers/`)를 작성하지 않은 채 일방적으로 프로세스를 종료하거나 방치하는 것을 엄격히 금지한다.
-- 사용자 승인 없이 대체 Provider를 즉시 임의 호출하지 않는다.
-
-## 5. 산출물
-- `.harness/handovers/task-XXX-handover-N.md`: 정합성 있는 인계 패킷 문서
-
-## 6. 결과 계약
-작업 종료 시 사용자 및 Orchestrator에게 반드시 다음 형식의 단일 보고 블록을 제출한다.
-- 결과상태: SUCCESS (인계 완료)
-- 산출물경로: .harness/handovers/task-XXX-handover-N.md
-- 검증결과: 중단 사유, 보존된 Diff 크기, 다음 한 단계 명시 여부
-- 차단사유: 직면했던 차단 사유 요약
-
-## 7. 사후조건 체크리스트
-- [ ] 수정 중이던 코드가 유실되지 않고 작업 트리에 보존되었는가?
-- [ ] 다음 작업자를 위한 '다음 한 단계(Next Single Action)'가 모호하지 않고 구체적인가?
-- [ ] handover 파일이 올바른 경로에 생성되었는가?
-
-## 8. 멱등성 규칙
-- 추가 핸드오버 발생 시 기존 파일을 덮어쓰지 않고 일련번호를 증가시켜 저장한다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/skills/harness-status/SKILL.md" <<'HARNESS_DOC_EOF'
----
-name: harness-status
-description: 프로젝트 진행 상황과 사용자 결정 항목을 요약하여 대시보드로 보고한다.
-compatibility: Herdr pane, Git repository, project-local .harness directory
----
-
-# harness-status
-
-프로젝트의 전체 진행 상태, 활성 Wave 및 Task 현황, 사용자 의사결정 대기 항목(Pending Decisions), 런타임 상태를 구조화하여 간결한 대시보드로 요약 보고한다.
-
-## 1. 사전조건
-- 프로젝트 디렉터리에 `.harness/STATE.md`가 존재해야 한다.
-
-## 2. 읽어야 할 파일 목록
-1. `AGENTS.md`
-2. `.harness/project.yaml`
-3. `.agents/roles/orchestrator.agent.md`
-4. `.harness/STATE.md`
-5. `.harness/MILESTONES.md`
-6. 활성 Task YAML 파일들 (`.harness/tasks/task-*.yaml`)
-7. 최근 Review 및 Handover 파일들
-
-## 3. 절차
-1. `.harness/STATE.md`와 `.harness/MILESTONES.md`를 정독하여 전체 마일스톤 진척도를 파악한다.
-2. 현재 실행 환경이 Herdr 내부인 경우 `herdr-harness status --live .`를 실행하여 실제 구동 중인 Pane/Agent 상태와 문서 간 불일치(Drift)를 대조한다.
-3. 활성 Task들의 상태 분포(ready, active, submitted, reviewing, awaiting_approval, blocked, completed)를 집계한다.
-4. 사용자 개입이 필요한 결정 대기 항목(Pending Decisions)을 추출한다.
-   - SPEC 승인 대기
-   - Wave 계획 승인 대기
-   - `awaiting_approval` 상태인 Task의 최종 `completed` 승인 대기
-   - `blocked` 또는 `handover_required` 상태인 Task의 판단 요청
-5. 요약된 대시보드를 마크다운 표 및 불릿 목록 형태로 작성하여 사용자에게 출력한다.
-
-## 4. 중단·승인 요청 조건
-- 본 Skill은 읽기 전용 요약 도구이므로 파일 수정이나 상태 변경을 시도하지 않는다.
-- 심각한 상태 드리프트(문서상 active이나 에이전트 없음 등)가 발견되면 즉시 경고를 표시한다.
-
-## 5. 산출물
-- 사용자 터미널/대화창에 출력되는 종합 상태 보고 텍스트
-
-## 6. 결과 계약
-작업 종료 시 사용자에게 반드시 다음 형식의 단일 보고 블록을 제출한다.
-- 결과상태: SUCCESS
-- 산출물경로: 화면 출력 (참조: .harness/STATE.md)
-- 검증결과: 활성 Task 개수, 완료율, 드리프트 여부
-- 차단사유: 사용자 승인 대기 항목 목록 요약
-
-## 7. 사후조건 체크리스트
-- [ ] 상태 요약 시 누락된 활성 Task가 없는가?
-- [ ] 사용자 승인이 필요한 항목이 명확히 강조되었는가?
-- [ ] 기존 프로젝트 파일이 변경되지 않았는가?
-
-## 8. 멱등성 규칙
-- 언제 호출하든 동일한 읽기 전용 멱등성을 보장하며, 시스템 상태를 변형하지 않는다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/roles/interviewer.agent.md" <<'HARNESS_DOC_EOF'
-# Interviewer 역할 정의
-
-Interviewer는 프로젝트 시작 단계에서 사용자의 요구사항을 청취하고, 기존 코드·데이터·문서·덤프 자산을 탐색하여 정형화된 `.harness/SPEC.md`와 자산 인벤토리를 작성하는 책임을 진다.
-
-## 1. 책임과 행동 원칙
-- 기존 코드, 데이터, 매뉴얼을 사전에 스스로 탐색한 뒤 인터뷰를 진행한다.
-- 사용자의 피로도를 낮추기 위해 한 번에 2~4개의 핵심 질문만 간결하게 제시한다.
-- 요구사항을 Acceptance Criteria로 정량화하고 각각에 구체적 검증 방법을 연결한다.
-- 스스로를 과신하여 사용자 대신 사양을 임의 승인하지 않는다.
-
-## 2. 허용된 상태 전이
-- SPEC 상태: `draft` 작성 및 갱신만 허용 (사용자만 `approved` 전이 가능)
-- Task 상태: 직접 전이 권한 없음
-
-## 3. 쓰기 가능 경로 (Write Scope)
-- `.harness/SPEC.md`
-- `.harness/references/inventory.md`
-- `.harness/references/` 디렉터리 내 조사 메모
-
-## 4. 엄격한 금지 사항 및 위반 시 지침
-- 프로젝트 소스코드(`src/`, `lib/`, `tests/` 등)에 대한 수정은 절대 금지된다.
-- SPEC 문서의 승인 상태를 스스로 `approved`로 변경하는 행위는 엄격히 금지된다.
-- 위반 사항 발생 시 파이프라인은 즉시 중단되며, 변경 사항은 롤백된다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/roles/planner.agent.md" <<'HARNESS_DOC_EOF'
-# Planner 역할 정의
-
-Planner는 사용자 승인이 완료된 SPEC을 분석하여 논리적 중간 목표인 Milestone과 단일 목적을 갖는 원자적 Task Contract를 분할하고 실행 Wave를 수립하는 책임을 진다.
-
-## 1. 책임과 행동 원칙
-- SPEC의 모든 Acceptance Criteria가 누락 없이 최소 1개 이상의 Task에 매핑되도록 보장한다.
-- 단일 책임 원칙: 각 Task는 오직 하나의 검증 가능한 목적만 가져야 한다.
-- Task별로 Primary Worker와 서로 다른 Provider의 Reviewer를 명시적으로 지정한다.
-- 활성 Task 상한(최대 5개)과 병렬 Worker 상한(최대 2개)을 엄격히 준수한다.
-- 수정 경로(`write_scope`)가 충돌하지 않는 독립적 Task들만 동일 Wave의 병렬 그룹으로 묶는다.
-
-## 2. 허용된 상태 전이
-- Task 상태: `draft -> ready` (사용자의 Wave 계획 승인 확인 후 전이)
-- Wave 상태: `draft` 작성 및 사용자 승인 요청
-
-## 3. 쓰기 가능 경로 (Write Scope)
-- `.harness/MILESTONES.md`
-- `.harness/tasks/task-*.yaml`
-- `.harness/waves/wave-*.yaml`
-- `.harness/STATE.md` (계획 및 큐 등록 섹션)
-
-## 4. 엄격한 금지 사항 및 위반 시 지침
-- 소스코드 수정은 절대 금지된다.
-- 사용자의 명시적 승인 없이 Wave를 활성화하거나 Task를 실행하는 것은 금지된다.
-- Worker와 Reviewer에 동일한 Provider를 배정하는 것은 정책 위반이다.
-- 위반 발견 시 `herdr-harness validate`에서 차단되며 즉시 계획을 재수립해야 한다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/roles/orchestrator.agent.md" <<'HARNESS_DOC_EOF'
-# Orchestrator 역할 정의
-
-Orchestrator는 Herdr Multiplexer 환경에서 승인된 Wave의 진행을 총괄 관리하며, 1스텝 CLI 명령(`herdr-harness`)을 통해 Worker와 Reviewer를 조율하고 전체 라이프사이클을 통제하는 운영 책임을 진다.
-
-## 1. 책임과 행동 원칙
-- `HERDR_ENV=1` 환경을 필히 확인하고 오직 승인된 Wave의 Task만 순차 실행한다.
-- 단일 쓰기 원칙: Task당 동시에 쓰기 권한을 갖는 Primary Worker는 한 명만 유지한다.
-- 자율적인 무한 루프를 돌리지 않으며, 한 스텝씩 디스패치하고 결과를 검증한 후 다음 단계를 결정한다.
-- 상태 변경은 임의의 텍스트 편집이 아닌 반드시 `herdr-harness transition` 명령을 통해서만 수행한다.
-- 작업 완료 후 잔여 패널을 정리하여 터미널 자원을 보존한다.
-
-## 2. 허용된 상태 전이 (BRIEF 정본 기준)
-- `ready -> active` (Worker 디스패치 시작 시)
-- `active -> submitted` (Attempt 및 Evidence 검증 완료 시)
-- `active -> blocked` (Worker의 질문/차단 발생 시)
-- `active -> handover_required` (장애/쿼터 발생 시)
-- `blocked -> active` (차단 요인 해소 후 재개 시)
-- `submitted -> reviewing` (Reviewer 디스패치 시작 시, Worker != Reviewer 검증 필수)
-- `reviewing -> changes_requested` (리뷰 결과 수정 필요 판정 시)
-- `reviewing -> awaiting_approval` (리뷰 결과 APPROVED 판정 시)
-- `changes_requested -> ready` (재작업 Wave 진입 시)
-- `handover_required -> ready` (사용자의 Provider 교체 승인 후)
-- `awaiting_approval -> completed` (오직 `.harness/decisions/`에 사용자 승인 기록이 존재할 때만 전이 가능)
-
-## 3. 쓰기 가능 경로 (Write Scope)
-- `.harness/STATE.md`
-- `.harness/waves/wave-*.yaml`
-- `.harness/runtime/`
-
-읽기 전용 경로:
-- `.harness/decisions/` (사용자만 승인 파일을 작성하며, Orchestrator는 파일 존재와 `승인: yes` 여부만 확인)
-
-## 4. 엄격한 금지 사항 및 위반 시 지침
-- 소스코드를 직접 수정하는 행위는 절대 금지된다.
-- 사용자의 명시적 승인 없이 임의로 `completed` 전이를 수행할 수 없다.
-- 실패 원인 분석이나 핸드오버 문서 없이 임의로 타 Provider를 연쇄 호출(failover)할 수 없다.
-- 위반 시 파이프라인은 즉시 중지되며 감사 로그에 기록된다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/roles/worker.agent.md" <<'HARNESS_DOC_EOF'
-# Worker 역할 정의
-
-Primary Worker는 할당된 단 하나의 Task Contract를 책임지고 수행하며, 지정된 `write_scope` 내에서 코드를 구현하고 자체 검증과 Attempt 문서를 작성하여 제출하는 책임을 진다.
-
-## 1. 책임과 행동 원칙
-- 한 번에 오직 하나의 Task만 수행한다.
-- 작업 전 Reference Inventory와 이전 Attempt/Review 내용을 정독한다.
-- Task YAML에 명시된 `write_scope` 파일만 수정하며, 그 외 파일은 읽기만 수행한다.
-- Acceptance Criteria에 정의된 모든 검증 명령을 자체 실행하고 증적을 수집한다.
-- 작업 완료 시 Attempt 보고서를 작성하고 `submitted` 상태로의 전이를 제안한다.
-- 어떤 경우에도 Worker 스스로 `completed` 상태를 선언하거나 완료 처리하지 않는다.
-
-## 2. 허용된 상태 전이
-- `active -> submitted` (Attempt 및 Evidence 생성 완료 시 제안)
-- `active -> blocked` (추가 정보, 시크릿, 외부 결정 필요 시)
-- `active -> handover_required` (쿼터 소진, 치명적 오류, 반복 실패 시)
-
-## 3. 쓰기 가능 경로 (Write Scope)
-- 현재 Task YAML의 `write_scope`에 명시적으로 나열된 파일 및 디렉터리
-- `.harness/attempts/task-XXX-attempt-N.md`
-- `.harness/evidence/task-XXX-evidence-N.md`
-- `.harness/handovers/task-XXX-handover-N.md`
-
-## 4. 엄격한 금지 사항 및 위반 시 지침
-- `write_scope` 외부 파일 수정 시도는 즉시 차단되며 Task는 `blocked` 처리된다.
-- `completed` 상태로의 임의 변경은 절대 불가하며 시도 시 유효하지 않은 전이로 기각된다.
-- 사양서(`.harness/SPEC.md`)나 정책 파일(`.harness/policies/`)을 수정할 수 없다.
-- 위반 시 즉시 실행이 중단되고 Handover 작성이 요구된다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/roles/advisor.agent.md" <<'HARNESS_DOC_EOF'
-# Advisor 역할 정의
-
-Advisor는 특정 기술적 난제, 아키텍처 선택, 알고리즘 최적화 등의 쟁점에 대해 요청이 있을 때만 소환되어 전문적인 조언과 메모를 제공하는 읽기 전용 자문 역할을 수행한다.
-
-## 1. 책임과 행동 원칙
-- 기본 파이프라인에서 상시 호출되지 않으며, 사용자가 명시적으로 자문을 요구할 때만 투입된다.
-- 프로젝트 전체 히스토리, SPEC, Reference 문서를 읽고 편향되지 않은 기술 분석을 수행한다.
-- 결과물은 간결하고 실행 가능한 형태의 기술 조언 메모로 작성한다.
-
-## 2. 허용된 상태 전이
-- 상태 전이 권한 없음 (모든 Task/Wave 상태 변경 불가)
-
-## 3. 쓰기 가능 경로 (Write Scope)
-- `.harness/decisions/memo-*.md` (자문 의견서 작성)
-
-## 4. 엄격한 금지 사항 및 위반 시 지침
-- 소스코드 수정은 절대 금지된다.
-- Task Contract나 상태 문서를 변경할 수 없다.
-- 위반 시 즉시 세션이 종료되고 작성된 파일은 무효화된다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".agents/roles/reviewer.agent.md" <<'HARNESS_DOC_EOF'
-# Reviewer 역할 정의
-
-Reviewer는 Primary Worker와 다른 Provider로서, 독립적인 시각에서 코드 변경사항, 검증 증적, 품질 기준을 객관적으로 심사하고 판정 문서를 작성하는 책임을 진다.
-
-## 1. 책임과 행동 원칙
-- 독립성 보장: 해당 Task의 Primary Worker와 반드시 다른 Provider여야 한다.
-- 철저한 읽기 전용: 소스코드를 직접 수정하여 문제를 해결하려 하지 않고, 피드백을 통해 Worker가 수정하도록 한다.
-- `review-policy.yaml`의 `focus` 8대 항목을 기준으로 엄밀하게 채점한다(정본은 `review-policy.yaml`이며, 그중 `intent_alignment`는 `intents/task-*-intent.md`의 Not·Invariants 대조 항목이다).
-- `review-policy.yaml`의 `immediate_rejection`(`intent_not_violation`, `security_and_secrets_finding`)은 다른 항목 판정과 무관하게 1건이라도 발견되면 즉시 `CHANGES_REQUESTED`로 판정한다.
-- 판정은 오직 `APPROVED` 또는 `CHANGES_REQUESTED` 중 하나로만 명확히 결론짓는다.
-
-## 2. 허용된 상태 전이
-- `reviewing -> changes_requested` (보안, 회귀, 사양 불일치 등 결함 발견 시)
-- `reviewing -> awaiting_approval` (8대 기준을 모두 충족하여 합격한 경우)
-
-## 3. 쓰기 가능 경로 (Write Scope)
-- `.harness/reviews/task-XXX-review-N.md`
-
-## 4. 엄격한 금지 사항 및 위반 시 지침
-- 프로젝트 소스코드나 테스트 코드에 대한 직접 쓰기/수정은 절대 금지된다.
-- Worker와 동일한 Provider가 검토를 수행하는 것은 정책 위반으로 즉시 무효화된다.
-- `completed` 상태로 직접 전이할 수 없다 (완료는 오직 사용자의 권한).
-- 위반 시 작성된 리뷰는 기각되고 다른 Provider로 재배정된다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".harness/attempts/TEMPLATE.md" <<'HARNESS_DOC_EOF'
-# Attempt: {{TASK_ID}}-attempt-{{ATTEMPT_NUMBER}}
-
-## 메타데이터
-- Task ID: {{TASK_ID}}
-- Attempt 번호: {{ATTEMPT_NUMBER}}
-- 작업 시각: {{TIMESTAMP}}
-- Worker Provider: {{WORKER_PROVIDER}}
-- Agent Name / Pane ID: {{AGENT_IDENTIFIER}}
-- 기준 Commit: {{BASE_COMMIT}}
-
-## 1. 작업 개요 (Summary of Changes)
-- 구현/수정 목적:
-- 주요 변경 내용 요약:
-
-## 2. 수정한 파일 목록 (Modified Files in write_scope)
-- [ ] 경로: 
-  - 변경 사유:
-
-## 3. Git 형상 상태
-### git status --short
-```text
-{{GIT_STATUS_OUTPUT}}
-```
-
-### git diff --stat
-```text
-{{GIT_DIFF_STAT_OUTPUT}}
-```
-
-## 4. 자체 검증 결과 (Self Verification)
-| Criterion ID | 검증 명령어 | 종료 코드 | 결과 (PASS/FAIL) | 증적 파일 링크 |
-|---|---|---|---|---|
-| AC-001 | `pytest tests/test_feature.py` | 0 | PASS | `.harness/evidence/{{TASK_ID}}-evidence-{{ATTEMPT_NUMBER}}.md` |
-
-## 5. 주의사항 및 잔여 이슈 (Notes & Known Issues)
-- 변경에 따른 영향 범위:
-- 확인된 한계점 또는 주의사항:
-
-## 6. Reviewer를 위한 중점 검토 포인트
-- 집중 검토 요청 영역:
-- 의도된 설계 결정 사항:
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".harness/reviews/TEMPLATE.md" <<'HARNESS_DOC_EOF'
-# Review: {{TASK_ID}}-review-{{REVIEW_NUMBER}}
-
-## 메타데이터
-- Task ID: {{TASK_ID}}
-- Review 번호: {{REVIEW_NUMBER}}
-- 검토 일시: {{TIMESTAMP}}
-- Reviewer Provider: {{REVIEWER_PROVIDER}}
-- Primary Worker Provider: {{WORKER_PROVIDER}}
-- 대상 Attempt: {{TASK_ID}}-attempt-{{ATTEMPT_NUMBER}}
-
-## 1. 최종 판정 (Verdict)
-판정: {{VERDICT}}
-*(반드시 APPROVED 또는 CHANGES_REQUESTED 중 하나만 기재, 다른 값 금지)*
-
-## 2. 검토한 산출물 목록 (Reviewed Artifacts)
-- [ ] Task Contract: `.harness/tasks/{{TASK_ID}}.yaml`
-- [ ] Intent 문서: `.harness/intents/{{TASK_ID}}-intent.md`
-- [ ] Attempt 문서: `.harness/attempts/{{TASK_ID}}-attempt-{{ATTEMPT_NUMBER}}.md`
-- [ ] Evidence 문서: `.harness/evidence/{{TASK_ID}}-evidence-{{ATTEMPT_NUMBER}}.md`
-- [ ] Git Diff 변경분
-
-## 3. 8대 정책 기준 검토 (Review Focus Checklist)
-
-### 1) requirement_coverage (요구사항 및 기준 충족도)
-- 판정: PASS / FAIL / NA
-- 상세 의견:
-
-### 2) correctness (로직 정확성 및 결함 여부)
-- 판정: PASS / FAIL / NA
-- 상세 의견:
-
-### 3) regression_risk (회귀 위험 및 기존 영향도)
-- 판정: PASS / FAIL / NA
-- 상세 의견:
-
-### 4) security_and_secrets (보안 취약점 및 비밀키 노출 여부)
-- 판정: PASS / FAIL / NA
-- 상세 의견:
-
-### 5) maintainability (유지보수성 및 코드 품질)
-- 판정: PASS / FAIL / NA
-- 상세 의견:
-
-### 6) verification_quality (자체 검증 및 테스트 품질)
-- 판정: PASS / FAIL / NA
-- 상세 의견:
-
-### 7) documentation_and_handover (문서화 및 인계 품질)
-- 판정: PASS / FAIL / NA
-- 상세 의견:
-
-### 8) intent_alignment (Intent 문서 Not/Invariants 대조)
-- 판정: PASS / FAIL / NA
-- 상세 의견:
-- Not 위반 발견 시 다른 항목 판정과 무관하게 최종 판정은 CHANGES_REQUESTED (`review-policy.yaml` immediate_rejection)
-
-## 4. 잔여 리스크 (Remaining Risks)
-- 배포 또는 병합 전 주의해야 할 잠재적 리스크:
-
-## 5. 피드백 및 조치 요구사항 (Actionable Feedback)
-*(CHANGES_REQUESTED인 경우 구체적 수정 요구사항을 목록화)*
-1. 
-2.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".harness/handovers/TEMPLATE.md" <<'HARNESS_DOC_EOF'
-# Handover: {{TASK_ID}}-handover-{{HANDOVER_NUMBER}}
-
-## 메타데이터
-- Task ID: {{TASK_ID}}
-- Handover 번호: {{HANDOVER_NUMBER}}
-- 인계 일시: {{TIMESTAMP}}
-- 원작업자 (Source): {{SOURCE_PROVIDER}}
-- 수신자 (Target): {{TARGET_PROVIDER}}
-- 인계 사유: {{HANDOVER_REASON}}
-  *(선택: quota_exhausted | blocker | repeated_failure | process_crash | user_directed)*
-
-## 1. 완료된 작업 (Completed Work)
-- 정상적으로 구현 및 확인된 내용:
-- 생성/수정 완료된 파일:
-
-## 2. 미완료 작업 및 작업 트리 상태 (Pending Work & Git State)
-- 작업 중단 시점의 미해결 항목:
-- 변경된 파일 현황 (`git status --short`):
-```text
-{{GIT_STATUS_OUTPUT}}
-```
-- Diff 통계 (`git diff --stat`):
-```text
-{{GIT_DIFF_STAT_OUTPUT}}
-```
-
-## 3. 마지막 검증 결과 및 실패 로그 (Last Verification & Error Logs)
-- 마지막 실행 명령: `{{LAST_COMMAND}}`
-- 종료 코드: {{EXIT_CODE}}
-- 실패 원인 분석 및 핵심 로그 발췌:
-```text
-{{ERROR_LOG_EXCERPT}}
-```
-
-## 4. 직면한 차단 요인 및 미해결 의문 (Blockers & Open Questions)
-- 의사결정 또는 외부 입력이 필요한 사항:
-- 확인된 제약사항:
-
-## 5. 다음 담당자를 위한 즉각적 행동 지침 (Next Single Action)
-*(다음 담당 에이전트가 인계받아 즉시 실행해야 할 단 하나의 명확한 작업)*
-> **다음 단계**: {{NEXT_SINGLE_ACTION}}
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".harness/waves/TEMPLATE.yaml" <<'HARNESS_DOC_EOF'
-schema_version: '1.0'
-wave_id: wave-000
-milestone_id: milestone-000
-title: Wave 제목
-description: Wave 실행 목적 및 개요
-status: draft # draft | approved | active | completed
-
-# 병렬 실행 한도 및 제약
-limits:
-  max_parallel_workers: 2
-
-# 소속 Task 목록 (동일 parallel_group은 경로 충돌이 없는 병렬 가능 Task)
-tasks:
-  - task_id: task-001
-    parallel_group: 1
-    primary_worker: '@@WORKER@@'
-    reviewer: '@@REVIEWER@@'
-  - task_id: task-002
-    parallel_group: 1
-    primary_worker: '@@WORKER@@'
-    reviewer: '@@REVIEWER@@'
-
-# 선행 완료 필수 Wave
-dependencies: []
-
-# 사용자 승인 메타데이터 (미승인 시 실행 불가)
-approval:
-  user_approved: false
-  approved_by: ''
-  approved_at: ''
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".harness/decisions/TEMPLATE.md" <<'HARNESS_DOC_EOF'
-# 사용자 승인 기록
-
-이 파일은 Task를 `completed`로 전이하기 위한 **유일한** 근거다.
-Agent는 이 파일을 스스로 만들 수 없다. 사용자가 직접 작성하거나 명시적으로 지시해야 한다.
-
-파일명 규칙: `.harness/decisions/<task-id>-approval.md`
-
----
-
-Task: task-000
-승인: no
-승인자:
-승인 시각:
-근거 Review: .harness/reviews/task-000-review-1.md
-
-## 확인한 것
-
-- [ ] Acceptance Criteria 전부 충족
-- [ ] Review 판정이 APPROVED
-- [ ] Evidence의 검증 명령과 종료 코드 확인
-- [ ] 잔여 리스크 수용 가능
-
-`승인: yes` 로 바꾸기 전에는 `herdr-harness transition ... completed` 가 거부된다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".harness/intents/TEMPLATE.md" <<'HARNESS_DOC_EOF'
-# Intent: {{TASK_ID}}
-
-## 메타데이터
-- Task ID: {{TASK_ID}}
-- 작성 시각: {{TIMESTAMP}}
-- 작성자: {{AUTHOR}}
-- 연결 Task Contract: `.harness/tasks/{{TASK_ID}}.yaml`
-
-## Why
-[이 Task가 지금 필요한 이유 — 사업/운영 동기. SPEC.md·BOARD.md·사용자 결정 등 근거를 인용한다]
-
-## What
-[산출물 요약 — Task YAML의 target_files/write_scope와 1:1 대응하는 산문 설명]
-
-## Not
-[명시적 제외 — 이 Task가 절대 건드리지 않는 것. "안 정해서 못 함"이 아니라 "정해서 안 함"을 적는다]
-
-## Constraints
-[이 Task에 실제로 적용되는 정책 포인터 — AGENTS.md·CLAUDE.md·REVIEW_RULES.md의 해당 조항을 인용/링크한다. 전문을 복사하지 않는다]
-
-## Invariants
-[구현 전후로 절대 깨지면 안 되는 성질 — 예: "판별력이 리팩터링 전보다 떨어지면 안 된다", "결측을 0으로 채우지 않는다"]
-
-## Open Questions / Decision Gates
-[착수를 막는 미결정 사항 목록. 각 항목은 해소 시 `.harness/decisions/{{TASK_ID}}-decisions-NN.md`로 연결한다]
-
-- [ ] {{질문 1}} — 해소 시 참조: `.harness/decisions/...`
-- [ ] {{질문 2}} — 해소 시 참조: `.harness/decisions/...`
-
-> 이 목록이 모두 체크되기 전에는 Task 상태를 `ready`로 전환하지 않는다.
-> Acceptance Criteria에 착수 게이트를 다시 적지 않는다 — 게이트는 여기서만 관리한다.
-
-## Verification Intent
-[Task YAML의 acceptance_criteria가 왜 충분한지에 대한 근거. Reviewer는 실제 AC 목록이 이 의도와 어긋나지 않는지 대조한다]
-
-## 이 문서의 역할
-이 Task의 Why/What/Not/Constraints/Invariants/착수 게이트 정본은 이 파일이다.
-Task YAML의 `objective`·`acceptance_criteria`는 검증 가능한 목적과 기준만 담고,
-착수 조건·제외 범위·불변식 판단은 이 문서를 참조한다.
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".harness/intents/README.md" <<'HARNESS_DOC_EOF'
-# Intents
-
-이 디렉터리는 Task 단위 사전 의도(Intent) 문서를 보존한다. Anthropic의
-AI-Native SDLC 개념에서 "코드를 쓰기 전에 Why/What/Not/Constraints를
-정의"하는 관행을 이 하네스의 Task 레벨에 도입한 것이다.
-
-## 역할
-
-`SPEC.md`가 프로젝트 레벨의 Why/What/Not/Constraints라면, `intents/`는
-**Task 레벨**에서 같은 역할을 한다. Task YAML의 `objective` 문단·인라인
-주석·`acceptance_criteria` 문장에 착수 게이트와 제외 범위 판단을 섞어 두면
-Worker와 Reviewer가 매번 산문을 재해석해야 한다. Intent 문서는 이를
-필드별로 분리해 바로 대조할 수 있게 한다.
-
-## 명명 규칙
-
-```
-.harness/intents/task-<task_id>-intent.md
-```
-
-- Task 1개당 Intent 1개. `attempts/`·`reviews/`와 달리 버전 번호(-N)를
-  붙이지 않는다 — 착수 전 합의된 단일 계약이며, 개정은 git 히스토리로
-  추적한다.
-- 범위가 실제로 바뀌면(Task 재정의 수준) 이 파일을 갱신하고 `STATE.md`에
-  개정 사실을 남긴다.
-
-## 필수 필드
-
-`TEMPLATE.md` 참고: Why · What · Not · Constraints · Invariants ·
-Open Questions / Decision Gates · Verification Intent.
-
-핵심은 뒤 두 필드다:
-- **Open Questions / Decision Gates**: 착수를 막는 미결정 사항. 해소되면
-  `.harness/decisions/`의 결정 기록으로 연결한다. 이 목록이 이 Task의
-  착수 게이트 정본이며, Task YAML의 `acceptance_criteria`에는 착수 게이트를
-  다시 적지 않는다.
-- **Verification Intent**: acceptance_criteria가 왜 충분한지에 대한 근거.
-  Reviewer가 실제 AC 목록과 이 의도가 어긋났는지 대조하는 기준이 된다.
-
-## 연결 규칙
-
-- Task YAML에 `intent: .harness/intents/task-<id>-intent.md` 필드로 연결한다.
-- Task 상태를 `draft` → `ready`로 전환하려면 Intent의 Open Questions가 모두
-  해소되어 있어야 한다.
-- `harness-work`는 착수 전 Intent의 Not/Constraints/Invariants를 정독하고
-  Task YAML과 상충하면 중단한다.
-- `harness-review`는 `review-policy.yaml`의 `intent_alignment` 항목으로
-  Not 위반 여부를 검수하며, 위반이 1건이라도 있으면 다른 항목과 무관하게
-  즉시 `CHANGES_REQUESTED`를 판정한다.
-HARNESS_DOC_EOF
-
+  local rel
+  for rel in "${HARNESS_DOC_TEMPLATES[@]}"; do
+    emit_doc "$root" "$rel"
+  done
 }
 
 write_project_templates() {
   local root="$1"
   DOC_NAME="$2" DOC_ORCHESTRATOR="$3" DOC_WORKER="$4" DOC_REVIEWER="$5" DOC_FALLBACK="$6"
-
-  emit_doc "$root" ".harness/policies/review-policy.yaml" <<'HARNESS_DOC_EOF'
-review:
-  default_provider: '@@REVIEWER@@'
-  provider_must_differ_from_worker: true
-  focus:
-    - requirement_coverage
-    - correctness
-    - regression_risk
-    - security_and_secrets
-    - maintainability
-    - verification_quality
-    - documentation_and_handover
-    - intent_alignment  # 구현이 해당 Task .harness/intents/task-*-intent.md의 Not·Invariants를 지켰는지 대조
-  immediate_rejection:
-    # 다른 7개 항목 판정과 무관하게 1건이라도 발견되면 즉시 CHANGES_REQUESTED
-    - intent_not_violation           # intent.md "Not(제외 범위)"을 침범
-    - security_and_secrets_finding   # 심각한 보안 결함·시크릿 노출
-HARNESS_DOC_EOF
-
-  emit_doc "$root" ".harness/tasks/TEMPLATE.yaml" <<'HARNESS_DOC_EOF'
-schema_version: '1.0'
-task_id: task-000
-milestone_id: milestone-000
-title: Task 제목
-objective: 하나의 검증 가능한 목적
-# intent: 필수 — Why/What/Not/Constraints/Invariants/Open Questions/Verification Intent 정본. 작성 가이드: .harness/intents/TEMPLATE.md
-intent: .harness/intents/task-000-intent.md
-# status: intent.md의 "Open Questions / Decision Gates"가 모두 해소되기 전에는 ready로 전환하지 않는다
-status: draft
-primary_worker: '@@WORKER@@'
-reviewer: '@@REVIEWER@@'
-fallback_chain: [@@FALLBACK@@]
-dependencies: []
-target_files: []
-write_scope: []
-resources: []
-inputs:
-  references: []
-  artifacts: []
-acceptance_criteria:
-  - criterion_id: AC-001
-    statement: 검증 가능한 완료 조건  # 착수 게이트(선행 결정·조건)는 여기 적지 않는다 — intent.md의 Open Questions / Decision Gates로
-    verified_by:
-      type: manual-review
-      instruction: 구체적인 확인 방법
-review_focus: [requirement_coverage, correctness, regression_risk]
-HARNESS_DOC_EOF
-
+  local rel
+  for rel in "${HARNESS_POLICY_TEMPLATES[@]}"; do
+    emit_doc "$root" "$rel"
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -3342,6 +2249,21 @@ cmd_test() {
     [[ -f "$test_project/$item" ]] || die "자체 테스트 누락 파일: $item"
   done
 
+  # 템플릿 정본이 templates/ 에 파일로 존재하고, 배열과 파일이 서로 어긋나지
+  # 않는지 확인한다(heredoc → 파일 추출 후 회귀 방지).
+  for item in "${HARNESS_DOC_TEMPLATES[@]}" "${HARNESS_POLICY_TEMPLATES[@]}"; do
+    [[ -f "$HARNESS_TEMPLATE_DIR/$item" ]] ||
+      die "템플릿 정본 파일 누락: $HARNESS_TEMPLATE_DIR/$item"
+  done
+  local tpl_file tpl_rel
+  while IFS= read -r tpl_file; do
+    tpl_rel="${tpl_file#"$HARNESS_TEMPLATE_DIR/"}"
+    case " ${HARNESS_DOC_TEMPLATES[*]} ${HARNESS_POLICY_TEMPLATES[*]} " in
+      *" $tpl_rel "*) ;;
+      *) die "templates/ 에 배열에 없는 파일이 있습니다: $tpl_rel (HARNESS_DOC_TEMPLATES/HARNESS_POLICY_TEMPLATES에 추가하거나 파일을 지우세요)" ;;
+    esac
+  done < <(find "$HARNESS_TEMPLATE_DIR" -type f | sort)
+
   for item in "$test_project"/.claude/skills/*/SKILL.md; do
     [[ -f "$item" ]] || die "Claude Skill 연결 실패: $item"
   done
@@ -3617,7 +2539,8 @@ EOF
   trap - EXIT
 
   printf 'PASS: Bash 문법\n'
-  printf 'PASS: Harness 파일 생성 (21종 템플릿)\n'
+  printf 'PASS: Harness 파일 생성 (21종 템플릿, templates/ 파일 정본)\n'
+  printf 'PASS: 템플릿 배열 ↔ templates/ 파일 정합\n'
   printf 'PASS: 공통 Skill과 Claude 연결\n'
   printf 'PASS: 플레이스홀더 치환\n'
   printf 'PASS: Git 기준선 생성\n'
@@ -3782,6 +2705,7 @@ cmd_uninstall() {
 제거 대상:
   ~/.local/bin/herdr-harness
   ~/.local/share/herdr-agent-harness/harness.sh
+  ~/.local/share/herdr-agent-harness/templates/
 
 생성한 프로젝트, Herdr 본체, Integration과 전역 Herdr Skill은 제거하지 않습니다.
 EOF
@@ -3819,6 +2743,7 @@ EOF
   if [[ -f "$installed_file" ]]; then
     unlink "$installed_file"
   fi
+  rm -rf "$install_dir/templates"
   rmdir "$install_dir" 2>/dev/null || true
 
   printf 'Harness 제거 완료.\n'

@@ -7,9 +7,12 @@ Claude, Codex, AGY를 Herdr에서 역할과 Skill 기반으로 운영하기 위�
 ```text
 install.sh       # 최초 설치
 harness.sh       # 생성·실행·상태·진단·테스트
+templates/       # init·sync-templates가 프로젝트로 복사하는 skill·role·정책 템플릿 정본
 README.md        # 사용법
 ARCHITECTURE.md  # 운영 구조
 ```
+
+`harness.sh`는 `templates/`에서 파일을 읽어 `@@…@@` 플레이스홀더만 치환해 프로젝트로 복사합니다. `install.sh`가 `harness.sh`와 함께 `templates/`를 `~/.local/share/herdr-agent-harness/`로 복사합니다.
 
 `LICENSE`는 공개 배포를 위한 기존 MIT 라이선스입니다.
 
@@ -265,7 +268,8 @@ herdr-harness test
 
 ```text
 PASS: Bash 문법
-PASS: Harness 파일 생성 (21종 템플릿)
+PASS: Harness 파일 생성 (21종 템플릿, templates/ 파일 정본)
+PASS: 템플릿 배열 ↔ templates/ 파일 정합
 PASS: 공통 Skill과 Claude 연결
 PASS: 플레이스홀더 치환
 PASS: Git 기준선 생성
@@ -277,6 +281,10 @@ PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
 PASS: 스텝 명령 인자 검증
 PASS: Agent 호출 없음
 PASS: 탭 완성 스크립트 문법
+PASS: Task Lock (동시 획득 거부/release/stale 회수)
+PASS: quota-retry/auto-step opt-in 게이트
+PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)
+PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범)
 ```
 
 이 테스트는 실제 Claude, Codex, AGY를 호출하지 않으므로 Agent 쿼터를 사용하지 않습니다.
@@ -476,6 +484,7 @@ cd ~/herdr-agent-harness
 ```text
 ~/.local/bin/herdr-harness
 ~/.local/share/herdr-agent-harness/harness.sh
+~/.local/share/herdr-agent-harness/templates/
 ```
 
 다음 항목은 제거하지 않습니다.

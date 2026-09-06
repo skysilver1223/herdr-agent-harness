@@ -1,0 +1,26 @@
+schema_version: '1.0'
+task_id: task-000
+milestone_id: milestone-000
+title: Task 제목
+objective: 하나의 검증 가능한 목적
+# intent: 필수 — Why/What/Not/Constraints/Invariants/Open Questions/Verification Intent 정본. 작성 가이드: .harness/intents/TEMPLATE.md
+intent: .harness/intents/task-000-intent.md
+# status: intent.md의 "Open Questions / Decision Gates"가 모두 해소되기 전에는 ready로 전환하지 않는다
+status: draft
+primary_worker: '@@WORKER@@'
+reviewer: '@@REVIEWER@@'
+fallback_chain: [@@FALLBACK@@]
+dependencies: []
+target_files: []
+write_scope: []
+resources: []
+inputs:
+  references: []
+  artifacts: []
+acceptance_criteria:
+  - criterion_id: AC-001
+    statement: 검증 가능한 완료 조건  # 착수 게이트(선행 결정·조건)는 여기 적지 않는다 — intent.md의 Open Questions / Decision Gates로
+    verified_by:
+      type: manual-review
+      instruction: 구체적인 확인 방법
+review_focus: [requirement_coverage, correctness, regression_risk]

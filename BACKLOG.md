@@ -409,7 +409,31 @@ caveat) 여부는 감량 SPEC에서 확정. 9-6-1(제거 스킬 마이그레이�
   "21종"·"16개 케이스"로 정합.
 - `bash harness.sh test` 17개 PASS 재확인.
 
-9-4·9-5(구조 감량)는 별도 SPEC로 미착수 유지.
+9-4(스킬 9→6, 8→4 섹션)는 별도 SPEC로 미착수 유지.
+
+### 9-10. Task A — 템플릿 파일 추출 완료 (2026-09-06, 브랜치 `fix/drift-9-3`)
+
+9-5 A안을 실행했다. `harness.sh`의 `emit_doc`가 heredoc 대신 `templates/`
+디렉터리의 실제 파일을 읽어 `@@…@@`만 치환하도록 바꿨다.
+
+- `templates/` 신설 — `write_project_docs`·`write_project_templates`의 heredoc
+  24개(skill 9·role 6·`.harness/**/TEMPLATE.*` 8·`review-policy.yaml`)를
+  같은 상대경로의 파일로 추출. 두 함수는 `HARNESS_DOC_TEMPLATES`/
+  `HARNESS_POLICY_TEMPLATES` 배열을 도는 루프로 축소.
+- `HARNESS_TEMPLATE_DIR` 해석: `readlink -f "${BASH_SOURCE[0]}"`로 심볼릭 링크
+  (`~/.local/bin/herdr-harness` → `$INSTALL_DIR/harness.sh`)를 풀어 그 옆
+  `templates/`를 가리킨다. `HARNESS_TEMPLATE_DIR` 환경변수로 override 가능.
+- `install.sh`: `cp -R templates/ $INSTALL_DIR/templates/` 추가,
+  `--uninstall`·`cmd_uninstall`도 `templates/` 제거.
+- `cmd_test`: 배열 ↔ `templates/` 파일 양방향 정합 검사 추가(누락·orphan 모두
+  die). PASS 18개.
+- **회귀 검증:** 추출 전 `HEAD:harness.sh`와 추출 후로 각각 프로젝트를 생성해
+  `diff -r` — `HARNESS_START.md`의 프로젝트 자기 경로(`cd "..."`) 한 줄 외
+  전부 byte-identical. 심볼릭 링크 실행·`install.sh` 전체 설치/제거도
+  샌드박스에서 확인.
+- `harness.sh` 3862줄 → 2760줄 (-1102, -29%).
+
+`src/*.sh` concat 빌드(9-5 B안)는 결정대로 안 함. 9-4(스킬 병합)는 별도.
 
 ---
 

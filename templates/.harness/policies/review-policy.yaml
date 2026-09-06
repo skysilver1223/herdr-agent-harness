@@ -1,0 +1,16 @@
+review:
+  default_provider: '@@REVIEWER@@'
+  provider_must_differ_from_worker: true
+  focus:
+    - requirement_coverage
+    - correctness
+    - regression_risk
+    - security_and_secrets
+    - maintainability
+    - verification_quality
+    - documentation_and_handover
+    - intent_alignment  # 구현이 해당 Task .harness/intents/task-*-intent.md의 Not·Invariants를 지켰는지 대조
+  immediate_rejection:
+    # 다른 7개 항목 판정과 무관하게 1건이라도 발견되면 즉시 CHANGES_REQUESTED
+    - intent_not_violation           # intent.md "Not(제외 범위)"을 침범
+    - security_and_secrets_finding   # 심각한 보안 결함·시크릿 노출

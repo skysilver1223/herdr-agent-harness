@@ -43,6 +43,7 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
   if [[ -f "$INSTALL_DIR/harness.sh" ]]; then
     unlink "$INSTALL_DIR/harness.sh"
   fi
+  rm -rf "$INSTALL_DIR/templates"
   rmdir "$INSTALL_DIR" 2>/dev/null || true
   printf '제거 완료: %s\n' "$COMMAND_PATH"
   exit 0
@@ -52,10 +53,16 @@ fi
   printf '오류: install.sh와 harness.sh는 같은 디렉터리에 있어야 합니다.\n' >&2
   exit 1
 }
+[[ -d "$SCRIPT_DIR/templates" ]] || {
+  printf '오류: templates/ 디렉터리가 없습니다. 저장소를 온전히 clone했는지 확인하세요.\n' >&2
+  exit 1
+}
 
 bash -n "$SOURCE"
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 install -m 0755 "$SOURCE" "$INSTALL_DIR/harness.sh"
+rm -rf "$INSTALL_DIR/templates"
+cp -R "$SCRIPT_DIR/templates" "$INSTALL_DIR/templates"
 ln -sfn "$INSTALL_DIR/harness.sh" "$COMMAND_PATH"
 
 printf '설치 완료: %s\n' "$COMMAND_PATH"
