@@ -265,13 +265,13 @@ herdr-harness test
 
 ```text
 PASS: Bash 문법
-PASS: Harness 파일 생성 (20종 템플릿)
+PASS: Harness 파일 생성 (21종 템플릿)
 PASS: 공통 Skill과 Claude 연결
 PASS: 플레이스홀더 치환
 PASS: Git 기준선 생성
 PASS: 신규 프로젝트 보호
 PASS: 비대화형 명시적 실패
-PASS: 상태 전이표 강제 (14개 케이스)
+PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)
 PASS: 이벤트 로그 기록
 PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
 PASS: 스텝 명령 인자 검증
@@ -391,7 +391,7 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 
 두 명령 모두 기본은 꺼져 있고(opt-in), 완전 자율 실행이 아니라 **유한하고 되돌릴 수 있는 범위**만 자동화합니다. 둘 다 실행 전에 같은 Task에 대한 mkdir 기반 Task Lock(`.harness/runtime/TASK_ID.lock`)을 잡아, `quota-retry`/`auto-step` 두 자동화 경로끼리 같은 Task에 동시에 들어가는 것을 막습니다 — SQLite Lease나 Fencing Token 같은 완전한 락은 아니며, 사람이 그 사이에 수동으로 `dispatch`/`transition`을 실행하는 것까지 막지는 않으므로 자동 명령이 도는 동안은 `status --live`로 확인하고 수동 개입을 삼가세요.
 
-- **`quota-retry`**: `.harness/policies/quota-policy.yaml`의 `automatic_failover: true`로 켜야 동작합니다. `quota-check`가 남긴 연속 `low` 판정이 `low_confirm_count`회 이상, 그 간격이 `cooldown_seconds` 이상일 때만 진행하며, Task당 1회만 허용합니다(flapping 방지). 진행 시 기존 `close-agent`/`transition`을 그대로 호출해 Provider를 `fallback_chain`의 다음 값으로 바꾸고 `handover_required`까지 전이한 뒤 **거기서 멈춥니다**. `ready`로 재개하려면 사람이 `.harness/decisions/TASK_ID-failover-approval.md`에 `승인: yes`를 쓰고 `transition ... ready`를 직접 실행해야 합니다 — `completed`는 물론 이 재개 단계도 자동화하지 않습니다.
+- **`quota-retry`**: `.harness/policies/quota-policy.yaml`의 `automatic_failover: true`로 켜야 동작합니다. `quota-check`가 남긴 연속 `low` 판정이 `low_confirm_count`회 이상, 그 간격이 `cooldown_seconds` 이상일 때만 진행하며, Task당 1회만 허용합니다(flapping 방지). 진행 시 기존 `close-agent`/`transition`을 그대로 호출해 Provider를 `fallback_chain`의 다음 값으로 바꾸고, `handover_required` 전이 전에 `.harness/handovers/TASK_ID-handover-N.md` stub(사유·Provider 교체·`git diff --stat`·다음 한 단계)을 자동 생성한 뒤 `handover_required`까지 전이하고 **거기서 멈춥니다**(`transition`이 인계 문서를 요구하므로 자동 경로도 인계 문맥을 남깁니다). `ready`로 재개하려면 사람이 `.harness/decisions/TASK_ID-failover-approval.md`에 `승인: yes`를 쓰고 `transition ... ready`를 직접 실행해야 합니다 — `completed`는 물론 이 재개 단계도 자동화하지 않습니다.
 - **`auto-step`**: `.harness/policies/loop-policy.yaml`의 `enabled: true`로 켜야 동작하고, `--max-turns`는 `max_turns_ceiling`(기본 5)을 넘을 수 없습니다. 상주 루프가 아니라 호출 1회가 반드시 끝납니다: 1턴째만 `dispatch`로 Pane을 새로 만들고, 이후 턴은 같은 Agent를 `observe`로만 재조회합니다(반복 dispatch는 Pane을 고아로 만들기 때문에 하지 않습니다). `settled`/`blocked`/오류에 도달하면 즉시 멈추고 판단을 사람에게 넘깁니다 — `reviewing`·`awaiting_approval`·`completed`로 이어지는 코드 경로 자체가 없습니다.
 
 ## 생성되는 프로젝트 구조

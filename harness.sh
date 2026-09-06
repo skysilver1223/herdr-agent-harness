@@ -396,7 +396,7 @@ Herdr Multiplexer 환경에서 승인된 Wave를 실행한다. 스크립트 기�
 ### 5단계: Reviewer 디스패치 및 독립 검토 (submitted -> reviewing)
 1. `herdr-harness transition . <task_id> reviewing` 명령을 실행한다 (Worker != Reviewer 강제 검증).
 2. `herdr-harness dispatch . <task_id> reviewer` 명령을 호출한다.
-   - Reviewer는 읽기 전용으로 Diff, Attempt, Evidence를 7대 정책 기준에 맞춰 검토하고 `.harness/reviews/<task_id>-review-N.md`를 작성한다.
+   - Reviewer는 읽기 전용으로 Diff, Attempt, Evidence를 `review-policy.yaml`의 8대 정책 기준(`focus`)에 맞춰 검토하고 `.harness/reviews/<task_id>-review-N.md`를 작성한다.
    - Reviewer 응답이 `timeout` 또는 `stalled`이면 `herdr-harness observe . <task_id> reviewer`로 재조회한다.
 3. 검토 완료 후 `herdr-harness close-agent . <task_id> reviewer` 로 패널을 닫는다.
 
@@ -916,12 +916,13 @@ Reviewer는 Primary Worker와 다른 Provider로서, 독립적인 시각에서 �
 ## 1. 책임과 행동 원칙
 - 독립성 보장: 해당 Task의 Primary Worker와 반드시 다른 Provider여야 한다.
 - 철저한 읽기 전용: 소스코드를 직접 수정하여 문제를 해결하려 하지 않고, 피드백을 통해 Worker가 수정하도록 한다.
-- `review-policy.yaml`의 7대 핵심 항목을 기준으로 엄밀하게 채점한다.
+- `review-policy.yaml`의 `focus` 8대 항목을 기준으로 엄밀하게 채점한다(정본은 `review-policy.yaml`이며, 그중 `intent_alignment`는 `intents/task-*-intent.md`의 Not·Invariants 대조 항목이다).
+- `review-policy.yaml`의 `immediate_rejection`(`intent_not_violation`, `security_and_secrets_finding`)은 다른 항목 판정과 무관하게 1건이라도 발견되면 즉시 `CHANGES_REQUESTED`로 판정한다.
 - 판정은 오직 `APPROVED` 또는 `CHANGES_REQUESTED` 중 하나로만 명확히 결론짓는다.
 
 ## 2. 허용된 상태 전이
 - `reviewing -> changes_requested` (보안, 회귀, 사양 불일치 등 결함 발견 시)
-- `reviewing -> awaiting_approval` (7대 기준을 모두 충족하여 합격한 경우)
+- `reviewing -> awaiting_approval` (8대 기준을 모두 충족하여 합격한 경우)
 
 ## 3. 쓰기 가능 경로 (Write Scope)
 - `.harness/reviews/task-XXX-review-N.md`
@@ -2131,6 +2132,10 @@ cmd_transition() {
     active)
       require_git_baseline "$root"
       ;;
+    handover_required)
+      compgen -G "$root/.harness/handovers/${task_id}-handover-*.md" >/dev/null ||
+        die "Handover 기록이 없어 handover_required로 전이할 수 없습니다: .harness/handovers/${task_id}-handover-*.md  (harness-handover §3: 인계 문서를 먼저 작성한 뒤 전이한다)"
+      ;;
     submitted)
       compgen -G "$root/.harness/attempts/${task_id}-attempt-*.md" >/dev/null ||
         die "Attempt 기록이 없어 submitted로 전이할 수 없습니다: .harness/attempts/${task_id}-attempt-*.md"
@@ -2975,15 +2980,47 @@ cmd_quota_retry() {
     die "Task의 fallback_chain에서 다음 Provider를 찾지 못했습니다: $task_file"
 
   _runtime_set_task_provider "$task_file" "$role_key" "$next_provider"
-  cmd_transition "$root" "$task_id" handover_required --note "quota-retry: $current_provider -> $next_provider"
+
+  # handover_required 진입 게이트(cmd_transition)가 Handover 문서를 요구한다.
+  # harness-handover §3의 "문서 작성 → 전이" 순서대로, 전이 직전에 stub을 남긴다.
+  # (자동 경로가 인계 문맥 없이 원작업자를 종료하던 결함 — BACKLOG 9-3-3)
+  local handover_n=1 existing hb_num handover_file
+  shopt -s nullglob
+  for existing in "$root/.harness/handovers/$task_id-handover-"*.md; do
+    hb_num="${existing##*-handover-}"; hb_num="${hb_num%.md}"
+    [[ "$hb_num" =~ ^[0-9]+$ ]] && (( hb_num >= handover_n )) && handover_n=$(( hb_num + 1 ))
+  done
+  shopt -u nullglob
+  handover_file="$root/.harness/handovers/$task_id-handover-$handover_n.md"
+  {
+    printf '# Handover: %s-handover-%s\n\n' "$task_id" "$handover_n"
+    printf '## 메타데이터\n'
+    printf -- '- Task ID: %s\n- Handover 번호: %s\n- 인계 일시: %s\n' \
+      "$task_id" "$handover_n" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    printf -- '- 원작업자 (Source): %s\n- 수신자 (Target): %s\n- 인계 사유: quota_exhausted\n\n' \
+      "$current_provider" "$next_provider"
+    printf '`quota-retry`가 자동 생성한 stub이다. 연속 저쿼터 확인(count>=%s) 후 %s(%s) Provider를 %s → %s로 교체했다. 세부 내용은 사람이 %s 규격에 맞춰 보완한다.\n\n' \
+      "$confirm_needed" "$task_id" "$role" "$current_provider" "$next_provider" ".harness/handovers/TEMPLATE.md"
+    printf '## 2. 미완료 작업 및 작업 트리 상태 (Pending Work & Git State)\n\n- `git status --short`:\n```text\n'
+    git -C "$root" status --short 2>&1 || true
+    printf '```\n- `git diff --stat`:\n```text\n'
+    git -C "$root" diff --stat 2>&1 || true
+    printf '```\n\n## 5. 다음 담당자를 위한 즉각적 행동 지침 (Next Single Action)\n\n'
+    printf '사람이 `.harness/decisions/%s-failover-approval.md`에 "승인: yes"를 기록한 뒤 `herdr-harness transition %s %s ready`를 직접 실행한다. 그 전까지 재개하지 않는다.\n' \
+      "$task_id" "$path" "$task_id"
+  } >"$handover_file"
+  chmod 0644 "$handover_file"
+
+  cmd_transition "$root" "$task_id" handover_required --note "quota-retry: $current_provider -> $next_provider (handover $handover_n)"
 
   _runtime_atomic_text "$used_marker" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
   rm -f -- "$streak_file"
 
   append_event "$root" quota_retry_done "$task_id" "$task_status" handover_required "provider $current_provider -> $next_provider"
 
-  printf 'quota_retry: %s(%s) provider %s -> %s, 상태 handover_required\n' "$task_id" "$role" "$current_provider" "$next_provider"
-  printf '다음 단계(사람 몫): .harness/decisions/%s-failover-approval.md 에 "승인: yes"를 쓴 뒤 herdr-harness transition %s %s ready 를 직접 실행하세요.\n' \
+  printf 'quota_retry: %s(%s) provider %s -> %s, 상태 handover_required (handover stub: %s)\n' \
+    "$task_id" "$role" "$current_provider" "$next_provider" "${handover_file#"$root/"}"
+  printf '다음 단계(사람 몫): handover stub을 확인·보완하고, .harness/decisions/%s-failover-approval.md 에 "승인: yes"를 쓴 뒤 herdr-harness transition %s %s ready 를 직접 실행하세요.\n' \
     "$task_id" "$path" "$task_id"
 }
 
@@ -3415,6 +3452,19 @@ HARNESS_YAML_CHECK
   expect_fail "동일 상태 재전이" \
     bash "$SELF_PATH" transition "$test_project" task-001 completed
 
+  # handover_required 진입 게이트: Handover 인계 문서 필수 (BACKLOG 9-3-3)
+  local task3="$test_project/.harness/tasks/task-003.yaml"
+  sed -e 's/^task_id: .*/task_id: task-003/' \
+      -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+      "$test_project/.harness/tasks/TEMPLATE.yaml" >"$task3"
+  bash "$SELF_PATH" transition "$test_project" task-003 ready >/dev/null
+  bash "$SELF_PATH" transition "$test_project" task-003 active >/dev/null
+  expect_fail "active->handover_required (Handover 문서 없음)" \
+    bash "$SELF_PATH" transition "$test_project" task-003 handover_required
+  printf '# handover\n' >"$test_project/.harness/handovers/task-003-handover-1.md"
+  expect_pass "active->handover_required (Handover 문서 있음)" \
+    bash "$SELF_PATH" transition "$test_project" task-003 handover_required
+
   local events="$test_project/.harness/evidence/events.tsv"
   [[ -f "$events" ]] || die "이벤트 로그가 없습니다: $events"
   [[ "$(grep -c '^' "$events")" -ge 7 ]] || die "이벤트 로그 기록이 부족합니다."
@@ -3511,6 +3561,11 @@ HARNESS_YAML_CHECK
   quota_retry_body="$(awk '/^cmd_quota_retry\(\) \{$/{flag=1} flag{print} flag && /^}$/{exit}' "$SELF_PATH")"
   printf '%s' "$quota_retry_body" | grep -qE 'cmd_transition[^\n]*\b(completed|ready)\b' &&
     die "quota_retry 안전 불변식 위반: completed/ready 전이 호출이 발견됐습니다."
+  # quota_retry는 handover_required 게이트를 통과하려면 전이 전에 handover 문서를 만들어야 한다 (BACKLOG 9-3-3)
+  printf '%s' "$quota_retry_body" | grep -q 'handovers/\$task_id-handover-' ||
+    die "quota_retry 회귀: handover_required 전이 전에 handover stub 생성 코드가 없습니다."
+  printf '%s' "$quota_retry_body" | awk '/handovers\/\$task_id-handover-\$handover_n/{h=NR} /cmd_transition .*handover_required/{t=NR} END{exit !(h && t && h < t)}' ||
+    die "quota_retry 회귀: handover stub 생성이 handover_required 전이보다 뒤에 있습니다."
 
   local completion_script
   completion_script="$(bash "$SELF_PATH" completion bash)"
@@ -3568,7 +3623,7 @@ EOF
   printf 'PASS: Git 기준선 생성\n'
   printf 'PASS: 신규 프로젝트 보호\n'
   printf 'PASS: 비대화형 명시적 실패\n'
-  printf 'PASS: 상태 전이표 강제 (14개 케이스)\n'
+  printf 'PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)\n'
   printf 'PASS: 이벤트 로그 기록\n'
   printf 'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)\n'
   printf 'PASS: 스텝 명령 인자 검증\n'
@@ -3576,7 +3631,7 @@ EOF
   printf 'PASS: 탭 완성 스크립트 문법\n'
   printf 'PASS: Task Lock (동시 획득 거부/release/stale 회수)\n'
   printf 'PASS: quota-retry/auto-step opt-in 게이트\n'
-  printf 'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출)\n'
+  printf 'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)\n'
   printf 'PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범)\n'
 }
 
