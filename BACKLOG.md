@@ -239,6 +239,265 @@ AGENTS.md에 실제 차이가 있을 때만 스크립트 전체가 조용히 죽
 
 ---
 
+## 9. [검토 · 미착수] 구성 과잉 검토 — 3자 리뷰 결과와 감량안
+
+**2026-09-06.** "스킬·명령을 너무 많이 넣으면 모델 성능이 저하된다"는 우려로
+Claude·AGY·Codex 3자가 저장소를 교차 검토했다. Codex는 `bash harness.sh test`와
+`init` 샘플 생성을 실제로 돌려 확인했다.
+
+검토 세션: https://claude.ai/code/session_01RJKTEvVpFVde4RKM9qXLaX
+
+### 9-0. 결론
+
+문제는 "도구 개수"가 아니다 — 이 repo는 **MCP 서버를 0개 추가**하고, 생성되는
+스킬은 역할별 lazy-load라 한 턴에 다 열리지 않는다. 실제 병목은 **생성 스킬
+문서의 의례적 비대함 + 같은 내용의 중복 컨텍스트 적재 + 동일 사실의 문서 간
+드리프트**다. 3자 모두 이 진단에 동의했다.
+
+### 9-1. [재현됨] 스킬 8섹션 템플릿의 자기 반복
+
+생성 스킬은 총 586줄(`init` 샘플 실측), 9개가 전부 동일한
+`사전조건 / 읽을파일 목록 / 절차 / 중단조건 / 산출물 / 결과계약 / 사후조건
+체크리스트 / 멱등성` 8섹션 구조다. `harness-work` 한 파일에서
+"submitted 제안"이 절차 8단계·6장 결과계약·7장 체크리스트에 3회,
+"diff stat"도 3회 등장한다(`harness.sh:446` 이하). 저장소 전체에서
+`결과 계약`·`사후조건 체크리스트`·`멱등성 규칙`·`읽어야 할 파일 목록`
+헤더가 36회 반복된다.
+
+### 9-2. [재현됨] Context Packet ↔ 스킬 정독목록 2중 적재 + Packet 내부 중복
+
+`_runtime_context_packet`(`harness.sh:2484`)이 dispatch 시 주입하는 내용:
+
+- SPEC 1·3·4·5·6절 발췌 → `harness-work` "읽을 파일" 5번이 `SPEC.md` 원본을 **재독** 지시
+- task YAML **전문** 삽입 → 같은 YAML에서 `write_scope`·`resources/inputs`·
+  `acceptance_criteria`를 **다시 추출**해 덧붙임(`harness.sh:2502~2510`) →
+  그 뒤 `harness-work` "읽을 파일" 3번이 task YAML 원본을 **또** 정독 지시
+
+즉 SPEC은 2회, task는 3회 컨텍스트에 적재된다.
+
+### 9-3. [재현됨] 동일 사실의 문서 간 드리프트 — 3건
+
+같은 숫자·목록이 역할문서·스킬·정책 YAML·README·test 문자열에 복붙돼 있어
+한쪽만 갱신되면 갈라진다:
+
+1. **검토 항목 7 vs 8.** `review-policy.yaml`은 8개(`intent_alignment` 포함,
+   `harness.sh:1253~1261`), `harness-review` 스킬도 "8대"인데
+   `reviewer.agent.md`는 "7대 핵심 항목"(`harness.sh:919, 924`),
+   `harness-orchestrate`도 "7대 정책 기준"(`harness.sh:399`).
+2. **템플릿 종수 20 vs 21.** `README.md:268` "20종 템플릿",
+   `cmd_test`는 "21종" 출력(`harness.sh:3565`).
+3. **quota-retry의 handover 누락.** `quota-policy.yaml`에 `require_handover: true`
+   (`harness.sh:1531`)이고 `harness-handover` 스킬은 handover 문서 작성을
+   요구하지만, `cmd_quota_retry`는 `cmd_close_agent --force` 직후
+   `--note`만 달아 `handover_required`로 전이한다(`harness.sh:2967, 2978`).
+   `cmd_transition`에 `handover_required` 진입 게이트가 없어(`harness.sh:2124~2166`)
+   **다음 작업자에게 넘길 문맥 없이 원작업자가 종료될 수 있다.**
+   → 스킬 정리보다 **먼저** 고칠 것(Codex 권고).
+
+### 9-4. 감량안 (합의)
+
+| 항목 | 결론 |
+|---|---|
+| 스킬 개수 | **9 → 6.** `interview`+`reference`→`harness-spec`, `work`+`verify`→`harness-work`, `status` 삭제(→`orchestrator.agent.md` 한 줄로 흡수). `plan`·`orchestrate`·`review` 유지. **`handover`는 유지** — AGY는 5개안(work에 흡수)을 냈으나 Codex 반대를 채택: handover는 쿼터소진·프로세스종료·반복실패 때만 쓰는 예외 프로토콜이라, work에 합치면 모든 Worker가 매번 장애분류·Provider교체 규칙까지 읽는다. 20~30줄짜리 예외 스킬로 축약하고, 상세 필드는 `.harness/handovers/TEMPLATE.md`에 둔다. `harness-work`에는 "이 조건이면 멈추고 handover로 전환"이라는 짧은 라우팅 표만 남긴다. |
+| 스킬 템플릿 | **8섹션 → 4섹션**: ① 적용조건·입력 ② 정상 절차(+호출할 `herdr-harness` CLI) ③ 예외·중단 게이트 ④ 산출물·불변식. `결과계약`·`사후조건 체크리스트`·`멱등성 규칙` 삭제, 필요한 한 줄만 절차 안으로. 파일당 분량 60%+ 감소 예상. |
+| 정독 목록 | Context Packet에 실린 SPEC 발췌·task YAML은 목록에서 제거. **남길 것**: Task Intent 문서, 이전 Attempt/Review, 역할문서의 권한·금지, (Reviewer 한정) 최신 Evidence·Diff. |
+| Context Packet | task 전문 1회만. 뒤의 필드 재추출 3블록 제거. 장기적으로 Worker용/Reviewer용 Packet 분리. |
+| 문서 정본화 | 각 사실은 **정본 1곳 + 나머지는 참조**. 역할문서는 권한·금지만, 스킬은 절차만, 정책 YAML은 기계적 설정값만. |
+| 목표 지표 | "스킬 개수"가 아니라 **한 번의 dispatch에서 실제로 읽히는 지침량과 중복률**. 대형 스킬 5개가 소형 9개보다 반드시 가볍지는 않다(Codex). |
+
+### 9-5. harness.sh(3798줄) 분할
+
+- **1순위 (단독 -1,200줄):** `write_project_docs` 한 함수가 1,099줄(`harness.sh:146`),
+  대부분 SKILL/role/policy heredoc이다. 파일이 안 읽히는 건 로직이 아니라 이
+  덩어리 때문. → `templates/skills/harness-work/SKILL.md` 같은 **실제 파일**로
+  옮기고 `emit_doc`이 읽어서 `@@WORKER@@` 치환만. 템플릿이 마크다운
+  하이라이팅·정상 diff·정상 blame 대상이 되고, `sync-templates`가
+  heredoc 대조 → 파일 복사로 단순해진다. `install.sh`가 이미 `$INSTALL_DIR`로
+  복사하므로 `templates/` 동봉은 작은 변경.
+- **2순위 (나머지 ~2,600줄):** 런타임 `source lib/*.sh`는 **하지 않는다** —
+  `install.sh:58`이 파일 1개만 복사·심링크하는데 다중 파일로 바꾸면
+  설치·업데이트·제거가 다중 파일 트랜잭션이 되고 launcher↔lib 버전 불일치
+  실패 모드가 생긴다. 대신 `src/*.sh` 모듈 → **결정적 concat** → 루트
+  `harness.sh`를 생성물로 커밋. CI에서 `재빌드 후 git diff --exit-code -- harness.sh`.
+  경계안(Codex): `10-core` / `20-generator` / `30-state` /
+  `40-runtime-core` / `41-runtime-agent` / `42-runtime-policy` / `50-cli` /
+  `90-selftest`. 잃는 것은 생성 파일의 git blame 유용성과 src↔배포본 줄번호
+  대응뿐이며, 모듈 경계 주석 + 결정적 빌드로 완화.
+
+### 9-6. 착수 전 확인할 사항 (미해소)
+
+1. **제거되는 스킬의 마이그레이션.** 기존 생성 프로젝트(`tube-index-refactor`,
+   `harness-ui-audit` 등)는 `harness-verify`·`harness-reference`·`harness-status`
+   심볼릭 링크와 문서를 갖고 있다. `sync-templates`가 삭제된 스킬을 어떻게
+   처리할지(제거 + AGENTS.md 안내, 또는 alias) 정해야 한다.
+2. **Context Packet 재추출 블록 소비자 확인.** `dispatch`/`observe`/생성
+   Agent 지침 중 `## Write scope` 등 개별 블록을 파싱하는 곳이 없는지 확인
+   후 제거.
+3. **역할 모델 유지 여부.** `interview`+`reference` 병합 시, 대형 기존
+   코드베이스에서 "레퍼런스 인벤토리"를 Worker Task로 돌리던 경로가 있으면
+   재검토.
+4. **`cmd_test` 동반 수정.** 현재 "21종 템플릿"·스킬 개수·"플레이스홀더
+   치환"·"공통 Skill과 Claude 연결" 검사가 구조 변경과 함께 깨진다. 감량과
+   같은 커밋에서 회귀 테스트를 다시 써야 한다.
+5. **드리프트 전수 스윕.** 9-3의 3건 외에 AGENTS.md·profiles·README에 같은
+   패턴이 더 있는지 "정본 1곳" 원칙으로 훑는다.
+
+### 9-7. 착수 가능 여부
+
+- **바로 가능:** 9-3의 드리프트 3건은 독립적인 소규모 수정이다. 특히
+  9-3-3(quota-retry handover 누락)을 먼저 처리한다 — `cmd_transition`에
+  `handover_required` 진입 게이트(handover 파일 존재 확인) 추가 또는
+  `cmd_quota_retry`가 최소 handover stub을 생성하도록.
+- **설계 결정 후 가능:** 9-4·9-5의 구조 감량은 위 9-6의 5개 항목을 정하고
+  `cmd_test`를 동반 수정해야 하는 설계 변경이다. "바로" 착수할 수는 없고
+  SPEC 한 바퀴가 필요하다. 템플릿 파일 추출(9-5 1순위)을 첫 Task로,
+  스킬 병합(9-4)을 두 번째 Task로 쪼개는 것을 권한다.
+
+### 9-8. 결정 (2026-09-06)
+
+사용자가 9-6의 열린 항목을 결정했다. 9-6-2는 검토로 해소(패킷은
+`herdr agent prompt "$agent" "$(cat "$context")"`로 통째 전달되는 산문이고
+`## Write scope` 등 개별 블록을 파싱하는 코드는 없음 — `harness.sh:2657` 확인.
+재추출 3블록 제거는 안전).
+
+| # | 결정 | 내용 |
+|---|---|---|
+| 스킬 개수 | **9 → 6** (Codex안) | `verify` → `work` 흡수, `reference` → `interview`(→`harness-spec`) 흡수, `status` 삭제(→`orchestrator.agent.md` 한 줄). `plan`·`orchestrate`·`review` 유지. **`handover`는 20~30줄 예외 스킬로 축약해 유지** — 상세 필드는 `.harness/handovers/TEMPLATE.md`, `harness-work`에는 "이 조건이면 handover로 전환" 라우팅 표만. |
+| 마이그레이션 | **제거 + 매핑 안내** | `sync-templates --apply`가 삭제 스킬 디렉터리·`.claude/skills/` 링크를 제거하고, 출력과 `AGENTS.md`에 `harness-verify → harness-work` 식 매핑표를 남긴다. |
+| harness.sh 분할 | **템플릿 파일 추출만** (9-5 A안) | heredoc → `templates/**` 실제 파일 + `emit_doc` 읽어서 `@@…@@` 치환. `src/*.sh` concat 빌드(9-5 B안)는 하지 않는다. |
+| 순서 | **드리프트 먼저, 감량 별도** | 9-3 3건을 독립 커밋(9-3-3 우선). 9-4·9-5는 별도 SPEC/Task. |
+
+미결(감량 SPEC에서 다룸): 8섹션 → 4섹션 축소는 AGY·Codex가 수렴했고 9→6
+방향에 포함되나, 최종 4섹션 규격과 "완료/차단 1줄 상태 신호 유지"(Codex
+caveat) 여부는 감량 SPEC에서 확정. 9-6-1(제거 스킬 마이그레이션 세부),
+9-6-3(interview+reference 역할 모델), 9-6-4(`cmd_test` 재작성),
+9-6-5(드리프트 전수 스윕)도 그 SPEC 범위.
+
+### 9-9. 드리프트 3건 수정 계획 (9-3 · 독립 커밋)
+
+1. **9-3-3 quota-retry handover 누락** — `cmd_transition`의 전이별 필수조건
+   `case`(`harness.sh:2124`)에 `handover_required)` 분기를 추가해
+   `.harness/handovers/${task_id}-handover-*.md` 존재를 요구한다(harness-handover
+   §3이 이미 "문서 작성 후 전이"를 규정하므로 문서 순서를 어기지 않고 강제하는
+   것). 이어 `cmd_quota_retry`(`harness.sh:2978` 직전)가 `cmd_transition …
+   handover_required` 호출 전에 handover stub을 생성하도록 한다 — 사유
+   `quota_exhausted`, `current → next` provider, `git diff --stat`,
+   다음 한 단계("사람이 `${task_id}-failover-approval.md` 승인 후
+   `transition … ready`"). `cmd_test`에 회귀(handover 파일 없이
+   `→ handover_required` 거부, quota-retry 후 stub 존재) 추가.
+2. **9-3-1 검토 항목 7 ↔ 8** — `reviewer.agent.md`(`harness.sh:919, 924`)와
+   `harness-orchestrate`(`harness.sh:399`)의 "7대"를 "8대"로 고치고
+   `intent_alignment`를 목록에 추가. 정본은 `review-policy.yaml`의 `focus`
+   (8개)임을 주석으로 명시.
+3. **9-3-2 템플릿 종수 20 ↔ 21** — `README.md:268`을 "21종"으로. `init` 샘플
+   실측치(생성 파일 47개)와 함께 확인.
+
+**처리 완료 (2026-09-06, 브랜치 `fix/drift-9-3`).**
+
+- **9-3-3**: `cmd_transition`에 `handover_required)` 게이트 추가 —
+  `.harness/handovers/${task_id}-handover-*.md` 존재를 요구(harness-handover
+  §3의 "문서 작성 → 전이" 순서를 강제). `cmd_quota_retry`가 `_runtime_set_task_provider`
+  직후·`transition` 직전에 handover stub(메타데이터 + `git status`/`diff --stat`
+  + Next Single Action)을 생성하도록 추가. `cmd_test`에 전이 게이트 2케이스
+  (문서 없음 거부 / 문서 있음 통과)와 구조 불변식(stub 생성이 전이보다
+  선행) 추가. `ARCHITECTURE.md §5·§8.1·§13`, `README.md` quota-retry 항목
+  갱신.
+- **9-3-1**: `reviewer.agent.md`·`harness-orchestrate`의 "7대" → "8대"
+  (`review-policy.yaml`의 `focus` 8개가 정본임을 명시, `immediate_rejection`
+  2개도 역할문서에 추가).
+- **9-3-2**: `README.md`·`harness.sh` test 문자열 "20종"·"14개 케이스" →
+  "21종"·"16개 케이스"로 정합.
+- `bash harness.sh test` 17개 PASS 재확인.
+
+9-4(스킬 9→6, 8→4 섹션)는 별도 SPEC로 미착수 유지.
+
+### 9-10. Task A — 템플릿 파일 추출 완료 (2026-09-06, 브랜치 `fix/drift-9-3`)
+
+9-5 A안을 실행했다. `harness.sh`의 `emit_doc`가 heredoc 대신 `templates/`
+디렉터리의 실제 파일을 읽어 `@@…@@`만 치환하도록 바꿨다.
+
+- `templates/` 신설 — `write_project_docs`·`write_project_templates`의 heredoc
+  24개(skill 9·role 6·`.harness/**/TEMPLATE.*` 8·`review-policy.yaml`)를
+  같은 상대경로의 파일로 추출. 두 함수는 `HARNESS_DOC_TEMPLATES`/
+  `HARNESS_POLICY_TEMPLATES` 배열을 도는 루프로 축소.
+- `HARNESS_TEMPLATE_DIR` 해석: `readlink -f "${BASH_SOURCE[0]}"`로 심볼릭 링크
+  (`~/.local/bin/herdr-harness` → `$INSTALL_DIR/harness.sh`)를 풀어 그 옆
+  `templates/`를 가리킨다. `HARNESS_TEMPLATE_DIR` 환경변수로 override 가능.
+- `install.sh`: `cp -R templates/ $INSTALL_DIR/templates/` 추가,
+  `--uninstall`·`cmd_uninstall`도 `templates/` 제거.
+- `cmd_test`: 배열 ↔ `templates/` 파일 양방향 정합 검사 추가(누락·orphan 모두
+  die). PASS 18개.
+- **회귀 검증:** 추출 전 `HEAD:harness.sh`와 추출 후로 각각 프로젝트를 생성해
+  `diff -r` — `HARNESS_START.md`의 프로젝트 자기 경로(`cd "..."`) 한 줄 외
+  전부 byte-identical. 심볼릭 링크 실행·`install.sh` 전체 설치/제거도
+  샌드박스에서 확인.
+- `harness.sh` 3862줄 → 2760줄 (-1102, -29%).
+
+`src/*.sh` concat 빌드(9-5 B안)는 결정대로 안 함.
+
+### 9-11. Task B·C — 스킬 9→6, 8→4 섹션, Context Packet 중복 제거 완료 (2026-09-06, 브랜치 `fix/drift-9-3`)
+
+결정(9-8): 스킬 9→6, 8섹션→4섹션, 상태 신호 1줄 유지, `harness-spec` 신설,
+마이그레이션 "제거 + 매핑 안내".
+
+**스킬 9 → 6** (`templates/.agents/skills/`)
+- `harness-interview` + `harness-reference` → **`harness-spec`** (자산 조사 +
+  인터뷰). 역할은 `interviewer.agent.md` 유지.
+- `harness-verify` → **`harness-work`** §2 (AC 검증·Evidence를 정상 절차에 흡수).
+- `harness-status` → 삭제. `herdr-harness status --live .` +
+  `orchestrator.agent.md`에 진행 보고 지침 추가.
+- `harness-plan`·`harness-orchestrate`·`harness-review` 유지, `harness-handover`는
+  예외 프로토콜로 축약 유지.
+
+**8섹션 → 4섹션**: `적용조건·입력 / 절차 / 예외·중단 게이트 / 산출물·불변식`.
+`결과계약`·`사후조건 체크리스트`·`멱등성 규칙` 삭제, 절차 마지막에
+`결과: SUCCESS|BLOCKED, ...` 한 줄만. 절차 안에 호출할 `herdr-harness` 명령
+직접 명시. 스킬 총 595줄 → 201줄.
+
+**Task C — Context Packet 중복 제거** (`_runtime_context_packet`)
+- Task Contract 전문 뒤에 있던 `## Write scope`·`## References and inputs`·
+  `## Verification commands and criteria` 재추출 3블록 삭제(전부 Task YAML 안에
+  이미 있음 — 소비자 없음 확인). intent.md 경로 한 줄로 대체. 미사용이 된
+  `_runtime_yaml_block` 함수 제거.
+- 새 스킬의 "읽을 것"은 Context Packet에 없는 것만 — intent.md, 수정 대상
+  소스, 이전 Attempt/Review.
+
+**마이그레이션**: `cmd_sync_templates`에 통합·삭제 스킬 처리 추가 —
+`--apply` 시 옛 `.agents/skills/<old>/`와 `.claude/skills/<old>` 링크를 제거하고
+매핑표(`harness-verify → harness-work §2` 등)를 출력. `AGENTS.md`는 자동 갱신
+안 하고 안내만. f3c3866(9스킬) 생성 프로젝트에 실제 적용해 6스킬로 정리 확인.
+
+**harness.sh·docs**: `HARNESS_DOC_TEMPLATES`·`cmd_test` required 목록·
+`HARNESS_START.md`·`ARCHITECTURE.md §1·§6·§7`·`README.md` 갱신. `bash harness.sh
+test` 18 PASS, `init` 샘플 생성·`validate` 통과 확인.
+
+### 9-12. harness.sh 로직부 lib/ 분할 (2026-09-06, 브랜치 `fix/drift-9-3`)
+
+9-5에서 A안(템플릿 추출만)을 골랐지만 이후 사용자가 로직부도 기능 단위로
+쪼개길 원해 **런타임 source 방식**으로 진행했다(9-5 B안의 concat 빌드는 아님).
+`install.sh`가 이미 `templates/`를 복사하므로 `lib/` 추가 복사는 대칭이라
+"설치가 다중 파일이 된다"는 원래 반대 근거가 약해졌다.
+
+- `harness.sh` 2,789줄 → **27줄 런처**. `readlink -f`로 실제 위치를 풀어
+  `$HARNESS_LIB_DIR/*.sh`(파일명 숫자 접두사 순)를 source하고 `main "$@"` 호출.
+  `HARNESS_LIB_DIR`·`HARNESS_TEMPLATE_DIR` 환경변수로 override 가능.
+- `lib/` 13개 (평균 ~200줄): `10-lib` / `20-generate` / `30-yaml` / `35-git` /
+  `40-transition` / `50-runtime` / `55-dispatch` / `60-automation` / `70-status` /
+  `80-selftest` / `85-completion` / `90-uninstall` / `99-main`.
+- **회귀 검증**: `header(1-13) + lib/*.sh(주석 헤더 제거) + 'main "$@"'`를 이어붙이면
+  분할 전 `harness.sh`와 byte-identical(diff 0). 분할 전/후 `init` 산출물도
+  자기 경로 한 줄 외 동일.
+- `install.sh`: `lib/` 존재 확인 + 각 `lib/*.sh` `bash -n` + `cp -R lib/`.
+  uninstall 두 경로 모두 `lib/` 제거.
+- `cmd_test`: 모든 `lib/*.sh` `bash -n` 추가, auto-step/quota-retry 안전 불변식
+  스캔 대상을 `$SELF_PATH` → `$HARNESS_LIB_DIR/60-automation.sh`로 변경.
+- 샌드박스 install → 심볼릭 링크 실행 → `validate` → `test`(18 PASS) → uninstall 통과.
+
+빌드 스텝·CI diff 검사·생성물 커밋 없음. 잃는 것: `curl .../harness.sh` 단일 파일
+배포 여지(README는 git clone이라 무관).
+
+---
+
 ## 참고: 이번 작업에서 확정한 설계 원칙
 
 Codex는 처음 `run-wave` 자율 루프를 제안했고 AGY는 설계 철학(`unattended_execution: false`) 위반이라

@@ -1,0 +1,30 @@
+schema_version: '1.0'
+wave_id: wave-000
+milestone_id: milestone-000
+title: Wave 제목
+description: Wave 실행 목적 및 개요
+status: draft # draft | approved | active | completed
+
+# 병렬 실행 한도 및 제약
+limits:
+  max_parallel_workers: 2
+
+# 소속 Task 목록 (동일 parallel_group은 경로 충돌이 없는 병렬 가능 Task)
+tasks:
+  - task_id: task-001
+    parallel_group: 1
+    primary_worker: '@@WORKER@@'
+    reviewer: '@@REVIEWER@@'
+  - task_id: task-002
+    parallel_group: 1
+    primary_worker: '@@WORKER@@'
+    reviewer: '@@REVIEWER@@'
+
+# 선행 완료 필수 Wave
+dependencies: []
+
+# 사용자 승인 메타데이터 (미승인 시 실행 불가)
+approval:
+  user_approved: false
+  approved_by: ''
+  approved_at: ''

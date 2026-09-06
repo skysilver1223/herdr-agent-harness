@@ -7,7 +7,7 @@ Herdr에서 Claude, Codex, AGY를 함께 사용하되 프로젝트마다 Control
 이 문서에서 Full Harness는 다음 흐름을 모두 다룬다는 의미입니다.
 
 ```text
-Interview → SPEC → Reference → Plan → Work → Verify → Review → User Approval → Handover
+Spec(자산 조사 + 인터뷰) → SPEC 승인 → Plan → Work(구현 + 자체 검증) → Review → User Approval → (실패 시 Handover)
 ```
 
 무인 실행, 트랜잭션, 물리적 Sandbox를 의미하지는 않습니다.
@@ -80,28 +80,27 @@ stateDiagram-v2
 
 Worker는 `completed`를 선언하지 않습니다. Reviewer는 품질 판정을 기록하고 사용자가 완료를 승인합니다.
 
-상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`만 사용합니다. `submitted`에는 Attempt와 Evidence, `awaiting_approval`에는 `판정: APPROVED`인 Review, `completed`에는 `.harness/decisions/TASK-approval.md`의 `승인: yes`가 필요합니다.
+상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`만 사용합니다. `submitted`에는 Attempt와 Evidence, `handover_required`에는 `.harness/handovers/TASK-handover-*.md` 인계 문서, `awaiting_approval`에는 `판정: APPROVED`인 Review, `completed`에는 `.harness/decisions/TASK-approval.md`의 `승인: yes`가 필요합니다.
 
 ## 6. Skills
 
 | Skill | 역할 |
 |---|---|
-| `harness-interview` | 요구사항 인터뷰 |
-| `harness-reference` | 기존 코드·데이터·문서 Inventory |
-| `harness-plan` | Milestone과 Task 분할 |
-| `harness-orchestrate` | Herdr 실행과 상태 관리 |
-| `harness-work` | Task 단위 구현·분석 |
-| `harness-verify` | 검증과 Evidence 기록 |
-| `harness-review` | 독립 품질 Review |
-| `harness-handover` | 실패·쿼터 시 Context 인계 |
-| `harness-status` | 현재 진행 상황 요약 |
+| `harness-spec` | 기존 자산 조사(Inventory) + 요구사항 인터뷰 → SPEC 초안 |
+| `harness-plan` | Milestone·Task 분할, intent.md, 첫 Wave 수립 |
+| `harness-orchestrate` | Herdr 1스텝 디스패치·상태 전이·진행 보고 |
+| `harness-work` | Task 단위 구현·분석 + Acceptance Criteria 자체 검증·Evidence |
+| `harness-review` | 독립 Provider의 읽기 전용 품질 Review |
+| `harness-handover` | 실패·쿼터·교체 시 인계 문서 작성(예외 프로토콜) |
 
-각 Skill은 현재 역할 문서, SPEC, STATE, Task Contract를 명시적으로 읽습니다. Skill은 운영 규칙이며 파일 접근을 물리적으로 차단하지 않습니다.
+각 Skill은 4개 섹션(적용조건·입력 / 절차 / 예외·중단 게이트 / 산출물·불변식)으로 구성되며, 절차 안에 호출할 `herdr-harness` 명령을 직접 명시합니다. `dispatch`가 주입하는 Context Packet에 이미 든 SPEC 발췌·Task 계약은 다시 통독하지 않습니다. Skill은 운영 규칙이며 파일 접근을 물리적으로 차단하지 않습니다.
+
+> 이전 `harness-interview`·`harness-reference`는 `harness-spec`으로, `harness-verify`는 `harness-work`로 통합됐고, `harness-status`는 `herdr-harness status --live .` + `orchestrator.agent.md`로 흡수됐습니다. 기존 프로젝트는 `herdr-harness sync-templates PATH --apply`로 정리합니다.
 
 ## 7. 실행 흐름
 
 1. `init`이 프로젝트 파일과 Git 저장소를 만들고 가능한 경우 기준 commit을 생성합니다.
-2. Interview와 Plan 후 사용자가 SPEC과 Wave를 승인합니다.
+2. `harness-spec`(자산 조사 + 인터뷰)과 `harness-plan` 후 사용자가 SPEC과 Wave를 승인합니다.
 3. Orchestrator가 `validate [PATH] --wave ID`로 실행 전제를 검사합니다.
 4. `transition ... active` 후 `dispatch ... worker`로 Worker 한 턴만 실행합니다.
 5. `blocked`, `timeout`, `stalled`이면 `observe`로 상태를 재조회하고 Orchestrator가 사용자 질문, 대기 또는 중단을 결정합니다.
@@ -140,7 +139,7 @@ Provider를 바꾸지 않습니다** — 아래 확인된 실패 조건과 별�
 `.harness/policies/quota-policy.yaml`의 `automatic_failover: true`로 켜면 `herdr-harness quota-retry PATH TASK_ID ROLE`을 쓸 수 있습니다. 이건 위 교체 순서의 앞부분(실패 확인 → Handover)만 자동화한 것이지, 순서 자체를 없앤 게 아닙니다:
 
 1. `quota-check`가 남긴 연속 `low` 판정이 `low_confirm_count`회 이상, 판정 간격이 `cooldown_seconds` 이상이어야 진행합니다(오탐 한 번으로 움직이지 않음).
-2. Task Lock을 잡고, 기존 `close-agent --force`·`transition`을 그대로 호출해 Provider를 `fallback_chain`의 다음 값으로 바꾼 뒤 `handover_required`까지 전이합니다.
+2. Task Lock을 잡고, 기존 `close-agent --force`·`transition`을 그대로 호출해 Provider를 `fallback_chain`의 다음 값으로 바꿉니다. `handover_required` 전이 전에 `.harness/handovers/TASK-handover-N.md` stub(사유 `quota_exhausted`, `current → next` Provider, `git status`/`diff --stat`, 다음 한 단계)을 자동 생성한 뒤 전이합니다 — `cmd_transition`이 인계 문서를 요구하므로, 자동 경로도 인계 문맥 없이 원작업자를 종료하지 않습니다.
 3. **거기서 멈춥니다.** `ready`로 재개(=Fallback Attempt 시작)하는 건 여전히 사람 몫입니다 — `.harness/decisions/TASK_ID-failover-approval.md`에 `승인: yes`를 쓰고 `transition ... ready`를 직접 실행해야 합니다. `approval.provider_failover: user_required`(project.yaml)를 실제로 지키는 지점이 여기입니다.
 4. Task당 1회만 허용합니다. 두 번째 실패는 사람이 직접 처리해야 합니다(Provider가 계속 튕기는 flapping 방지).
 
@@ -211,7 +210,7 @@ Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않�
 - Atomic Outbox
 - Worktree와 Integration Lock
 - Sealed Verification Bundle
-- ~~자동 Failover~~ — §8.1 `quota-retry`로 "탐지→정리→handover"까지만 부분 구현. Provider 교체 후 재개는 여전히 사람 승인이 필수라 완전 자동 Failover는 아닙니다.
+- ~~자동 Failover~~ — §8.1 `quota-retry`로 "탐지→정리→handover stub 생성→handover_required 전이"까지만 부분 구현. Provider 교체 후 재개는 여전히 사람 승인이 필수라 완전 자동 Failover는 아닙니다.
 - Container 또는 별도 OS 사용자 격리
 
 상주 Controller는 여전히 현재 Harness의 범위가 아닙니다. `quota-retry`/`auto-step`은 상주 프로세스가 아니라 호출 1회가 유한 시간 안에 반드시 끝나는 opt-in 명령이며, 둘 다 `completed`/`awaiting_approval`/`reviewing` 전이와 Provider 교체 후 재개 승인은 사람 몫으로 남겨둡니다.
