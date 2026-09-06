@@ -25,7 +25,7 @@ Spec(자산 조사 + 인터뷰) → SPEC 승인 → Plan → Work(구현 + 자�
 | `.agents/roles/` | 역할·책임·금지사항 정본 |
 | `.agents/skills/` | 재사용 가능한 실행 절차 |
 | `.claude/skills/` | Claude가 공통 Skill을 읽기 위한 연결 |
-| `.harness/` | SPEC, Wave, Task, Attempt, Evidence, Review, Handover, Decision, Runtime 상태 |
+| `.harness/` | SPEC, Wave, Task, Intent, Attempt, Evidence, Review, Handover, Decision, Runtime 상태 |
 | 사용자 | SPEC, Wave, Failover, Integration, 완료 승인 |
 
 ## 3. 역할
@@ -69,6 +69,7 @@ stateDiagram-v2
     ready --> active: Worker 시작
     active --> submitted: 결과 제출
     active --> blocked: 입력 필요
+    blocked --> active: 입력 확보
     active --> handover_required: 실패·쿼터
     submitted --> reviewing: 독립 Review
     reviewing --> changes_requested: 수정 필요
@@ -153,11 +154,12 @@ Provider를 바꾸지 않습니다** — 아래 확인된 실패 조건과 별�
 
 `dispatch`는 Worker와 Reviewer에게 전체 대화 대신 `.harness/runtime/TASK-context-ROLE.md` Context Packet을 한 번 전달합니다.
 
-- 승인된 SPEC 관련 부분
-- 현재 Task Contract
-- write scope, 참조와 입력
-- Acceptance Criteria와 검증 방법
-- 다음 한 단계
+- 승인된 SPEC 발췌 — 1 목표·3 기술 스택과 제약·4 요구사항·5 Acceptance Criteria·6 제외 범위 (줄 수가 아니라 절 단위로 통째 추출)
+- 현재 Task Contract 전문 — `write_scope`·`resources`·`inputs`·`acceptance_criteria`가 이 YAML 안에 있음
+- 착수 게이트·제외 범위·불변식은 Task의 `intent.md`를 읽으라는 안내 한 줄
+- 다음 한 단계 (Worker는 submitted 제안까지, Reviewer는 읽기 전용 판정 기록)
+
+같은 사실을 재추출해 덧붙이던 `## Write scope`·`## References and inputs`·`## Verification commands` 블록은 중복이라 제거됐습니다(모두 Task Contract YAML 안에 이미 있음).
 
 Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않고 해당 dispatch를 실패시킵니다.
 

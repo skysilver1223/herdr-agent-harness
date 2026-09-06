@@ -411,19 +411,21 @@ project/
 ├── CLAUDE.md
 ├── GEMINI.md
 ├── HARNESS_START.md
+├── .gitignore
 ├── .agents/
 │   ├── roles/
-│   └── skills/
-├── .claude/skills/
+│   └── skills/           # harness-spec/plan/orchestrate/work/review/handover
+├── .claude/skills/        # 위 6개 스킬로 향하는 심볼릭 링크
 └── .harness/
     ├── project.yaml
     ├── SPEC.md
     ├── MILESTONES.md
     ├── STATE.md
-    ├── policies/
+    ├── policies/          # project·quota·loop·review-policy.yaml
     ├── profiles/
     ├── tasks/
     ├── waves/
+    ├── intents/           # Task별 intent.md (착수 게이트·제외 범위·불변식)
     ├── references/
     ├── attempts/
     ├── evidence/
