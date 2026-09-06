@@ -504,6 +504,7 @@ compatibility: Herdr pane, Git repository, project-local .harness directory
 ## 7. 사후조건 체크리스트
 - [ ] Intent 문서의 `Not`에 명시된 범위를 침범하지 않았는가?
 - [ ] write_scope 외부의 파일이 수정되지 않았는가 (`git status` 확인)?
+- [ ] acceptance_criteria의 모든 검증 명령이 성공(exit code 0)하였는가?
 - [ ] Attempt 문서에 diff stat과 검증 결과가 충실히 기록되었는가?
 - [ ] 완료 보고 시 completed가 아닌 submitted를 제안하였는가?
 
