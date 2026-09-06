@@ -359,9 +359,9 @@ claude
 다음 요청을 입력합니다.
 
 ```text
-harness-orchestrate Skill을 사용해 프로젝트를 시작해줘.
-기존 코드, 데이터, 문서, Dump가 있는지 먼저 인터뷰하고
-SPEC 승인 전에는 구현하지 마.
+harness-spec Skill로 기존 코드·데이터·문서·Dump를 먼저 조사하고
+요구사항을 인터뷰해서 SPEC 초안을 만들어줘.
+SPEC 승인 전에는 구현하지 마. 이후 harness-plan, harness-orchestrate로 진행해줘.
 ```
 
 ## 상태 확인

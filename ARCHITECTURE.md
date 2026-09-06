@@ -7,7 +7,7 @@ Herdr에서 Claude, Codex, AGY를 함께 사용하되 프로젝트마다 Control
 이 문서에서 Full Harness는 다음 흐름을 모두 다룬다는 의미입니다.
 
 ```text
-Interview → SPEC → Reference → Plan → Work → Verify → Review → User Approval → Handover
+Spec(자산 조사 + 인터뷰) → SPEC 승인 → Plan → Work(구현 + 자체 검증) → Review → User Approval → (실패 시 Handover)
 ```
 
 무인 실행, 트랜잭션, 물리적 Sandbox를 의미하지는 않습니다.
@@ -86,22 +86,21 @@ Worker는 `completed`를 선언하지 않습니다. Reviewer는 품질 판정을
 
 | Skill | 역할 |
 |---|---|
-| `harness-interview` | 요구사항 인터뷰 |
-| `harness-reference` | 기존 코드·데이터·문서 Inventory |
-| `harness-plan` | Milestone과 Task 분할 |
-| `harness-orchestrate` | Herdr 실행과 상태 관리 |
-| `harness-work` | Task 단위 구현·분석 |
-| `harness-verify` | 검증과 Evidence 기록 |
-| `harness-review` | 독립 품질 Review |
-| `harness-handover` | 실패·쿼터 시 Context 인계 |
-| `harness-status` | 현재 진행 상황 요약 |
+| `harness-spec` | 기존 자산 조사(Inventory) + 요구사항 인터뷰 → SPEC 초안 |
+| `harness-plan` | Milestone·Task 분할, intent.md, 첫 Wave 수립 |
+| `harness-orchestrate` | Herdr 1스텝 디스패치·상태 전이·진행 보고 |
+| `harness-work` | Task 단위 구현·분석 + Acceptance Criteria 자체 검증·Evidence |
+| `harness-review` | 독립 Provider의 읽기 전용 품질 Review |
+| `harness-handover` | 실패·쿼터·교체 시 인계 문서 작성(예외 프로토콜) |
 
-각 Skill은 현재 역할 문서, SPEC, STATE, Task Contract를 명시적으로 읽습니다. Skill은 운영 규칙이며 파일 접근을 물리적으로 차단하지 않습니다.
+각 Skill은 4개 섹션(적용조건·입력 / 절차 / 예외·중단 게이트 / 산출물·불변식)으로 구성되며, 절차 안에 호출할 `herdr-harness` 명령을 직접 명시합니다. `dispatch`가 주입하는 Context Packet에 이미 든 SPEC 발췌·Task 계약은 다시 통독하지 않습니다. Skill은 운영 규칙이며 파일 접근을 물리적으로 차단하지 않습니다.
+
+> 이전 `harness-interview`·`harness-reference`는 `harness-spec`으로, `harness-verify`는 `harness-work`로 통합됐고, `harness-status`는 `herdr-harness status --live .` + `orchestrator.agent.md`로 흡수됐습니다. 기존 프로젝트는 `herdr-harness sync-templates PATH --apply`로 정리합니다.
 
 ## 7. 실행 흐름
 
 1. `init`이 프로젝트 파일과 Git 저장소를 만들고 가능한 경우 기준 commit을 생성합니다.
-2. Interview와 Plan 후 사용자가 SPEC과 Wave를 승인합니다.
+2. `harness-spec`(자산 조사 + 인터뷰)과 `harness-plan` 후 사용자가 SPEC과 Wave를 승인합니다.
 3. Orchestrator가 `validate [PATH] --wave ID`로 실행 전제를 검사합니다.
 4. `transition ... active` 후 `dispatch ... worker`로 Worker 한 턴만 실행합니다.
 5. `blocked`, `timeout`, `stalled`이면 `observe`로 상태를 재조회하고 Orchestrator가 사용자 질문, 대기 또는 중단을 결정합니다.

@@ -433,7 +433,43 @@ caveat) 여부는 감량 SPEC에서 확정. 9-6-1(제거 스킬 마이그레이�
   샌드박스에서 확인.
 - `harness.sh` 3862줄 → 2760줄 (-1102, -29%).
 
-`src/*.sh` concat 빌드(9-5 B안)는 결정대로 안 함. 9-4(스킬 병합)는 별도.
+`src/*.sh` concat 빌드(9-5 B안)는 결정대로 안 함.
+
+### 9-11. Task B·C — 스킬 9→6, 8→4 섹션, Context Packet 중복 제거 완료 (2026-09-06, 브랜치 `fix/drift-9-3`)
+
+결정(9-8): 스킬 9→6, 8섹션→4섹션, 상태 신호 1줄 유지, `harness-spec` 신설,
+마이그레이션 "제거 + 매핑 안내".
+
+**스킬 9 → 6** (`templates/.agents/skills/`)
+- `harness-interview` + `harness-reference` → **`harness-spec`** (자산 조사 +
+  인터뷰). 역할은 `interviewer.agent.md` 유지.
+- `harness-verify` → **`harness-work`** §2 (AC 검증·Evidence를 정상 절차에 흡수).
+- `harness-status` → 삭제. `herdr-harness status --live .` +
+  `orchestrator.agent.md`에 진행 보고 지침 추가.
+- `harness-plan`·`harness-orchestrate`·`harness-review` 유지, `harness-handover`는
+  예외 프로토콜로 축약 유지.
+
+**8섹션 → 4섹션**: `적용조건·입력 / 절차 / 예외·중단 게이트 / 산출물·불변식`.
+`결과계약`·`사후조건 체크리스트`·`멱등성 규칙` 삭제, 절차 마지막에
+`결과: SUCCESS|BLOCKED, ...` 한 줄만. 절차 안에 호출할 `herdr-harness` 명령
+직접 명시. 스킬 총 595줄 → 201줄.
+
+**Task C — Context Packet 중복 제거** (`_runtime_context_packet`)
+- Task Contract 전문 뒤에 있던 `## Write scope`·`## References and inputs`·
+  `## Verification commands and criteria` 재추출 3블록 삭제(전부 Task YAML 안에
+  이미 있음 — 소비자 없음 확인). intent.md 경로 한 줄로 대체. 미사용이 된
+  `_runtime_yaml_block` 함수 제거.
+- 새 스킬의 "읽을 것"은 Context Packet에 없는 것만 — intent.md, 수정 대상
+  소스, 이전 Attempt/Review.
+
+**마이그레이션**: `cmd_sync_templates`에 통합·삭제 스킬 처리 추가 —
+`--apply` 시 옛 `.agents/skills/<old>/`와 `.claude/skills/<old>` 링크를 제거하고
+매핑표(`harness-verify → harness-work §2` 등)를 출력. `AGENTS.md`는 자동 갱신
+안 하고 안내만. f3c3866(9스킬) 생성 프로젝트에 실제 적용해 6스킬로 정리 확인.
+
+**harness.sh·docs**: `HARNESS_DOC_TEMPLATES`·`cmd_test` required 목록·
+`HARNESS_START.md`·`ARCHITECTURE.md §1·§6·§7`·`README.md` 갱신. `bash harness.sh
+test` 18 PASS, `init` 샘플 생성·`validate` 통과 확인.
 
 ---
 

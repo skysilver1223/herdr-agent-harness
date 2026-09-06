@@ -8,6 +8,7 @@ Orchestrator는 Herdr Multiplexer 환경에서 승인된 Wave의 진행을 총�
 - 자율적인 무한 루프를 돌리지 않으며, 한 스텝씩 디스패치하고 결과를 검증한 후 다음 단계를 결정한다.
 - 상태 변경은 임의의 텍스트 편집이 아닌 반드시 `herdr-harness transition` 명령을 통해서만 수행한다.
 - 작업 완료 후 잔여 패널을 정리하여 터미널 자원을 보존한다.
+- 진행 상황·드리프트 보고가 필요하면 `herdr-harness status --live .`를 실행해 그 결과와 `STATE.md`·`MILESTONES.md`를 종합하고, 사용자 승인 대기 항목(SPEC 승인, Wave 승인, `awaiting_approval` Task의 완료 승인, `blocked`/`handover_required` 판단 요청)을 강조해 요약한다.
 
 ## 2. 허용된 상태 전이 (BRIEF 정본 기준)
 - `ready -> active` (Worker 디스패치 시작 시)

@@ -157,15 +157,12 @@ emit_doc() {
 # 저장소의 templates/ 아래 같은 상대경로에 있고, emit_doc이 @@…@@ 플레이스홀더만
 # 치환한다. 새 템플릿을 추가하면 이 배열에도 넣어야 cmd_test가 잡아낸다.
 HARNESS_DOC_TEMPLATES=(
-  ".agents/skills/harness-interview/SKILL.md"
-  ".agents/skills/harness-reference/SKILL.md"
+  ".agents/skills/harness-spec/SKILL.md"
   ".agents/skills/harness-plan/SKILL.md"
   ".agents/skills/harness-orchestrate/SKILL.md"
   ".agents/skills/harness-work/SKILL.md"
-  ".agents/skills/harness-verify/SKILL.md"
   ".agents/skills/harness-review/SKILL.md"
   ".agents/skills/harness-handover/SKILL.md"
-  ".agents/skills/harness-status/SKILL.md"
   ".agents/roles/interviewer.agent.md"
   ".agents/roles/planner.agent.md"
   ".agents/roles/orchestrator.agent.md"
@@ -394,7 +391,7 @@ EOF
 # Project State
 
 - Project: $name
-- Status: interviewing
+- Status: spec
 - Current milestone: milestone-001
 - Active wave: none
 - Max active tasks: 5
@@ -535,9 +532,9 @@ herdr-harness start .
 Herdr 첫 Pane에서 \`$orchestrator\`를 실행하고 다음을 요청한다.
 
 \`\`\`text
-harness-orchestrate Skill을 사용해 프로젝트를 시작해줘.
-기존 코드, 데이터, 문서, Dump가 있는지 먼저 인터뷰하고
-SPEC 승인 전에는 구현하지 마.
+harness-spec Skill로 기존 코드·데이터·문서·Dump를 먼저 조사하고
+요구사항을 인터뷰해서 SPEC 초안을 만들어줘.
+SPEC 승인 전에는 구현하지 마. 이후 harness-plan, harness-orchestrate로 진행해줘.
 \`\`\`
 EOF
 
@@ -601,6 +598,38 @@ cmd_sync_templates() {
 
   write_project_docs "$root" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback"
   write_project_templates "$root" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback"
+
+  # 통합·삭제된 스킬 정리 (BACKLOG 9-4). 옛 스킬 디렉터리와 .claude/skills/ 링크를
+  # 제거하고, 어디로 갔는지 매핑을 안내한다. Task 산출물은 건드리지 않는다.
+  local removed_map=(
+    "harness-interview=harness-spec"
+    "harness-reference=harness-spec"
+    "harness-verify=harness-work §2 (자체 검증 단계)"
+    "harness-status=herdr-harness status --live . + orchestrator.agent.md"
+  )
+  local entry old_skill new_target old_dir old_link
+  local printed_removed_header=0
+  for entry in "${removed_map[@]}"; do
+    old_skill="${entry%%=*}"; new_target="${entry#*=}"
+    old_dir="$root/.agents/skills/$old_skill"
+    old_link="$root/.claude/skills/$old_skill"
+    [[ -e "$old_dir" || -L "$old_link" || -e "$old_link" ]] || continue
+    if [[ "$printed_removed_header" -eq 0 ]]; then
+      printf '\n[통합·삭제된 스킬] 아래 스킬은 다른 스킬로 흡수됐다:\n'
+      printed_removed_header=1
+    fi
+    printf '  %s → %s\n' "$old_skill" "$new_target"
+    if [[ "$apply" -eq 1 ]]; then
+      rm -rf -- "$old_dir"
+      [[ -L "$old_link" || -e "$old_link" ]] && rm -f -- "$old_link"
+      SYNC_CHANGED+=(".agents/skills/$old_skill (제거 — $new_target로 통합)")
+    else
+      SYNC_WOULD_CHANGE+=(".agents/skills/$old_skill (제거 예정 — $new_target로 통합)")
+    fi
+  done
+  if [[ "$printed_removed_header" -eq 1 ]]; then
+    printf '  ※ AGENTS.md가 이 스킬 이름을 언급한다면 손으로 갱신하세요(자동 갱신 안 함).\n'
+  fi
 
   # .claude/skills/* 심볼릭 링크 — 없는 것만 만든다. 이미 있으면(정상 링크든,
   # 사용자가 다른 곳을 가리키게 바꿔 놓은 것이든) 손대지 않는다.
@@ -1170,15 +1199,6 @@ _runtime_yaml_scalar() {
   ' "$file"
 }
 
-_runtime_yaml_block() {
-  local file="$1" key="$2"
-  awk -v key="$key" '
-    $0 ~ "^" key ":[[:space:]]*" { found=1; print; next }
-    found && /^[^[:space:]#][^:]*:/ { exit }
-    found { print }
-  ' "$file"
-}
-
 _runtime_has_secret() {
   LC_ALL=C grep -Eqi 'AKIA[0-9A-Z]{8,}|BEGIN[[:space:]]+(RSA |EC |OPENSSH )?PRIVATE KEY|password[[:space:]]*=|token[[:space:]]*=|api[_-]?key[[:space:]]*=' "$1"
 }
@@ -1413,13 +1433,7 @@ _runtime_context_packet() {
     fi
     printf '\n## Task Contract\n\n'
     cat "$task_file"
-    printf '\n## Write scope\n\n'
-    _runtime_yaml_block "$task_file" write_scope
-    printf '\n## References and inputs\n\n'
-    _runtime_yaml_block "$task_file" resources
-    _runtime_yaml_block "$task_file" inputs
-    printf '\n## Verification commands and criteria\n\n'
-    _runtime_yaml_block "$task_file" acceptance_criteria
+    printf '\n`write_scope`, `resources`, `inputs`, `acceptance_criteria`는 위 Task Contract YAML 안에 있다. 착수 게이트·제외 범위·불변식은 `%s`를 읽는다.\n' "$(_runtime_yaml_scalar "$task_file" intent)"
     printf '\n## Next step\n\n'
     if [[ "$role" == worker ]]; then
       printf '이 Task만 수행하고 검증 결과와 Attempt 산출물을 남긴 뒤 submitted를 제안한다. 상태를 직접 전이하거나 completed로 만들지 않는다.\n'
@@ -2237,12 +2251,9 @@ cmd_test() {
     .harness/policies/review-policy.yaml
     .agents/roles/orchestrator.agent.md .agents/roles/worker.agent.md .agents/roles/reviewer.agent.md
     .agents/roles/interviewer.agent.md .agents/roles/planner.agent.md .agents/roles/advisor.agent.md
-    .agents/skills/harness-interview/SKILL.md .agents/skills/harness-reference/SKILL.md
-    .agents/skills/harness-plan/SKILL.md
+    .agents/skills/harness-spec/SKILL.md .agents/skills/harness-plan/SKILL.md
     .agents/skills/harness-orchestrate/SKILL.md .agents/skills/harness-work/SKILL.md
-    .agents/skills/harness-verify/SKILL.md
     .agents/skills/harness-review/SKILL.md .agents/skills/harness-handover/SKILL.md
-    .agents/skills/harness-status/SKILL.md
   )
   local item
   for item in "${required[@]}"; do
