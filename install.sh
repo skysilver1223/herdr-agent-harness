@@ -6,6 +6,44 @@ SOURCE="$SCRIPT_DIR/harness.sh"
 INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/herdr-agent-harness"
 BIN_DIR="$HOME/.local/bin"
 COMMAND_PATH="$BIN_DIR/herdr-harness"
+BASHRC="$HOME/.bashrc"
+COMPLETION_BEGIN='# >>> herdr-harness bash completion >>>'
+COMPLETION_END='# <<< herdr-harness bash completion <<<'
+COMPLETION_LOADER='source <(herdr-harness completion bash)'
+
+# ~/.bashrc에 completion 로더를 마커로 감싼 관리 블록으로 정확히 한 번 등록한다.
+# 이미 로더 줄이 있으면(마커 유무 무관) 아무것도 하지 않는다. 기존 내용은
+# 재정렬·정규화하지 않고 파일 끝에만 덧붙인다.
+# 반환: 0=새로 등록함, 1=이미 있어 건너뜀.
+register_bash_completion() {
+  local bashrc="$1"
+  if [[ -f "$bashrc" ]] && grep -qF -- "$COMPLETION_LOADER" "$bashrc"; then
+    return 1
+  fi
+  if [[ -s "$bashrc" ]] && [[ -n "$(tail -c1 -- "$bashrc")" ]]; then
+    printf '\n' >>"$bashrc"
+  fi
+  {
+    printf '%s\n' "$COMPLETION_BEGIN"
+    printf '%s\n' "$COMPLETION_LOADER"
+    printf '%s\n' "$COMPLETION_END"
+  } >>"$bashrc"
+  return 0
+}
+
+# 등록 시 넣은 관리 블록(마커 두 줄 + 그 사이)만 제거한다. 사용자가 직접 넣은
+# 마커 없는 줄이나 다른 ~/.bashrc 내용은 건드리지 않는다.
+# 반환: 0=제거함, 1=관리 블록 없음.
+deregister_bash_completion() {
+  local bashrc="$1" tmp
+  [[ -f "$bashrc" ]] || return 1
+  grep -qF -- "$COMPLETION_BEGIN" "$bashrc" || return 1
+  tmp="$(mktemp -- "$bashrc.herdr.XXXXXX")"
+  sed "/^${COMPLETION_BEGIN}$/,/^${COMPLETION_END}$/d" -- "$bashrc" >"$tmp"
+  chmod --reference="$bashrc" -- "$tmp" 2>/dev/null || true
+  mv -- "$tmp" "$bashrc"
+  return 0
+}
 
 usage() {
   cat <<'EOF'
@@ -45,6 +83,9 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
   fi
   rm -rf "$INSTALL_DIR/lib" "$INSTALL_DIR/templates"
   rmdir "$INSTALL_DIR" 2>/dev/null || true
+  if deregister_bash_completion "$BASHRC"; then
+    printf '탭 완성 로더 관리 블록을 %s에서 제거했습니다.\n' "$BASHRC"
+  fi
   printf '제거 완료: %s\n' "$COMMAND_PATH"
   exit 0
 fi
@@ -79,8 +120,15 @@ case ":$PATH:" in
     ;;
 esac
 
-printf '\n탭 완성(Bash)을 쓰려면 다음 한 줄을 ~/.bashrc에 추가하세요.\n'
-printf 'source <(herdr-harness completion bash)\n'
+printf '\n'
+if register_bash_completion "$BASHRC"; then
+  printf '탭 완성(Bash) 로더를 %s에 등록했습니다.\n' "$BASHRC"
+else
+  printf '탭 완성(Bash) 로더가 이미 %s에 있습니다.\n' "$BASHRC"
+fi
+printf '이 설치기는 자식 프로세스라 지금 실행 중인 셸에는 바로 반영되지 않습니다.\n'
+printf '새 터미널을 열거나 다음을 실행하세요.\n'
+printf '  source ~/.bashrc\n'
 
 if [[ "$WITH_HERDR_SKILL" -eq 1 ]]; then
   if command -v npx >/dev/null 2>&1; then

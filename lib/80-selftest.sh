@@ -435,6 +435,69 @@ EOF
   printf '%s' "$sync_out" | grep -q '요약: 변경 0' ||
     die "sync-templates --apply: 같은 내용을 다시 적용했는데 멱등이 아닙니다."
 
+  # --- install.sh: ~/.bashrc completion 로더 멱등 등록·정밀 제거 --------------
+  #     설치본(harness.sh만 배포)에는 install.sh가 없으므로 있을 때만 검사한다.
+  local install_sh fake_home fake_bashrc
+  install_sh="$(dirname "$SELF_PATH")/install.sh"
+  if [[ -f "$install_sh" ]]; then
+    fake_home="$test_root/fake-home"
+    fake_bashrc="$fake_home/.bashrc"
+    mkdir -p "$fake_home"
+    printf '# user marker line\nexport EXAMPLE=1\n' >"$fake_bashrc"
+
+    run_fake_install() {
+      HOME="$fake_home" XDG_DATA_HOME="$fake_home/.local/share" \
+        bash "$install_sh" "$@" >/dev/null 2>&1
+    }
+
+    run_fake_install || die "install.sh(임시 HOME) 첫 실행 실패"
+    run_fake_install || die "install.sh(임시 HOME) 재실행 실패"
+
+    grep -qxF '# user marker line' "$fake_bashrc" ||
+      die "install.sh가 기존 .bashrc 사용자 줄(marker)을 보존하지 않았습니다."
+    grep -qxF 'export EXAMPLE=1' "$fake_bashrc" ||
+      die "install.sh가 기존 .bashrc 사용자 줄을 보존하지 않았습니다."
+    [[ "$(grep -cxF 'source <(herdr-harness completion bash)' "$fake_bashrc")" -eq 1 ]] ||
+      die "반복 설치 후 completion 로더 줄이 정확히 1개가 아닙니다."
+    [[ -L "$fake_home/.local/bin/herdr-harness" ]] ||
+      die "install.sh(임시 HOME)가 herdr-harness 명령을 만들지 않았습니다."
+
+    # 경로 1: install.sh --uninstall — 관리 블록만 제거, 사용자 줄 보존
+    run_fake_install --uninstall || die "install.sh --uninstall(임시 HOME) 실패"
+    grep -q 'herdr-harness completion bash' "$fake_bashrc" &&
+      die "install.sh --uninstall이 completion 로더 줄을 제거하지 않았습니다."
+    grep -q 'herdr-harness bash completion' "$fake_bashrc" &&
+      die "install.sh --uninstall 후 관리 마커가 남아 있습니다."
+    grep -qxF '# user marker line' "$fake_bashrc" ||
+      die "install.sh --uninstall이 사용자 줄을 훼손했습니다."
+
+    # 경로 2: herdr-harness uninstall — 동일하게 관리 블록만 정리
+    run_fake_install || die "install.sh 재설치(임시 HOME) 실패"
+    [[ "$(grep -cxF 'source <(herdr-harness completion bash)' "$fake_bashrc")" -eq 1 ]] ||
+      die "재설치 후 completion 로더 줄이 1개가 아닙니다."
+    HOME="$fake_home" XDG_DATA_HOME="$fake_home/.local/share" \
+      bash "$SELF_PATH" uninstall --yes >/dev/null 2>&1 ||
+      die "herdr-harness uninstall --yes(임시 HOME) 실패"
+    grep -q 'herdr-harness completion bash' "$fake_bashrc" &&
+      die "herdr-harness uninstall이 completion 관리 블록을 제거하지 않았습니다."
+    grep -qxF '# user marker line' "$fake_bashrc" ||
+      die "herdr-harness uninstall이 사용자 줄을 훼손했습니다."
+
+    # 마커 없이 사용자가 직접 넣은 줄은 설치기가 중복 등록하지 않고, 제거도 하지 않는다.
+    printf '# user marker line\nsource <(herdr-harness completion bash)\n' >"$fake_bashrc"
+    run_fake_install || die "install.sh(수동 줄 존재) 실행 실패"
+    [[ "$(grep -cxF 'source <(herdr-harness completion bash)' "$fake_bashrc")" -eq 1 ]] ||
+      die "수동 completion 줄이 있는데 설치기가 중복 등록했습니다."
+    run_fake_install --uninstall || die "install.sh --uninstall(수동 줄) 실패"
+    grep -qxF 'source <(herdr-harness completion bash)' "$fake_bashrc" ||
+      die "install.sh --uninstall이 사용자가 직접 넣은 마커 없는 줄을 제거했습니다."
+
+    unset -f run_fake_install
+    rm -rf "$fake_home"
+  else
+    info "install.sh가 없어(설치본) ~/.bashrc 등록 테스트는 건너뜁니다."
+  fi
+
   rm -rf -- "$test_root"
   trap - EXIT
 
@@ -457,4 +520,5 @@ EOF
   printf 'PASS: quota-retry/auto-step opt-in 게이트\n'
   printf 'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)\n'
   printf 'PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범)\n'
+  printf 'PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)\n'
 }

@@ -223,12 +223,21 @@ command -v herdr-harness
 /home/<사용자명>/.local/bin/herdr-harness
 ```
 
-### 8-1. 탭 완성 (선택)
+### 8-1. 탭 완성 (Bash)
+
+`./install.sh`는 다음 관리 블록을 `~/.bashrc`에 한 번만 자동 등록합니다. 반복
+설치해도 중복되지 않고, 기존 `~/.bashrc` 내용은 재정렬·정규화하지 않습니다.
 
 ```bash
-grep -qxF 'source <(herdr-harness completion bash)' ~/.bashrc ||
-echo 'source <(herdr-harness completion bash)' >> ~/.bashrc
+# >>> herdr-harness bash completion >>>
+source <(herdr-harness completion bash)
+# <<< herdr-harness bash completion <<<
+```
 
+설치기는 자식 프로세스라서 이미 실행 중인 셸에는 즉시 반영할 수 없습니다. 새
+터미널을 열거나 다음을 실행해야 이번 세션에도 적용됩니다.
+
+```bash
 source ~/.bashrc
 ```
 
@@ -242,6 +251,10 @@ herdr-harness <TAB><TAB>
 Task ID·상태, `approve`의 Task ID·확인 플래그, `dispatch`·`quota-check`의 Task
 ID·`worker`/`reviewer`도 완성됩니다.
 Bash만 지원합니다.
+
+자동 등록을 원하지 않으면 위 3줄을 지우면 되고, 직접 관리하고 싶으면 마커 없이
+`source <(herdr-harness completion bash)` 한 줄만 두어도 설치기가 중복 등록하지
+않습니다. 다만 마커 없는 줄은 제거 시 그대로 남습니다(사용자 설정으로 취급).
 
 ### 9. 설치 진단
 
@@ -288,6 +301,7 @@ PASS: Task Lock (동시 획득 거부/release/stale 회수)
 PASS: quota-retry/auto-step opt-in 게이트
 PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)
 PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범)
+PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)
 ```
 
 이 테스트는 실제 Claude, Codex, AGY를 호출하지 않으므로 Agent 쿼터를 사용하지 않습니다.
@@ -504,7 +518,12 @@ cd ~/herdr-agent-harness
 ~/.local/share/herdr-agent-harness/harness.sh
 ~/.local/share/herdr-agent-harness/lib/
 ~/.local/share/herdr-agent-harness/templates/
+~/.bashrc 의 탭 완성 로더 관리 블록(위 8-1의 마커 포함 3줄)
 ```
+
+`herdr-harness uninstall`과 `./install.sh --uninstall` 모두 자동 등록한 관리
+블록만 지우고, `~/.bashrc`의 다른 내용과 사용자가 마커 없이 직접 넣은 completion
+줄은 건드리지 않습니다.
 
 다음 항목은 제거하지 않습니다.
 
