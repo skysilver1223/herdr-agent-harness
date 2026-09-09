@@ -11,6 +11,7 @@ main() {
     status) cmd_status "$@" ;;
     validate) cmd_validate "$@" ;;
     transition) cmd_transition "$@" ;;
+    approve) cmd_approve "$@" ;;
     dispatch) cmd_dispatch "$@" ;;
     observe) cmd_observe "$@" ;;
     close-agent) cmd_close_agent "$@" ;;
@@ -21,8 +22,10 @@ main() {
     doctor) cmd_doctor "$@" ;;
     test) cmd_test "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
-    help|-h|--help) usage ;;
+    help|-h|--help)
+      usage
+      printf '\n완료 승인 기록:\n  %s approve PATH TASK_ID --confirm-user-approval\n' "$SCRIPT_NAME"
+      ;;
     *) die "알 수 없는 명령: $command" ;;
   esac
 }
-

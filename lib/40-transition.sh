@@ -178,6 +178,31 @@ transition_allowed() {
   esac
 }
 
+latest_task_review() {
+  local root="$1" task_id="$2"
+  ls -1t "$root/.harness/reviews/${task_id}"-*.md 2>/dev/null | head -n 1 || true
+}
+
+review_verdict() {
+  local review="$1"
+  sed -n 's/^\*\{0,2\}판정:[[:space:]]*\([A-Za-z_]*\).*/\1/p' "$review" | head -n 1
+}
+
+valid_approval_task_id() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+approval_record_matches() {
+  local approval="$1" task_id="$2" review_relative="$3"
+  [[ -f "$approval" ]] || return 1
+  [[ "$(grep -c '^Task:' "$approval" 2>/dev/null || true)" -eq 1 ]] || return 1
+  [[ "$(grep -c '^승인:' "$approval" 2>/dev/null || true)" -eq 1 ]] || return 1
+  [[ "$(grep -c '^근거 Review:' "$approval" 2>/dev/null || true)" -eq 1 ]] || return 1
+  grep -qxF "Task: $task_id" "$approval" || return 1
+  grep -qxF '승인: yes' "$approval" || return 1
+  grep -qxF "근거 Review: $review_relative" "$approval"
+}
+
 cmd_transition() {
   local root_arg="" task_id="" to_state="" note=""
   while [[ $# -gt 0 ]]; do
@@ -241,12 +266,12 @@ cmd_transition() {
     awaiting_approval)
       # 과거의 APPROVED가 남아 있어도 최신 Review가 반려면 통과시키지 않는다.
       local latest_review verdict
-      latest_review="$(ls -1t "$root/.harness/reviews/${task_id}"-*.md 2>/dev/null | head -n 1 || true)"
+      latest_review="$(latest_task_review "$root" "$task_id")"
       [[ -n "$latest_review" ]] ||
         die "Review 파일이 없습니다: .harness/reviews/${task_id}-*.md"
       # 줄 시작의 '판정:' 만 읽는다. Markdown 굵은 표시(**판정: X**)는 허용하되
       # focus 항목의 '- 판정: PASS / FAIL / NA' 같은 하위 줄은 매칭하지 않는다.
-      verdict="$(sed -n 's/^\*\{0,2\}판정:[[:space:]]*\([A-Za-z_]*\).*/\1/p' "$latest_review" | head -n 1)"
+      verdict="$(review_verdict "$latest_review")"
       [[ "$verdict" == APPROVED ]] ||
         die "최신 Review의 판정이 APPROVED가 아닙니다 (${verdict:-없음}): $latest_review"
       ;;
@@ -285,3 +310,100 @@ cmd_transition() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# approve — 사용자의 명시적 완료 승인을 기계적으로 기록하고 completed로 전이.
+# 승인 판단은 하지 않으며, --confirm-user-approval 없이는 절대 실행하지 않는다.
+# ---------------------------------------------------------------------------
+
+cmd_approve() {
+  local root_arg="" task_id="" confirm=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --confirm-user-approval)
+        [[ "$confirm" -eq 0 ]] || die "--confirm-user-approval 플래그가 중복됐습니다."
+        confirm=1
+        shift
+        ;;
+      -h|--help)
+        printf '사용법: %s approve PATH TASK_ID --confirm-user-approval\n' "$SCRIPT_NAME"
+        printf '사용자가 현재 Task의 완료를 명시적으로 승인한 뒤에만 Orchestrator가 호출합니다.\n'
+        return 0
+        ;;
+      -*) die "알 수 없는 approve 옵션: $1" ;;
+      *)
+        if [[ -z "$root_arg" ]]; then root_arg="$1"
+        elif [[ -z "$task_id" ]]; then task_id="$1"
+        else die "인자가 너무 많습니다: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$root_arg" && -n "$task_id" ]] ||
+    die "사용법: $SCRIPT_NAME approve PATH TASK_ID --confirm-user-approval"
+  [[ "$confirm" -eq 1 ]] ||
+    die "사용자의 명시적 승인을 확인했다는 --confirm-user-approval 플래그가 필요합니다."
+  valid_approval_task_id "$task_id" ||
+    die "안전하지 않은 Task ID입니다: $task_id"
+
+  local root path declared_id task_status latest_review verdict review_relative approval
+  root="$(project_root "$root_arg")"
+  path="$(task_file "$root" "$task_id")"
+  declared_id="$(yaml_scalar "$path" task_id)"
+  [[ "$declared_id" == "$task_id" ]] ||
+    die "Task ID가 파일명과 일치하지 않습니다: 요청=$task_id, 선언=$declared_id"
+
+  task_status="$(yaml_scalar "$path" status)"
+  [[ "$task_status" == awaiting_approval || "$task_status" == completed ]] ||
+    die "$task_id 는 awaiting_approval 상태가 아닙니다 (현재 $task_status)."
+
+  latest_review="$(latest_task_review "$root" "$task_id")"
+  [[ -n "$latest_review" ]] ||
+    die "Review 파일이 없습니다: .harness/reviews/${task_id}-*.md"
+  verdict="$(review_verdict "$latest_review")"
+  [[ "$verdict" == APPROVED ]] ||
+    die "최신 Review의 판정이 APPROVED가 아닙니다 (${verdict:-없음}): $latest_review"
+
+  review_relative=".harness/reviews/${latest_review##*/}"
+  approval="$root/.harness/decisions/${task_id}-approval.md"
+
+  if [[ -e "$approval" ]]; then
+    approval_record_matches "$approval" "$task_id" "$review_relative" ||
+      die "기존 승인 파일이 현재 Task/Review와 충돌합니다. 덮어쓰지 않습니다: $approval"
+  elif [[ "$task_status" == completed ]]; then
+    die "completed Task의 승인 파일이 없습니다: $approval"
+  else
+    local temporary approved_at
+    approved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    temporary="$(mktemp "$(dirname "$approval")/.harness-approval.XXXXXX")"
+    trap "rm -f -- '$temporary'" RETURN
+    {
+      printf '# 사용자 승인 기록\n\n'
+      printf 'Task: %s\n' "$task_id"
+      printf '승인: yes\n'
+      printf '승인자: 사용자 (채팅 명시 승인)\n'
+      printf '승인 시각: %s\n' "$approved_at"
+      printf '근거 Review: %s\n' "$review_relative"
+      printf '명시 확인: --confirm-user-approval\n'
+    } >"$temporary"
+    chmod 0644 "$temporary"
+
+    # 같은 Task에 대한 approve 호출이 겹쳐도 기존 파일을 덮어쓰지 않는다.
+    # GNU mv -n은 같은 디렉터리 안에서 원자적으로 이름을 붙이되 충돌 시 보존한다.
+    mv -n "$temporary" "$approval"
+    if [[ -e "$temporary" ]]; then
+      rm -f "$temporary"
+      approval_record_matches "$approval" "$task_id" "$review_relative" ||
+        die "승인 파일 생성 중 충돌이 발생했습니다. 기존 파일을 보존합니다: $approval"
+    fi
+  fi
+
+  if [[ "$task_status" == completed ]]; then
+    printf '%s: 이미 completed입니다 (승인 기록 일치, 변경 없음)\n' "$task_id"
+    return 0
+  fi
+
+  cmd_transition "$root" "$task_id" completed \
+    --note "approve: explicit user confirmation; review=$review_relative"
+}

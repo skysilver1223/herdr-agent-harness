@@ -239,7 +239,8 @@ herdr-harness <TAB><TAB>
 ```
 
 서브커맨드뿐 아니라 `init --profile`·`--orchestrator` 등의 옵션 값, `transition`의
-Task ID·상태, `dispatch`·`quota-check`의 Task ID·`worker`/`reviewer`도 완성됩니다.
+Task ID·상태, `approve`의 Task ID·확인 플래그, `dispatch`·`quota-check`의 Task
+ID·`worker`/`reviewer`도 완성됩니다.
 Bash만 지원합니다.
 
 ### 9. 설치 진단
@@ -277,6 +278,7 @@ PASS: Git 기준선 생성
 PASS: 신규 프로젝트 보호
 PASS: 비대화형 명시적 실패
 PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)
+PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)
 PASS: 이벤트 로그 기록
 PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
 PASS: 스텝 명령 인자 검증
@@ -383,6 +385,7 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 |---|---|
 | `herdr-harness validate [PATH] [--wave ID] [--no-git]` | Git 기준선, Task/Wave, Provider, 의존성, 실행 상한과 write scope를 읽기 전용 검증 |
 | `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제 |
+| `herdr-harness approve PATH TASK_ID --confirm-user-approval` | 사용자 명시 승인 확인 후 승인 증거를 원자적으로 기록하고 기존 `transition` 게이트로 `completed` 전이 |
 | `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS]` | Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록 |
 | `herdr-harness observe PATH TASK_ID [worker\|reviewer]` | 기존 Agent를 재조회하고 Evidence에 추가 |
 | `herdr-harness close-agent PATH TASK_ID [worker\|reviewer] [--force]` | Harness runtime에 등록된 Pane만 정리 |
@@ -393,6 +396,16 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness auto-step PATH TASK_ID [--max-turns N]` | (opt-in) 유한 턴 동안 dispatch 1회 + observe 반복 |
 
 `dispatch`는 재시도, 상태 전이, blocked 응답 또는 Provider failover를 수행하지 않습니다. Orchestrator는 반환된 `dispatch_result`를 확인한 뒤 사용자 승인 경계를 지키며 다음 스텝을 호출합니다.
+
+`approve`는 사용자가 채팅에서 **현재 Task의 완료를 명시적으로 승인한 뒤** Orchestrator가
+호출하는 기록 대행 명령입니다. `--confirm-user-approval`이 없거나 Task가
+`awaiting_approval`이 아니거나 최신 Review가 `APPROVED`가 아니면 거부합니다. 기존 승인
+파일과 Task/Review가 다르면 덮어쓰지 않으며, 성공한 명령을 같은 인자로 다시 호출하면
+승인 파일을 바꾸지 않고 성공합니다. 사용자 발화나 승인 의도를 CLI가 추론하지는 않습니다.
+
+```bash
+herdr-harness approve ~/Projects/snmp-normalizer task-001 --confirm-user-approval
+```
 
 `quota-check`도 자동으로 아무것도 바꾸지 않습니다. claude·codex는 비대화형 조회 수단이 없어 실행 중인 Agent Pane에 `/status`를 보내고 그 출력에서 알려진 경고 문구("... N% of your weekly limit ..." 등)를 스캔합니다. agy는 `agy --print "/usage"`로 정확한 잔여 퍼센트를 바로 얻습니다. 판정 기준(`low`로 볼 임계값)은 `.harness/policies/quota-policy.yaml`의 `low_warning_threshold_pct`로 조정하며, `dispatch`·`observe`도 Agent 출력을 지나가는 김에 스캔해 Evidence에 참고용 경고를 남깁니다(`passive_scan_on_dispatch`).
 
@@ -441,6 +454,8 @@ project/
 
 - Bash는 한 스텝의 실행·검증·기록만 담당하고 Orchestrator Agent가 다음 스텝을 선택합니다.
 - 상태는 Task YAML을 직접 편집하지 않고 `herdr-harness transition`으로 전이합니다.
+  완료 승인은 사용자 명시 승인 뒤 `herdr-harness approve ... --confirm-user-approval`로
+  기록·전이합니다.
 - 하나의 Task는 하나의 목적만 가집니다.
 - Task당 쓰기 가능한 Primary Worker는 한 명입니다.
 - 기존 코드·데이터·문서·Dump를 먼저 조사합니다.

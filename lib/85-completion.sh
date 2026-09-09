@@ -28,7 +28,7 @@ _herdr_harness_completions() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local subcommands="init sync-templates start status doctor test uninstall validate transition dispatch observe close-agent quota-check quota-retry auto-step completion"
+  local subcommands="init sync-templates start status doctor test uninstall validate transition approve dispatch observe close-agent quota-check quota-retry auto-step completion"
 
   if (( COMP_CWORD == 1 )); then
     COMPREPLY=($(compgen -W "$subcommands" -- "$cur"))
@@ -85,6 +85,15 @@ _herdr_harness_completions() {
         :
       else
         COMPREPLY=($(compgen -W "--note" -- "$cur"))
+      fi
+      ;;
+    approve)
+      if (( COMP_CWORD == 2 )); then
+        COMPREPLY=($(compgen -d -- "$cur"))
+      elif (( COMP_CWORD == 3 )); then
+        _herdr_harness_task_ids "${COMP_WORDS[2]}" "$cur"
+      else
+        COMPREPLY=($(compgen -W "--confirm-user-approval" -- "$cur"))
       fi
       ;;
     dispatch|observe|close-agent|quota-check|quota-retry)

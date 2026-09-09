@@ -166,6 +166,94 @@ HARNESS_YAML_CHECK
   expect_fail "동일 상태 재전이" \
     bash "$SELF_PATH" transition "$test_project" task-001 completed
 
+  # approve: 명시 승인 확인 뒤 승인 기록 생성 + 기존 completed 전이 재사용.
+  make_approval_task() {
+    local approval_task_id="$1" declared_id="${2:-$1}" task_state="${3:-awaiting_approval}"
+    sed -e "s/^task_id: .*/task_id: $declared_id/" \
+        -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+        -e "s/^status: .*/status: $task_state/" \
+        "$test_project/.harness/tasks/TEMPLATE.yaml" \
+        >"$test_project/.harness/tasks/$approval_task_id.yaml"
+  }
+
+  local approve_no_confirm=task-approve-no-confirm
+  make_approval_task "$approve_no_confirm"
+  printf '판정: APPROVED\n' >"$test_project/.harness/reviews/$approve_no_confirm-review-1.md"
+  expect_fail "approve: 명시 확인 플래그 없음" \
+    bash "$SELF_PATH" approve "$test_project" "$approve_no_confirm"
+
+  expect_fail "approve: 안전하지 않은 Task ID" \
+    bash "$SELF_PATH" approve "$test_project" ../task-escape --confirm-user-approval
+
+  local approve_wrong_state=task-approve-wrong-state
+  make_approval_task "$approve_wrong_state" "$approve_wrong_state" active
+  printf '판정: APPROVED\n' >"$test_project/.harness/reviews/$approve_wrong_state-review-1.md"
+  expect_fail "approve: awaiting_approval 아닌 상태" \
+    bash "$SELF_PATH" approve "$test_project" "$approve_wrong_state" --confirm-user-approval
+
+  local approve_id_mismatch=task-approve-id-mismatch
+  make_approval_task "$approve_id_mismatch" task-declared-differently
+  expect_fail "approve: 파일명과 선언 Task ID 불일치" \
+    bash "$SELF_PATH" approve "$test_project" "$approve_id_mismatch" --confirm-user-approval
+
+  local approve_bad_review=task-approve-bad-review
+  make_approval_task "$approve_bad_review"
+  printf '판정: APPROVED\n' >"$test_project/.harness/reviews/$approve_bad_review-review-1.md"
+  printf '판정: CHANGES_REQUESTED\n' >"$test_project/.harness/reviews/$approve_bad_review-review-2.md"
+  touch -d '+1 minute' "$test_project/.harness/reviews/$approve_bad_review-review-2.md"
+  expect_fail "approve: 최신 Review가 APPROVED 아님" \
+    bash "$SELF_PATH" approve "$test_project" "$approve_bad_review" --confirm-user-approval
+
+  local approve_conflict=task-approve-conflict
+  make_approval_task "$approve_conflict"
+  printf '판정: APPROVED\n' >"$test_project/.harness/reviews/$approve_conflict-review-1.md"
+  printf 'Task: %s\n승인: no\n근거 Review: .harness/reviews/%s-review-1.md\n' \
+    "$approve_conflict" "$approve_conflict" \
+    >"$test_project/.harness/decisions/$approve_conflict-approval.md"
+  cp "$test_project/.harness/decisions/$approve_conflict-approval.md" "$test_root/conflict-before.md"
+  expect_fail "approve: 기존 승인 파일 충돌" \
+    bash "$SELF_PATH" approve "$test_project" "$approve_conflict" --confirm-user-approval
+  cmp -s "$test_root/conflict-before.md" "$test_project/.harness/decisions/$approve_conflict-approval.md" ||
+    die "approve: 충돌한 기존 승인 파일을 변경했습니다."
+
+  local approve_ok=task-approve-ok approve_record approve_event_count
+  make_approval_task "$approve_ok"
+  printf '판정: APPROVED\n' >"$test_project/.harness/reviews/$approve_ok-review-1.md"
+  expect_pass "approve: 정상 승인" \
+    bash "$SELF_PATH" approve "$test_project" "$approve_ok" --confirm-user-approval
+  [[ "$(yaml_scalar "$test_project/.harness/tasks/$approve_ok.yaml" status)" == completed ]] ||
+    die "approve: 정상 승인 뒤 completed로 전이되지 않았습니다."
+  approve_record="$test_project/.harness/decisions/$approve_ok-approval.md"
+  approval_record_matches "$approve_record" "$approve_ok" \
+    ".harness/reviews/$approve_ok-review-1.md" ||
+    die "approve: 생성한 승인 기록의 Task/승인/Review가 올바르지 않습니다."
+  grep -q $'\ttransition\ttask-approve-ok\tawaiting_approval\tcompleted\t' \
+    "$test_project/.harness/evidence/events.tsv" ||
+    die "approve: 기존 transition을 통한 completed 이벤트가 없습니다."
+  cp "$approve_record" "$test_root/approve-before-retry.md"
+  approve_event_count="$(grep -c $'\ttransition\ttask-approve-ok\t' \
+    "$test_project/.harness/evidence/events.tsv")"
+  expect_pass "approve: idempotent 재호출" \
+    bash "$SELF_PATH" approve "$test_project" "$approve_ok" --confirm-user-approval
+  cmp -s "$test_root/approve-before-retry.md" "$approve_record" ||
+    die "approve: idempotent 재호출이 승인 기록을 변경했습니다."
+  [[ "$(grep -c $'\ttransition\ttask-approve-ok\t' \
+      "$test_project/.harness/evidence/events.tsv")" -eq "$approve_event_count" ]] ||
+    die "approve: idempotent 재호출이 중복 transition 이벤트를 기록했습니다."
+
+  rm -f \
+    "$test_project/.harness/tasks/$approve_no_confirm.yaml" \
+    "$test_project/.harness/tasks/$approve_wrong_state.yaml" \
+    "$test_project/.harness/tasks/$approve_id_mismatch.yaml" \
+    "$test_project/.harness/tasks/$approve_bad_review.yaml" \
+    "$test_project/.harness/tasks/$approve_conflict.yaml" \
+    "$test_project/.harness/reviews/$approve_no_confirm-review-1.md" \
+    "$test_project/.harness/reviews/$approve_wrong_state-review-1.md" \
+    "$test_project/.harness/reviews/$approve_bad_review-review-1.md" \
+    "$test_project/.harness/reviews/$approve_bad_review-review-2.md" \
+    "$test_project/.harness/reviews/$approve_conflict-review-1.md" \
+    "$test_project/.harness/decisions/$approve_conflict-approval.md"
+
   # handover_required 진입 게이트: Handover 인계 문서 필수 (BACKLOG 9-3-3)
   local task3="$test_project/.harness/tasks/task-003.yaml"
   sed -e 's/^task_id: .*/task_id: task-003/' \
@@ -287,6 +375,26 @@ HARNESS_YAML_CHECK
     die "completion bash 출력이 유효한 Bash 문법이 아닙니다."
   printf '%s' "$completion_script" | grep -q '^complete -F .* herdr-harness$' ||
     die "completion bash 출력에 complete 등록 줄이 없습니다."
+  printf '%s' "$completion_script" | grep -q 'transition approve dispatch' ||
+    die "completion bash 출력에 approve 서브커맨드가 없습니다."
+
+  local help_output approve_help_output
+  help_output="$(bash "$SELF_PATH" help)"
+  printf '%s' "$help_output" | grep -q 'approve PATH TASK_ID --confirm-user-approval' ||
+    die "최상위 도움말에 approve 사용법이 없습니다."
+  approve_help_output="$(bash "$SELF_PATH" approve --help)"
+  printf '%s' "$approve_help_output" | grep -q 'approve PATH TASK_ID --confirm-user-approval' ||
+    die "approve 도움말에 명시 확인 플래그가 없습니다."
+
+  grep -q 'approve .*--confirm-user-approval' \
+    "$test_project/.agents/roles/orchestrator.agent.md" ||
+    die "생성 Orchestrator 역할 문서에 명시 승인 approve 절차가 없습니다."
+  grep -q 'approve .*--confirm-user-approval' \
+    "$test_project/.agents/skills/harness-orchestrate/SKILL.md" ||
+    die "생성 Orchestrator Skill에 명시 승인 approve 절차가 없습니다."
+  grep -q 'approve PATH TASK_ID --confirm-user-approval' \
+    "$test_project/.harness/decisions/TEMPLATE.md" ||
+    die "생성 Decision 템플릿에 명시 승인 approve 절차가 없습니다."
 
   # --- sync-templates: 기존 프로젝트를 최신 skill/role 템플릿과 재동기화 -----
   local sync_out
@@ -339,6 +447,7 @@ EOF
   printf 'PASS: 신규 프로젝트 보호\n'
   printf 'PASS: 비대화형 명시적 실패\n'
   printf 'PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)\n'
+  printf 'PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)\n'
   printf 'PASS: 이벤트 로그 기록\n'
   printf 'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)\n'
   printf 'PASS: 스텝 명령 인자 검증\n'

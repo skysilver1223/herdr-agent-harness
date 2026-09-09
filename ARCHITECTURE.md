@@ -81,7 +81,7 @@ stateDiagram-v2
 
 Worker는 `completed`를 선언하지 않습니다. Reviewer는 품질 판정을 기록하고 사용자가 완료를 승인합니다.
 
-상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`만 사용합니다. `submitted`에는 Attempt와 Evidence, `handover_required`에는 `.harness/handovers/TASK-handover-*.md` 인계 문서, `awaiting_approval`에는 `판정: APPROVED`인 Review, `completed`에는 `.harness/decisions/TASK-approval.md`의 `승인: yes`가 필요합니다.
+일반 상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`를 사용합니다. `submitted`에는 Attempt와 Evidence, `handover_required`에는 `.harness/handovers/TASK-handover-*.md` 인계 문서, `awaiting_approval`에는 `판정: APPROVED`인 Review가 필요합니다. 사용자가 완료를 명시적으로 승인한 뒤에는 `herdr-harness approve PATH TASK_ID --confirm-user-approval`이 승인 기록을 원자적으로 만들고 기존 `transition ... completed` 게이트를 호출합니다. 수동 승인 파일과 직접 `transition`하는 기존 흐름도 유지됩니다.
 
 ## 6. Skills
 
@@ -108,7 +108,7 @@ Worker는 `completed`를 선언하지 않습니다. Reviewer는 품질 판정을
 6. Attempt와 Evidence가 준비되면 `transition ... submitted`, 이어서 `transition ... reviewing`을 수행합니다.
 7. `dispatch ... reviewer`로 다른 Provider의 읽기 전용 Review 한 턴을 실행합니다.
 8. Review 판정에 따라 `changes_requested` 또는 `awaiting_approval`로 전이합니다.
-9. 사용자가 승인 파일에 `승인: yes`를 기록한 뒤에만 `completed`로 전이합니다.
+9. 사용자가 현재 Task의 완료를 명시적으로 승인한 뒤 Orchestrator가 `approve ... --confirm-user-approval`을 호출합니다. 명령은 Task ID·`awaiting_approval`·최신 `APPROVED` Review를 검증하고 승인 파일을 원자적으로 기록한 뒤 기존 `transition` 게이트로 `completed` 전이합니다. 사용자 의도를 추론하거나 무승인으로 호출하지 않습니다.
 10. 등록된 Agent는 `close-agent`, 전체 상태는 `status --live`로 정리·관측합니다.
 
 ## 8. 실패와 쿼터
@@ -206,7 +206,7 @@ Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않�
 
 ### 선택적 고도화
 
-- Event Log와 Replay — `append_event`로 상태 전이(`transition`)와 신규 `quota-retry`/`auto-step`/Task Lock 이벤트는 `.harness/evidence/events.tsv`에 남지만, `dispatch`/`observe`/`quota-check` 자체는 아직 기록하지 않고 Replay 도구도 없습니다 — 부분 구현.
+- Event Log와 Replay — `append_event`로 상태 전이(`transition`, `approve`가 호출한 완료 전이 포함)와 신규 `quota-retry`/`auto-step`/Task Lock 이벤트는 `.harness/evidence/events.tsv`에 남지만, `dispatch`/`observe`/`quota-check` 자체는 아직 기록하지 않고 Replay 도구도 없습니다 — 부분 구현.
 - SQLite Lease와 Controller Epoch
 - Fencing Token — §8.1/§8.2의 Task Lock(`mkdir` 기반)이 최소 버전으로 구현되어 있습니다. PID 생존 확인과 stale 회수까지만 하는 권고적 잠금이며, SQLite Lease/Epoch 수준의 완전한 Fencing Token은 아닙니다.
 - Atomic Outbox
@@ -215,4 +215,4 @@ Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않�
 - ~~자동 Failover~~ — §8.1 `quota-retry`로 "탐지→정리→handover stub 생성→handover_required 전이"까지만 부분 구현. Provider 교체 후 재개는 여전히 사람 승인이 필수라 완전 자동 Failover는 아닙니다.
 - Container 또는 별도 OS 사용자 격리
 
-상주 Controller는 여전히 현재 Harness의 범위가 아닙니다. `quota-retry`/`auto-step`은 상주 프로세스가 아니라 호출 1회가 유한 시간 안에 반드시 끝나는 opt-in 명령이며, 둘 다 `completed`/`awaiting_approval`/`reviewing` 전이와 Provider 교체 후 재개 승인은 사람 몫으로 남겨둡니다.
+상주 Controller는 여전히 현재 Harness의 범위가 아닙니다. `quota-retry`/`auto-step`은 상주 프로세스가 아니라 호출 1회가 유한 시간 안에 반드시 끝나는 opt-in 명령이며, 둘 다 `completed`/`awaiting_approval`/`reviewing` 전이를 호출하지 않습니다. `approve`는 자동 루프가 아니라 사용자 명시 승인 뒤 Orchestrator가 확인 플래그와 함께 수동 호출하는 단일 기록·전이 명령입니다.
