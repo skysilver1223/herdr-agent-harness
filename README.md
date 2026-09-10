@@ -445,6 +445,7 @@ dispatch — Task와 역할에 맞는 Agent를 Pane에서 한 턴 실행한다
 
 구문:
   herdr-harness dispatch PATH TASK_ID ROLE [--timeout MS] [--print-only]
+                        [--extra-prompt FILE]
 
 무엇을 하나:
   Task 계약·SPEC 발췌·intent를 Context Packet으로 묶어 Herdr Pane에서 Agent를
@@ -476,7 +477,7 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness validate [PATH] [--wave ID] [--no-git]` | Git 기준선, Task/Wave, Provider, 의존성, 실행 상한과 write scope를 읽기 전용 검증 |
 | `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제. `submitted`로 갈 때는 Acceptance Criteria의 `verified_by` 명령을 직접 실행하고 하나라도 실패하면 거부 |
 | `herdr-harness approve PATH TASK_ID --confirm-user-approval` | 사용자 명시 승인 확인 후 승인 증거를 원자적으로 기록하고 기존 `transition` 게이트로 `completed` 전이 |
-| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS] [--print-only]` | Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
+| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS] [--print-only] [--extra-prompt FILE]` | Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--extra-prompt`는 Task별 추가 지시를 Packet에 덧붙이고, `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
 | `herdr-harness observe PATH TASK_ID [worker\|reviewer]` | 기존 Agent를 재조회하고 Evidence에 추가 |
 | `herdr-harness adopt PATH TASK_ID worker\|reviewer --pane PANE --agent NAME [--provider P]` | 사람이 직접 띄운 Agent를 Harness 추적에 등록(`--print-only` 폴백의 마지막 단계) |
 | `herdr-harness close-agent PATH TASK_ID [worker\|reviewer] [--force]` | Harness runtime에 등록된 Pane만 정리 |
@@ -527,6 +528,28 @@ herdr-harness observe . task-001 worker
 - `--print-only`는 **아무 상태도 남기지 않습니다**(Context Packet만 씁니다). 시작하지 않은 시도를 Attempt로 남기면 전이 게이트가 헐거워지기 때문입니다.
 - `adopt`는 등록 전에 `herdr agent get`으로 그 Agent가 실제로 살아 있는지 확인하고, 없으면 거부합니다.
 - `adopt`로 등록한 Pane은 사람이 만든 것이므로 `close-agent`가 `--force` 없이는 닫지 않습니다.
+
+### 커스텀 프롬프트도 `dispatch`로 — `--extra-prompt`
+
+Task마다 리뷰 중점이나 오판 방지 경고를 따로 붙이고 싶을 때가 있습니다. 그걸 담으려고 Agent를 사람이 직접 띄우면 Attempt·Evidence·Pane 추적이 통째로 빠집니다. 추가 지시는 파일로 적어 Packet에 붙입니다.
+
+```bash
+herdr-harness dispatch . task-001 reviewer --extra-prompt .harness/runtime/task-001-review-notes.md
+```
+
+- 내용은 Context Packet의 `## 이 Task 추가 지시` 절로 들어가며, `## Next step` **앞**에 놓입니다 — 마지막 줄이 "다음 한 단계"로 끝나야 Agent가 무엇을 할 차례인지 헷갈리지 않습니다.
+- 파일 내용도 Packet 전체와 함께 Secret 검사를 받습니다.
+
+### 첫 프롬프트가 확인 화면에 먹히는 문제
+
+`herdr agent start`는 Provider가 떴다는 것까지만 보장합니다. 그 뒤에도 agy는 REPL 부팅·폴더 신뢰·로그인 화면을, claude는 `bypassPermissions` 첫 확인 화면을 띄울 수 있고, 그 화면에 Context Packet을 보내면 텍스트가 화면에 먹힌 채 Agent는 아무 일도 하지 않고 `idle`로 남습니다 — `dispatch`는 `settled`를 반환하지만 실제로는 한 턴도 돌지 않은 상태입니다.
+
+`dispatch`는 이를 두 단계로 막습니다.
+
+1. 프롬프트 전에 Provider REPL이 안정적으로 입력을 받을 수 있을 때까지 기다립니다(agy는 부팅이 느려 더 기다립니다).
+2. Herdr가 `agent_prompt_stalled`을 반환하고 Agent가 여전히 `idle`/`done`인 경우에만 **1회** 다시 보냅니다. 이는 수명주기 변화가 관측되지 않은 유실 신호이므로 정상 턴을 중복 실행하지 않습니다. 화면 출력에 Packet 헤더가 보이는지는 전달 판정에 쓰지 않습니다.
+
+재전송 여부는 Evidence의 `Prompt 재전송` 항목에 남습니다.
 
 ### Agent 승인 정책 — `.harness/policies/agent-policy.yaml`
 

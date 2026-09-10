@@ -3,12 +3,20 @@
 
 cmd_dispatch() {
   local path="${1:-}" task_id="${2:-}" role="${3:-}" timeout=120000 print_only=0
-  [[ -n "$path" && -n "$task_id" && -n "$role" ]] || die "사용법: dispatch PATH TASK_ID ROLE(worker|reviewer) [--timeout MS] [--print-only]"
+  local extra_prompt=""
+  [[ -n "$path" && -n "$task_id" && -n "$role" ]] || die "사용법: dispatch PATH TASK_ID ROLE(worker|reviewer) [--timeout MS] [--print-only] [--extra-prompt FILE]"
   shift 3
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --timeout) [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || die "--timeout에는 양의 밀리초가 필요합니다."; timeout="$2"; shift 2 ;;
       --print-only) print_only=1; shift ;;
+      # 이 Task에만 필요한 추가 지시(리뷰 중점, 오판 방지 경고 등)를 Packet 끝에
+      # 붙인다. 이게 없으면 그런 지시를 담으려고 사람이 Agent를 직접 띄우게 되고,
+      # 그 순간 Attempt·Evidence·추적이 통째로 빠진다.
+      --extra-prompt)
+        [[ $# -ge 2 ]] || die "--extra-prompt에는 파일 경로가 필요합니다."
+        [[ -f "$2" ]] || die "--extra-prompt 파일을 찾을 수 없습니다: $2"
+        extra_prompt="$2"; shift 2 ;;
       *) die "알 수 없는 dispatch 옵션: $1" ;;
     esac
   done
@@ -18,6 +26,7 @@ cmd_dispatch() {
   local root task_file runtime_dir context provider attempt started_at baseline
   local pane_output pane_status pane_id agent_name start_output start_status
   local prompt_output prompt_status get_output get_status read_output read_status result
+  local prompt_resent=0
   local attempt_file evidence_file temporary
   root="$(project_root "$path")"
   task_file="$root/.harness/tasks/$task_id.yaml"
@@ -34,7 +43,7 @@ cmd_dispatch() {
   runtime_dir="$root/.harness/runtime"
   mkdir -p "$runtime_dir" "$root/.harness/attempts" "$root/.harness/evidence"
   context="$runtime_dir/$task_id-context-$role.md"
-  if ! _runtime_context_packet "$root" "$task_id" "$role" "$task_file" "$context"; then
+  if ! _runtime_context_packet "$root" "$task_id" "$role" "$task_file" "$context" "$extra_prompt"; then
     _runtime_write_result "$root" "$task_id" "$role" error
     printf '경고: Context Packet에서 Secret 의심 패턴이 발견되어 저장하거나 전송하지 않았습니다.\n' >&2
     printf 'dispatch_result=error\n'
@@ -133,6 +142,9 @@ cmd_dispatch() {
     read_output=""
     read_status=1
   else
+    # Provider REPL이 입력을 받을 수 있게 될 때까지 기다린다. 이 대기가 없으면
+    # 부팅·신뢰 확인·로그인 화면이 Packet을 먹고 Agent는 idle로 남는다.
+    _runtime_wait_repl_ready "$agent_name" "$(_runtime_repl_boot_seconds "$provider")"
     set +e
     prompt_output="$(herdr agent prompt "$agent_name" "$(cat "$context")" --wait --timeout "$timeout" 2>&1)"
     prompt_status=$?
@@ -142,6 +154,24 @@ cmd_dispatch() {
     read_status=$?
     set -e
     result="$(_runtime_normalize_state "$get_status" "$get_output" "$prompt_status" "$prompt_output")"
+
+    # Herdr가 lifecycle 변화를 관측하지 못했고 Agent도 계속 idle인 경우에만
+    # 재전송한다. 정상 settled 턴은 화면 출력에 Packet 본문이 보이지 않아도
+    # 이미 실행된 것이므로 재전송하면 안 된다.
+    if _runtime_prompt_needs_retry "$get_status" "$get_output" "$prompt_status" "$prompt_output"; then
+      info "Provider REPL이 첫 프롬프트를 받지 않은 것으로 확인됐습니다 — 1회 재전송합니다."
+      prompt_resent=1
+      _runtime_wait_repl_ready "$agent_name" 3
+      set +e
+      prompt_output="$prompt_output"$'\n'"$(herdr agent prompt "$agent_name" "$(cat "$context")" --wait --timeout "$timeout" 2>&1)"
+      prompt_status=$?
+      get_output="$(herdr agent get "$agent_name" 2>&1)"
+      get_status=$?
+      read_output="$(herdr agent read "$agent_name" --source recent-unwrapped --lines 200 2>&1)"
+      read_status=$?
+      set -e
+      result="$(_runtime_normalize_state "$get_status" "$get_output" "$prompt_status" "$prompt_output")"
+    fi
   fi
 
   local quota_signal
@@ -152,7 +182,7 @@ cmd_dispatch() {
   temporary="$(mktemp "$root/.harness/evidence/.capture.XXXXXX")"
   {
     printf '# Evidence: %s / %s / Attempt %s\n\n' "$task_id" "$role" "$attempt"
-    printf -- '- Captured: %s\n- Dispatch result: %s\n- Approval mode: %s\n- Prompt exit: %s\n- Agent get exit: %s\n- Agent read exit: %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$result" "$approval_mode" "$prompt_status" "$get_status" "$read_status"
+    printf -- '- Captured: %s\n- Dispatch result: %s\n- Approval mode: %s\n- Prompt exit: %s\n- Agent get exit: %s\n- Agent read exit: %s\n- Prompt 재전송: %s\n- 추가 지시 파일: %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$result" "$approval_mode" "$prompt_status" "$get_status" "$read_status" "$( ((prompt_resent==1)) && printf 'yes(1회)' || printf 'no')" "${extra_prompt:-(없음)}"
     printf '## Git status --short\n\n'
     git -C "$root" status --short 2>&1 || true
     printf '\n## Git diff --stat\n\n'
@@ -489,4 +519,3 @@ cmd_quota_check() {
 
   printf 'quota_check: provider=%s status=%s detail=%s\n' "$provider" "$status_word" "$detail"
 }
-

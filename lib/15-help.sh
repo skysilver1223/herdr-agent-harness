@@ -202,6 +202,7 @@ EOF
     dispatch) cat <<EOF
 구문:
   $SCRIPT_NAME dispatch PATH TASK_ID ROLE [--timeout MS] [--print-only]
+                        [--extra-prompt FILE]
 
 무엇을 하나:
   Task 계약·SPEC 발췌·intent를 Context Packet으로 묶어 Herdr Pane에서 Agent를
@@ -225,6 +226,18 @@ EOF
   Pane을 만들지도 Agent를 띄우지도 않고, Context Packet 경로와 직접 실행할
   herdr 명령만 출력한다. Herdr 밖에서도 쓸 수 있는 폴백 경로다. 직접 띄운
   뒤에는 $SCRIPT_NAME adopt로 등록해야 observe·close-agent가 이어진다.
+
+--extra-prompt FILE:
+  이 Task에만 필요한 추가 지시(리뷰 중점, 오판 방지 경고 등)를 Context Packet
+  끝에 붙인다. 그런 지시를 담으려고 Agent를 사람이 직접 띄우면 Attempt·
+  Evidence·추적이 통째로 빠지므로, 커스텀 프롬프트도 이 옵션으로 dispatch에
+  태운다. 파일 내용도 Secret 검사를 함께 받는다.
+
+프롬프트 전달 보장:
+  Provider REPL이 입력을 받을 수 있을 때까지 기다린 뒤 보낸다(agy는 부팅이
+  느려 더 기다린다). Herdr가 lifecycle 변화를 못 봐 agent_prompt_stalled을
+  반환하고 Agent가 계속 idle일 때만 1회 다시 보낸다. 확인/승인 UI(blocked)는
+  자동 입력하지 않으며, 재전송 여부는 Evidence에 남는다.
 EOF
       ;;
     observe) cat <<EOF

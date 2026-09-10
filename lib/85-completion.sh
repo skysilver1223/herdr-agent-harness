@@ -444,6 +444,7 @@ _herdr_harness_completions() {
         _herdr_harness_describe "$cur" \
           "--timeout::Agent 한 턴의 대기 한도(밀리초, 기본 120000)" \
           "--print-only::Pane을 만들지 않고 실행할 herdr 명령만 출력 (폴백)"
+          "--extra-prompt::이 Task에만 필요한 추가 지시 파일을 Context Packet에 덧붙인다"
       elif [[ "$cmd" == adopt && ( "$prev" == --pane || "$prev" == --agent ) ]]; then
         :
       elif [[ "$cmd" == adopt && "$prev" == --provider ]]; then

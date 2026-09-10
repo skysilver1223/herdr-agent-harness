@@ -1107,6 +1107,48 @@ STUB
   set -e
   [[ "$failure_status" -ne 0 ]] || die "없는 명령에 대한 help가 성공으로 끝났습니다."
 
+  # --- --extra-prompt: 추가 지시가 Packet에 붙고 Secret 검사도 받는다 -------
+  #
+  # 이 옵션이 없으면 Task별 커스텀 지시를 담으려고 사람이 Agent를 직접 띄우게
+  # 되고, 그 순간 Attempt·Evidence·추적이 통째로 빠진다.
+  local extra_file packet_probe
+  extra_file="$(mktemp)"
+  printf '리뷰 시 빈 카드는 승인된 비용이다. 회귀로 오판하지 말 것.\n' >"$extra_file"
+  packet_probe="$test_project/.harness/runtime/task-001-context-reviewer.md"
+  rm -f -- "$packet_probe"
+  _runtime_context_packet "$test_project" task-001 reviewer \
+    "$test_project/.harness/tasks/task-001.yaml" "$packet_probe" "$extra_file" ||
+    die "--extra-prompt가 붙은 Context Packet 생성에 실패했습니다."
+  grep -q '## 이 Task 추가 지시' "$packet_probe" ||
+    die "Context Packet에 추가 지시 절이 없습니다."
+  grep -q '승인된 비용' "$packet_probe" ||
+    die "추가 지시 본문이 Context Packet에 들어가지 않았습니다."
+  # 추가 지시가 Next step보다 앞에 와야 "다음 한 단계"가 마지막에 남는다.
+  [[ "$(grep -n '## 이 Task 추가 지시' "$packet_probe" | cut -d: -f1)" -lt \
+     "$(grep -n '## Next step' "$packet_probe" | cut -d: -f1)" ]] ||
+    die "추가 지시가 Next step 뒤에 붙었습니다."
+  printf 'OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwx\n' >"$extra_file"
+  if _runtime_context_packet "$test_project" task-001 reviewer \
+       "$test_project/.harness/tasks/task-001.yaml" "$packet_probe" "$extra_file"; then
+    rm -f -- "$extra_file"
+    die "추가 지시의 Secret 패턴이 걸러지지 않았습니다."
+  fi
+  rm -f -- "$extra_file"
+
+  # --- 프롬프트 전달 재시도 판정 --------------------------------------------
+  #
+  # 출력에 Packet 헤더가 있는지는 Provider UI·스크롤백에 좌우되므로 신호가
+  # 아니다. Herdr가 lifecycle을 못 봤다(agent_prompt_stalled) + Agent가 아직
+  # idle일 때만 한 번 재시도해야 정상 턴을 중복 실행하지 않는다.
+  _runtime_prompt_needs_retry 0 '{"agent_status":"idle"}' 1 'agent_prompt_stalled' ||
+    die "idle 상태의 유실된 프롬프트를 재시도 대상으로 판정하지 못했습니다."
+  ! _runtime_prompt_needs_retry 0 '{"agent_status":"done"}' 0 'agent_prompt_stalled' ||
+    die "정상 종료된 프롬프트를 재시도 대상으로 판정했습니다."
+  ! _runtime_prompt_needs_retry 0 '{"agent_status":"blocked"}' 1 'agent_prompt_stalled' ||
+    die "확인/승인 UI가 막힌 프롬프트를 자동 재시도 대상으로 판정했습니다."
+  ! _runtime_prompt_needs_retry 0 '{"agent_status":"idle"}' 1 'other failure' ||
+    die "원인을 모르는 프롬프트 실패를 재시도 대상으로 판정했습니다."
+
   # --- Secret 스캐너: 낱말 가운데 접두사는 오탐이 아니어야 한다 -------------
   #
   # ta"sk-..." 처럼 평범한 Task ID가 OpenAI 키 패턴에 걸리면 Context Packet
@@ -1150,6 +1192,7 @@ STUB
   printf 'PASS: 비대화형 명시적 실패\n'
   printf 'PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)\n'
   printf 'PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)\n'
+  printf 'PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정\n'
   printf 'PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)\n'
   printf 'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)\n'
   printf 'PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)\n'

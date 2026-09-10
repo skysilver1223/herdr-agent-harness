@@ -436,6 +436,7 @@ _runtime_previous_round() {
 
 _runtime_context_packet() {
   local root="$1" task_id="$2" role="$3" task_file="$4" destination="$5"
+  local extra_prompt="${6:-}"
   local temporary spec_file
   temporary="$(mktemp "$root/.harness/runtime/.context.XXXXXX")"
   trap "rm -f -- '$temporary'" RETURN
@@ -459,6 +460,13 @@ _runtime_context_packet() {
     # Reviewer 지적을 못 본 채 같은 접근을 반복한다(Rework의 주된 원인).
     # 전체 이력이 아니라 "최신 한 번"만 넣어 Packet이 부풀지 않게 한다.
     _runtime_previous_round "$root" "$task_id"
+    # 추가 지시는 Next step 앞에 둔다 — 마지막 줄이 "다음 한 단계"로 끝나야
+    # Agent가 무엇을 할 차례인지 헷갈리지 않는다.
+    if [[ -n "$extra_prompt" && -f "$extra_prompt" ]]; then
+      printf '\n## 이 Task 추가 지시\n\n'
+      cat "$extra_prompt"
+      printf '\n'
+    fi
     printf '\n## Next step\n\n'
     if [[ "$role" == worker ]]; then
       printf '이 Task만 수행하고 검증 결과와 Attempt 산출물을 남긴 뒤 submitted를 제안한다. 상태를 직접 전이하거나 completed로 만들지 않는다.\n'
@@ -472,6 +480,67 @@ _runtime_context_packet() {
   fi
   _runtime_atomic_copy "$temporary" "$destination"
   rm -f -- "$temporary"
+}
+
+# ---------------------------------------------------------------------------
+# 첫 프롬프트 유실 — Provider REPL이 아직 입력을 받을 수 없는 상태
+#
+# herdr agent start는 Pane에 Provider가 떴다는 것까지만 보장한다. 그 뒤로도
+# agy는 REPL 부팅(수 초)·폴더 신뢰 확인·로그인 화면을, claude는 bypass 첫
+# 확인 화면을 띄울 수 있다. 그 화면들에 Context Packet을 보내면 텍스트가
+# 화면에 먹히고 Agent는 아무 일도 하지 않은 채 idle로 남는다 — dispatch는
+# settled를 반환하지만 실제로는 한 턴도 돌지 않은 상태다(agy에서 반복 관측).
+#
+# 그래서 (1) 프롬프트 전에 REPL이 안정적으로 idle인지 확인하고,
+# (2) Herdr가 명시적으로 `agent_prompt_stalled`을 반환하면서 Agent가 계속
+# idle인 경우에만 1회 다시 보낸다. Agent 출력에 Packet 본문이 보이는지는
+# Provider의 화면 렌더링·스크롤백에 좌우되므로 전달 여부의 근거가 될 수 없다.
+# ---------------------------------------------------------------------------
+_runtime_wait_repl_ready() {
+  local agent_name="$1" minimum_s="${2:-3}" deadline_s="${3:-40}"
+  local waited=0 stable=0 status_line
+  sleep "$minimum_s"
+  waited="$minimum_s"
+  while (( waited < deadline_s )); do
+    status_line="$(herdr agent get "$agent_name" 2>/dev/null || true)"
+    case "$(_runtime_json_field "$status_line" agent_status)" in
+      idle|done) stable=$((stable + 1)) ;;
+      *) stable=0 ;;
+    esac
+    # 연속 2회 idle이어야 "안정"으로 본다 — 부팅 중 한 번 스치는 idle과 구분한다.
+    (( stable >= 2 )) && return 0
+    sleep 2
+    waited=$((waited + 2))
+  done
+  return 0
+}
+
+# Provider별 REPL 부팅 최소 대기. agy는 Antigravity CLI 부팅이 느려(관측 ~15초)
+# 짧게 잡으면 프롬프트가 부팅 화면에 그대로 먹힌다.
+_runtime_repl_boot_seconds() {
+  case "$1" in
+    agy) printf '12' ;;
+    *) printf '3' ;;
+  esac
+}
+
+# 첫 전송을 한 번 더 시도해도 안전한가.
+#
+# `herdr agent prompt`는 전송 뒤 5초 안에 Agent lifecycle 변화가 관측되지
+# 않으면 `agent_prompt_stalled`로 실패한다. 그때도 Agent가 idle/done이면
+# Provider REPL이 아직 입력을 받지 못해 첫 텍스트가 버려진 경우다. 반대로
+# settled 응답은 lifecycle 변화가 실제로 관측된 정상 턴이므로, 출력 화면에
+# Packet 헤더가 없더라도 절대 재전송하지 않는다.
+#
+# blocked는 신뢰 확인·승인 UI일 수 있다. 그 UI에 Enter를 자동 입력하거나
+# Prompt를 반복하지 않고, 호출자가 Evidence를 보고 사용자에게 묻도록 둔다.
+_runtime_prompt_needs_retry() {
+  local get_status="$1" get_output="$2" prompt_status="$3" prompt_output="$4"
+  local state
+  (( prompt_status != 0 && get_status == 0 )) || return 1
+  printf '%s' "$prompt_output" | grep -qi 'agent_prompt_stalled' || return 1
+  state="$(_runtime_json_field "$get_output" agent_status)"
+  [[ "$state" == idle || "$state" == done ]]
 }
 
 # ---------------------------------------------------------------------------
