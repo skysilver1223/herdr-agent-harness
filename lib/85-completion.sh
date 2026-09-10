@@ -23,9 +23,38 @@ _herdr_harness_task_ids() {
 }
 
 
-# 후보가 여럿일 때만 "명령  설명" 형태로 보여 준다. 후보가 하나로 좁혀지면
-# 설명 없이 명령만 넣어야 실제 입력이 망가지지 않는다(Bash에는 설명 전용
-# 표시 기능이 없어 이 방식이 유일하게 안전하다).
+# 설명을 붙여도 안전한 상황인지 한 번만 판정해 캐시한다.
+#
+# Bash에는 "표시 전용" 완성 항목이 없어서 설명은 후보 문자열 자체에 들어간다.
+# 기본 complete 동작에서는 후보가 여럿일 때 목록만 표시하므로 문제가 없지만,
+# 사용자가 TAB을 menu-complete에 바인딩해 두었다면 후보 문자열이 그대로
+# 입력된다. 그런 설정이면 설명을 끄고 명령만 반환한다.
+# HERDR_HARNESS_COMPLETION_DESCRIPTIONS=0으로 언제든 끌 수 있다.
+_herdr_harness_describe_enabled() {
+  if [[ -n "${_HERDR_HARNESS_DESCRIBE_OK:-}" ]]; then
+    [[ "$_HERDR_HARNESS_DESCRIBE_OK" == 1 ]]
+    return
+  fi
+  _HERDR_HARNESS_DESCRIBE_OK=1
+  if [[ "${HERDR_HARNESS_COMPLETION_DESCRIPTIONS:-1}" == 0 ]]; then
+    _HERDR_HARNESS_DESCRIBE_OK=0
+  else
+    # TAB이 "후보를 그대로 넣는" readline 명령에 묶여 있으면 설명이 명령줄에
+    # 삽입된다. 그런 바인딩이 하나라도 있으면 설명을 끈다.
+    local readline_command
+    for readline_command in menu-complete menu-complete-backward insert-completions; do
+      if bind -q "$readline_command" 2>/dev/null | grep -q '\\C-i'; then
+        _HERDR_HARNESS_DESCRIBE_OK=0
+        break
+      fi
+    done
+  fi
+  [[ "$_HERDR_HARNESS_DESCRIBE_OK" == 1 ]]
+}
+
+# 후보가 여럿일 때만 "명령 : 설명" 형태로 보여 준다. 후보가 하나로 좁혀지면
+# 설명 없이 명령만 넣어야 실제 입력이 망가지지 않는다.
+# 반환: 0=후보를 넣었다, 1=일치하는 후보가 없다(호출자가 다른 완성을 시도).
 _herdr_harness_describe() {
   local cur="$1"; shift
   local pair name matched=()
@@ -35,10 +64,12 @@ _herdr_harness_describe() {
     matched+=("$pair")
   done
   if (( ${#matched[@]} == 0 )); then
-    return 0
+    return 1
   fi
-  if (( ${#matched[@]} == 1 )); then
-    COMPREPLY+=("${matched[0]%%::*}")
+  if (( ${#matched[@]} == 1 )) || ! _herdr_harness_describe_enabled; then
+    for pair in "${matched[@]}"; do
+      COMPREPLY+=("${pair%%::*}")
+    done
     return 0
   fi
   for pair in "${matched[@]}"; do
@@ -197,9 +228,12 @@ _herdr_harness_completions() {
       if (( COMP_CWORD == 2 )); then
         # 경로처럼 보일 때만 디렉터리를 섞는다. 그러지 않으면 하위 명령 목록에
         # 프로젝트 디렉터리 이름이 끼어들어 설명이 읽기 어려워진다.
+        # 경로처럼 보이면 디렉터리만, 아니면 하위 명령 설명을 먼저 보여 주고
+        # 일치하는 하위 명령이 없을 때만 디렉터리로 되돌아간다(remote li<TAB> → lib).
         case "$cur" in
           */*|.*|~*) COMPREPLY=($(compgen -d -- "$cur")) ;;
-          *) _herdr_harness_describe "$cur" "${remote_described[@]}" ;;
+          *) _herdr_harness_describe "$cur" "${remote_described[@]}" ||
+               COMPREPLY=($(compgen -d -- "$cur")) ;;
         esac
       elif (( COMP_CWORD == 3 )) && [[ " $remote_subs " != *" ${COMP_WORDS[2]} "* ]]; then
         _herdr_harness_describe "$cur" "${remote_described[@]}"

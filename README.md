@@ -260,7 +260,9 @@ help             : 명령 목록 또는 특정 명령 상세 사용법
 ```
 
 후보가 여럿일 때는 `명령 : 설명` 형태로 함께 나오고, 후보가 하나로 좁혀지면 설명 없이
-명령만 입력됩니다. `herdr-harness remote <TAB><TAB>`도 하위 명령마다 설명을 보여 줍니다.
+명령만 입력됩니다. TAB을 `menu-complete`에 바인딩해 두었다면(그 경우 후보 문자열이 그대로
+입력되므로) 설명을 자동으로 끄고 명령만 돌려줍니다. 항상 끄고 싶으면
+`export HERDR_HARNESS_COMPLETION_DESCRIPTIONS=0`. `herdr-harness remote <TAB><TAB>`도 하위 명령마다 설명을 보여 줍니다.
 
 ```text
 $ herdr-harness remote <TAB><TAB>

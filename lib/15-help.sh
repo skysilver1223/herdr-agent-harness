@@ -96,11 +96,12 @@ EOF
       ;;
     sync-templates) cat <<EOF
 구문:
-  $SCRIPT_NAME sync-templates PATH [--apply]
+  $SCRIPT_NAME sync-templates [PATH] [--apply|--dry-run]
 
 무엇을 하나:
   Harness가 소유한 Skill·역할·템플릿 파일만 지금 버전으로 맞춘다. 기본은
-  diff 미리보기이며 --apply를 줘야 실제로 쓴다. SPEC.md·STATE.md·Task 파일
+  diff 미리보기(--dry-run과 같다)이며 --apply를 줘야 실제로 쓴다. PATH를 생략하면
+  현재 디렉터리를 쓴다. SPEC.md·STATE.md·Task 파일
   같은 프로젝트 산출물은 건드리지 않는다.
 
 예시:
@@ -220,11 +221,15 @@ EOF
     quota-check) cat <<EOF
 구문:
   $SCRIPT_NAME quota-check PATH TASK_ID ROLE
-  $SCRIPT_NAME quota-check PATH --provider claude|codex|agy
+  $SCRIPT_NAME quota-check PATH --provider agy
 
 무엇을 하나:
-  실행 중인 Agent에 상태를 물어 남은 쿼터를 읽고 결과를 기록한다(claude·codex는
-  /status, agy는 --print). 확인만 하며 Provider를 자동으로 바꾸지 않는다.
+  실행 중인 Agent에 상태를 물어 남은 쿼터를 읽고 결과를 기록한다. 확인만 하며
+  Provider를 자동으로 바꾸지 않는다.
+
+  claude·codex는 Pane 안의 Agent에 /status를 보내 읽으므로 Task ID와 역할이
+  필요하고 Herdr Pane 안에서 실행해야 한다. agy만 Agent 없이 --provider로 바로
+  조회할 수 있다(agy --print /usage).
 
 예시:
   $SCRIPT_NAME quota-check . task-001 worker

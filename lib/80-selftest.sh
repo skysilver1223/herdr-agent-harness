@@ -716,9 +716,15 @@ STUB
   # 하나라도 빠지면 사용자는 "탭에는 있는데 help는 없는" 명령을 만난다.
   # ---------------------------------------------------------------------------
   local dispatch_commands=() summary_commands=() completion_commands=()
+  # case 라벨만 본다 — 본문이 같은 줄에 있든 다음 줄에 있든 잡히도록.
+  # `help|-h|--help)` 처럼 별칭이 붙은 라벨은 첫 이름만 쓴다.
   mapfile -t dispatch_commands < <(
-    awk '/^    [a-z|-]+\) cmd_/ { line = $1; sub(/\)$/, "", line); split(line, parts, "|"); print parts[1] }' \
-      "$HARNESS_LIB_DIR/99-main.sh" | sort -u)
+    awk '/^    [a-z][a-z-]*(\|[-a-z]+)*\)/ {
+           label = $1
+           sub(/\).*$/, "", label)
+           split(label, parts, "|")
+           print parts[1]
+         }' "$HARNESS_LIB_DIR/99-main.sh" | sort -u)
   mapfile -t summary_commands < <(harness_command_names | sort -u)
   mapfile -t completion_commands < <(
     bash "$SELF_PATH" completion bash |
@@ -726,10 +732,19 @@ STUB
 
   [[ "${#dispatch_commands[@]}" -gt 10 ]] ||
     die "도움말 정합성 검사가 명령 목록을 읽지 못했습니다(파서 확인 필요)."
+  # 디스패처가 실제로 아는 이름이 파서에 잡히는지 표본으로 확인한다.
+  local sentinel
+  for sentinel in init remote help; do
+    case " ${dispatch_commands[*]} " in
+      *" $sentinel "*) ;;
+      *) die "도움말 정합성 검사의 디스패처 파서가 $sentinel 를 놓쳤습니다(lib/80-selftest.sh)." ;;
+    esac
+  done
 
+  # 세 목록은 정확히 같아야 한다 — 어느 쪽에만 있어도 실패다.
+  # (한쪽만 검사하면 탭에만 있는 가짜 명령이나 실행할 수 없는 help 항목이 남는다.)
   local expected_command
   for expected_command in "${dispatch_commands[@]}"; do
-    [[ "$expected_command" != help ]] || continue
     case " ${summary_commands[*]} " in
       *" $expected_command "*) ;;
       *) die "HARNESS_COMMAND_SUMMARIES에 설명이 없는 명령: $expected_command (lib/15-help.sh)" ;;
@@ -743,12 +758,48 @@ STUB
   done
 
   for expected_command in "${summary_commands[@]}"; do
-    [[ "$expected_command" != help ]] || continue
     case " ${dispatch_commands[*]} " in
       *" $expected_command "*) ;;
-      *) die "실행할 수 없는 명령이 도움말에 있습니다: $expected_command" ;;
+      *) die "실행할 수 없는 명령이 도움말 요약표에 있습니다: $expected_command (lib/15-help.sh)" ;;
     esac
   done
+
+  for expected_command in "${completion_commands[@]}"; do
+    case " ${dispatch_commands[*]} " in
+      *" $expected_command "*) ;;
+      *) die "실행할 수 없는 명령이 탭 완성 설명 목록에 있습니다: $expected_command (lib/85-completion.sh)" ;;
+    esac
+  done
+
+  # 설명 표시 가드: TAB이 "후보를 그대로 넣는" readline 명령에 묶여 있거나
+  # 사용자가 껐으면, 후보가 여럿이어도 설명 없이 명령만 돌려줘야 한다.
+  # (그러지 않으면 설명 문자열이 그대로 명령줄에 삽입된다.)
+  local describe_probe
+  describe_probe='
+    source <(bash "$0" completion bash)
+    COMP_WORDS=(herdr-harness ""); COMP_CWORD=1; COMPREPLY=()
+    compopt() { :; }
+    _herdr_harness_completions
+    printf "%s\n" "${COMPREPLY[0]}"
+  '
+  # 삽입형 readline 명령 각각에 대해 bind 스텁이 "그 명령만" TAB에 묶였다고
+  # 보고하게 한다 — 하나라도 검사에서 빠지면 여기서 걸린다.
+  local guarded_case guarded_first bind_stub
+  for guarded_case in env menu-complete menu-complete-backward insert-completions; do
+    if [[ "$guarded_case" == env ]]; then
+      guarded_first="$(bash -c "HERDR_HARNESS_COMPLETION_DESCRIPTIONS=0; $describe_probe" "$SELF_PATH")"
+    else
+      bind_stub="bind() { [[ \"\$2\" == $guarded_case ]] || return 0; printf '%s can be invoked via \"\\\\C-i\".\n' \"\$2\"; }; "
+      guarded_first="$(bash -c "$bind_stub$describe_probe" "$SELF_PATH")"
+    fi
+    [[ "$guarded_first" != *" : "* ]] ||
+      die "설명 표시를 꺼야 하는 상황($guarded_case)에서 설명이 후보에 들어갔습니다: $guarded_first"
+  done
+
+  local described_first
+  described_first="$(bash -c "bind() { return 1; }; $describe_probe" "$SELF_PATH")"
+  [[ "$described_first" == *" : "* ]] ||
+    die "기본 상황에서 탭 완성 설명이 붙지 않았습니다: $described_first"
 
   set +e
   bash "$SELF_PATH" help no-such-command >/dev/null 2>&1
