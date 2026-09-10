@@ -415,6 +415,9 @@ EOF
 
   info "생성 완료: $target"
   info "다음 단계: cd '$target' && herdr-harness start ."
+  if [[ "$remote_enabled" == true ]]; then
+    info "원격 모드 설정됨. 키 등록(비밀번호 1회 입력): herdr-harness remote '$target' setup --force"
+  fi
 }
 
 # ---------------------------------------------------------------------------

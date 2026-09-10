@@ -17,6 +17,7 @@ Herdr Agent/Skills Harness
   $SCRIPT_NAME completion bash    Bash 탭 완성 스크립트 출력(설치: source <(herdr-harness completion bash))
 
 원격 실행 모드 (opt-in, .harness/policies/remote.yaml의 enabled: true일 때만):
+  $SCRIPT_NAME remote [PATH] setup           최초 1회 대화형 설정(호스트·계정·경로 입력 → remote.yaml 생성 → 비밀번호 1회로 SSH 키 등록)
   $SCRIPT_NAME remote [PATH] doctor          SSH·원격 경로·도구·마운트 일괄 진단
   $SCRIPT_NAME remote [PATH] bootstrap-key   전용 SSH 키를 원격에 1회 등록
   $SCRIPT_NAME remote [PATH] mount|unmount   원격 소스를 SSHFS로 로컬에 노출/해제

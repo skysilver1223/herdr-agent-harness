@@ -603,6 +603,106 @@ EOF
   cp "$remote_config_backup" "$remote_config"
 
   # 포트가 붙은 호스트, 개행이 든 값은 init 단계에서 거부한다.
+  # ---------------------------------------------------------------------------
+  # remote setup: 설정이 없는 기존 프로젝트를 옵션만으로 구성한다. --no-key라
+  # 네트워크는 쓰지 않는다. 비밀번호가 파일에 남지 않는지도 여기서 본다.
+  # ---------------------------------------------------------------------------
+  local setup_project="$test_root/setup-project"
+  bash "$SELF_PATH" init "$setup_project" --name setup-project --goal "setup 테스트" >/dev/null
+  local setup_config="$setup_project/.harness/policies/remote.yaml"
+  grep -q '^  enabled: false$' "$setup_config" ||
+    die "setup 테스트 전제 위반: 새 프로젝트가 이미 원격 모드입니다."
+
+  HH_REMOTE_PASSWORD='절대저장되면안됨' bash "$SELF_PATH" remote "$setup_project" setup \
+    --host build.example --user builder --path /srv/setup --vcs svn --no-key >/dev/null ||
+    die "remote setup(비대화형, --no-key) 실패"
+  grep -q "^  enabled: true$" "$setup_config" || die "setup이 원격 모드를 켜지 않았습니다."
+  grep -q "^  host: 'build.example'$" "$setup_config" || die "setup이 host를 쓰지 않았습니다."
+  grep -q "^  vcs: 'svn'$" "$setup_config" || die "setup이 vcs를 쓰지 않았습니다."
+  if grep -q '절대저장되면안됨' "$setup_config"; then
+    die "setup이 비밀번호를 설정 파일에 기록했습니다."
+  fi
+  # setup 직후 설정만으로 다른 하위 명령이 로드에 성공해야 한다(SSH는 실패해도 됨).
+  local setup_status_output
+  set +e
+  setup_status_output="$(bash "$SELF_PATH" remote "$setup_project" status 2>&1)"
+  set -e
+  printf '%s' "$setup_status_output" | grep -q '^원격 대상:  builder@build.example$' ||
+    die "setup이 만든 설정을 다시 읽지 못했습니다: $setup_status_output"
+
+  expect_fail "remote setup: 기존 설정 덮어쓰기에 --force 필요" \
+    bash "$SELF_PATH" remote "$setup_project" setup --host other.example --user u --path /srv/x --no-key
+  bash "$SELF_PATH" remote "$setup_project" setup --force \
+    --host other.example --user builder --path /srv/x --vcs git --no-key >/dev/null ||
+    die "remote setup --force 실패"
+  grep -q "^  host: 'other.example'$" "$setup_config" || die "--force가 값을 갱신하지 않았습니다."
+  expect_fail "remote setup: 옵션형 user 거부" \
+    bash "$SELF_PATH" remote "$setup_project" setup --force \
+      --host h.example --user '-oProxyCommand=touch /tmp/pwned' --path /srv/x --no-key
+  # 기본값으로 채울 수 없는 값이 남으면 비대화형에서는 물어보지 않고 실패한다.
+  # (--force 재실행은 기존 값이 기본값이 되므로 이 경우에 해당하지 않는다.)
+  local setup_bare="$test_root/setup-bare"
+  bash "$SELF_PATH" init "$setup_bare" --name setup-bare --goal "setup 비대화형" >/dev/null
+  expect_fail "remote setup: 비대화형에서 host 누락" \
+    bash "$SELF_PATH" remote "$setup_bare" setup --user builder --path /srv/x --no-key
+
+  # 제어문자(개행·캐리지리턴)는 생성 YAML을 조용히 오염시키므로 거부한다.
+  expect_fail "remote setup: 경로에 캐리지리턴" \
+    bash "$SELF_PATH" remote "$setup_bare" setup --host build.example --user builder \
+      --path "$(printf '/srv/a\rb')" --no-key
+
+  # 중복 키로 깨진 설정은 setup --force로 복구할 수 있어야 한다(복구 경로).
+  local setup_repair="$test_root/setup-repair"
+  bash "$SELF_PATH" init "$setup_repair" --name setup-repair --goal "복구" >/dev/null
+  printf "  mount_path: '/tmp/duplicate'\n" >>"$setup_repair/.harness/policies/remote.yaml"
+  bash "$SELF_PATH" remote "$setup_repair" setup --force \
+    --host build.example --user builder --path /srv/p --vcs git --no-key >/dev/null ||
+    die "중복 키가 있는 설정을 setup --force로 복구하지 못했습니다."
+  [[ "$(grep -c '^  mount_path:' "$setup_repair/.harness/policies/remote.yaml")" -eq 1 ]] ||
+    die "복구 후에도 중복 키가 남아 있습니다."
+
+  # 비밀번호는 sshpass 호출에만 전달돼야 한다. ssh-keygen 같은 무관한 자식이
+  # HH_REMOTE_PASSWORD를 상속하면 /proc/<pid>/environ으로 노출된다.
+  local stub_dir="$test_root/stub-bin"
+  mkdir -p "$stub_dir"
+  cat >"$stub_dir/ssh-keygen" <<'STUB'
+#!/usr/bin/env bash
+if env | grep -q '^HH_REMOTE_PASSWORD='; then printf 'LEAK-keygen\n'; fi
+exit 1
+STUB
+  cat >"$stub_dir/sshpass" <<'STUB'
+#!/usr/bin/env bash
+if env | grep -q '^HH_REMOTE_PASSWORD='; then printf 'LEAK-sshpass\n'; fi
+exit 1
+STUB
+  chmod +x "$stub_dir/ssh-keygen" "$stub_dir/sshpass"
+
+  local setup_leak="$test_root/setup-leak" leak_output
+  bash "$SELF_PATH" init "$setup_leak" --name setup-leak --goal "비밀번호 상속" >/dev/null
+  set +e
+  leak_output="$(PATH="$stub_dir:$PATH" HH_REMOTE_PASSWORD='절대상속되면안됨' \
+    bash "$SELF_PATH" remote "$setup_leak" setup \
+    --host build.example --user builder --path /srv/x 2>&1)"
+  set -e
+  if printf '%s' "$leak_output" | grep -q 'LEAK-'; then
+    die "비밀번호가 무관한 자식 프로세스로 상속됐습니다: $leak_output"
+  fi
+
+  # 키 등록 단계에서 실패해도 입력한 설정은 남고, 다음 한 단계를 안내해야 한다.
+  local setup_keyfail="$test_root/setup-keyfail"
+  bash "$SELF_PATH" init "$setup_keyfail" --name setup-keyfail --goal "키 등록 실패" >/dev/null
+  local keyfail_output
+  set +e
+  keyfail_output="$(bash "$SELF_PATH" remote "$setup_keyfail" setup \
+    --host build.example --user builder --path /srv/x </dev/null 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "비대화형 키 등록이 성공으로 보고됐습니다."
+  printf '%s' "$keyfail_output" | grep -q 'bootstrap-key' ||
+    die "키 등록 실패 안내에 다음 단계가 없습니다: $keyfail_output"
+  grep -q "^  host: 'build.example'$" "$setup_keyfail/.harness/policies/remote.yaml" ||
+    die "키 등록 실패 시 입력한 설정이 남지 않았습니다."
+
   expect_fail "init: 포트가 붙은 --remote-host" \
     bash "$SELF_PATH" init "$test_root/remote-host-port" --name r --goal g \
       --remote-host host.example:22 --remote-path /srv/p
@@ -628,7 +728,7 @@ EOF
   printf 'PASS: 스텝 명령 인자 검증\n'
   printf 'PASS: Agent 호출 없음\n'
   printf 'PASS: 탭 완성 스크립트 문법\n'
-  printf 'PASS: 원격 실행 모드 (opt-in 게이트/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키/비밀번호 미저장)\n'
+  printf 'PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호 미저장/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키)\n'
   printf 'PASS: Task Lock (동시 획득 거부/release/stale 회수)\n'
   printf 'PASS: quota-retry/auto-step opt-in 게이트\n'
   printf 'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)\n'

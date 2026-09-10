@@ -445,15 +445,39 @@ herdr-harness init ~/Projects/normalize-telemetry \
   --remote-vcs svn
 ```
 
-설정 정본은 `.harness/policies/remote.yaml`이고, `enabled: true`가 아니면 모든 `remote` 하위 명령이 즉시 거부합니다(기존 프로젝트는 영향 없음). 기존 프로젝트에 나중에 켜려면 이 파일의 `enabled`와 `host`/`user`/`path`를 채우면 됩니다.
+설정 정본은 `.harness/policies/remote.yaml`이고, `enabled: true`가 아니면 모든 `remote` 하위 명령이 즉시 거부합니다(기존 프로젝트는 영향 없음).
+
+### 최초 1회: `remote setup`
+
+기존 프로젝트든 새 프로젝트든, 설정 파일 작성과 SSH 키 등록을 한 번에 끝냅니다. **ID와 비밀번호는 이때 한 번만 입력**하고, 그 뒤로는 키 인증이라 다시 묻지 않습니다.
 
 ```bash
-# 최초 1회: 비밀번호로 접속해 전용 SSH 키를 등록하고, 이후로는 키 인증만 사용.
-# 명령줄에 비밀번호를 직접 쓰면 셸 히스토리에 남으므로 read -rs로 입력받습니다.
-read -rsp '원격 비밀번호: ' HH_REMOTE_PASSWORD; echo
-HH_REMOTE_PASSWORD="$HH_REMOTE_PASSWORD" herdr-harness remote . bootstrap-key
-unset HH_REMOTE_PASSWORD
+cd ~/Projects/내프로젝트
+herdr-harness remote . setup
+```
 
+```text
+원격 호스트(SSH): 192.168.2.77
+원격 계정 [esk1223]: nsotdb
+원격 프로젝트 경로(절대경로): /home/nsotdb/Normalize_Telemetry
+SSHFS 마운트 경로(로컬) [~/Projects/내프로젝트/.harness/remote-mount]: ~/workspace/Normalize_Telemetry
+전용 SSH 키 경로 [~/.ssh/herdr_remote_ed25519]:
+원격 VCS (git|svn|none) [git]: svn
+원격 비밀번호(키 등록에만 사용, 저장하지 않음):        ← 화면에 표시되지 않음
+[herdr-harness] 원격 설정 기록: .harness/policies/remote.yaml (비밀번호는 저장하지 않습니다)
+[herdr-harness] SSH 키 등록 완료. 이후에는 HH_REMOTE_PASSWORD 없이 접속합니다.
+```
+
+비밀번호는 이 명령이 도는 동안 메모리에만 있고 설정 파일·명령줄 인자·셸 이력 어디에도 남지 않습니다. `sshpass` 호출 하나에만 전달되며 `ssh-keygen` 같은 다른 자식 프로세스는 상속하지 않습니다. 이미 키로 접속되는 상태라면 비밀번호를 아예 묻지 않습니다.
+
+- 다시 실행하면 기존 값이 기본값으로 채워집니다. 값을 바꾸려면 `--force`가 필요합니다(설정 파일이 중복 키 등으로 깨져 있으면 `--force`로 새로 작성할 수 있습니다).
+- 키 등록 단계에서 실패해도 입력한 설정은 저장돼 있습니다. `herdr-harness remote . bootstrap-key`로 키만 다시 등록하면 됩니다.
+- 스크립트·CI용 비대화형 실행: `herdr-harness remote . setup --host H --user U --path /srv/p --vcs svn --no-key` (`--no-key`는 키 등록을 건너뜁니다. 등록까지 하려면 `HH_REMOTE_PASSWORD`를 함께 넘기세요.)
+- 키만 다시 등록하려면 `herdr-harness remote . bootstrap-key`.
+
+### 이후 사용
+
+```bash
 herdr-harness remote . doctor            # 의존성·SSH·원격 경로·도구·마운트 진단
 herdr-harness remote . mount             # 원격 소스를 로컬 경로에 노출
 herdr-harness remote . run 'make -j4 && ctest'   # 빌드·테스트를 원격에서 실행

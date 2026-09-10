@@ -203,6 +203,7 @@ Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않�
 | 빌드·테스트·VCS 실행 | 원격 | `herdr-harness remote run` / `remote vcs` |
 
 - 설정 정본은 `.harness/policies/remote.yaml` 하나이며 `enabled: true`일 때만 활성화됩니다. 따라서 원격성은 `dispatch`에 붙는 플래그가 아니라 프로젝트 속성입니다.
+- 설정과 키 등록은 `remote setup` 한 번으로 끝납니다. 계정·비밀번호를 묻는 지점은 이 명령 하나뿐이고, 등록이 끝나면 이후 모든 원격 명령은 키 인증만 씁니다.
 - 인증은 전용 SSH 키(`bootstrap-key`가 1회 생성·등록)를 우선합니다. 비밀번호는 어떤 파일에도 저장하지 않고 `HH_REMOTE_PASSWORD` 환경변수로만 전달됩니다(§12).
 - `remote` 명령은 상태 전이나 승인에 관여하지 않습니다. Task 상태는 여전히 `transition`/`approve`만 바꿉니다.
 

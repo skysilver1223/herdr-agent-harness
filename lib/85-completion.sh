@@ -129,12 +129,19 @@ _herdr_harness_completions() {
       fi
       ;;
     remote)
-      local remote_subs="deps doctor bootstrap-key mount unmount status run vcs shell help"
+      local remote_subs="setup deps doctor bootstrap-key mount unmount status run vcs shell help"
       if (( COMP_CWORD == 2 )); then
         COMPREPLY=($(compgen -W "$remote_subs" -- "$cur"))
         COMPREPLY+=($(compgen -d -- "$cur"))
       elif (( COMP_CWORD == 3 )) && [[ " $remote_subs " != *" ${COMP_WORDS[2]} "* ]]; then
         COMPREPLY=($(compgen -W "$remote_subs" -- "$cur"))
+      elif [[ " ${COMP_WORDS[*]} " == *" setup "* ]]; then
+        case "$prev" in
+          --vcs) COMPREPLY=($(compgen -W "git svn none" -- "$cur")) ;;
+          --path|--mount|--ssh-key) COMPREPLY=($(compgen -d -- "$cur")) ;;
+          --host|--user) ;;
+          *) COMPREPLY=($(compgen -W "--host --user --path --mount --ssh-key --vcs --force --no-key" -- "$cur")) ;;
+        esac
       fi
       ;;
     uninstall)
