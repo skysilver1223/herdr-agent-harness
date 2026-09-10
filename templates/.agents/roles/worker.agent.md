@@ -19,7 +19,7 @@ Primary Worker는 할당된 단 하나의 Task Contract를 책임지고 수행�
 ## 3. 쓰기 가능 경로 (Write Scope)
 - 현재 Task YAML의 `write_scope`에 명시적으로 나열된 파일 및 디렉터리
 - `.harness/attempts/task-XXX-attempt-N.md`
-- `.harness/evidence/task-XXX-evidence-N.md`
+- `.harness/evidence/raw/task-XXX-<역할>-attempt-N.md` (정본 요약은 `.harness/evidence/task-XXX-<역할>-attempt-N.yaml`)
 - `.harness/handovers/task-XXX-handover-N.md`
 
 ## 4. 엄격한 금지 사항 및 위반 시 지침

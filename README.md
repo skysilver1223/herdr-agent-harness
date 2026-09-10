@@ -482,6 +482,56 @@ herdr-harness approve ~/Projects/snmp-normalizer task-001 --confirm-user-approva
 
 `quota-check`도 자동으로 아무것도 바꾸지 않습니다. claude·codex는 비대화형 조회 수단이 없어 실행 중인 Agent Pane에 `/status`를 보내고 그 출력에서 알려진 경고 문구("... N% of your weekly limit ..." 등)를 스캔합니다. agy는 `agy --print "/usage"`로 정확한 잔여 퍼센트를 바로 얻습니다. 판정 기준(`low`로 볼 임계값)은 `.harness/policies/quota-policy.yaml`의 `low_warning_threshold_pct`로 조정하며, `dispatch`·`observe`도 Agent 출력을 지나가는 김에 스캔해 Evidence에 참고용 경고를 남깁니다(`passive_scan_on_dispatch`).
 
+### Agent를 어떻게 띄우는가 — `dispatch` 기본, `--print-only` + `adopt` 폴백
+
+Agent 생성 방식은 두 가지가 가능합니다: Harness가 Pane 분할·Agent 실행·프롬프트까지 한 번에 하는 방식(A)과, 실행할 명령만 받아 사람이 직접 띄우는 방식(B).
+
+**기본은 A(`dispatch`)입니다.** 취향 문제가 아니라 구조 때문입니다 — `transition`의 게이트가 Attempt·Evidence의 존재를 요구하도록 설계돼 있어서, Agent 생성을 사람 손에 넘기면 그 게이트가 통째로 헐거워집니다(문서는 `submitted`인데 실제로는 아무 근거도 남지 않는 상태). A에서만 다음이 성립합니다.
+
+- `pane_id`·`agent_name`·baseline commit·승인 모드가 자동으로 Attempt/Evidence에 기록됨
+- Context Packet(SPEC 발췌 + Task 계약 + intent)이 복붙 없이 그대로 전달됨
+- `observe`·`close-agent`·`quota-check`·`auto-step`이 그 Agent를 찾을 수 있음
+- `close-agent`가 "Harness가 만든 Pane"만 정리한다는 불변식이 유지됨
+
+대신 A는 Herdr·Provider CLI에 강하게 결합되고 `HERDR_ENV=1` 안에서만 동작합니다. 그래서 B는 버리지 않고 **명시적인 폴백 경로**로 둡니다.
+
+```bash
+# 1) Pane을 만들지 않고, 실행할 herdr 명령과 Context Packet 경로만 출력 (Herdr 밖에서도 동작)
+herdr-harness dispatch . task-001 worker --print-only
+
+# 2) 출력된 herdr 명령을 직접 실행한 뒤, Harness 추적에 되돌려 등록
+herdr-harness adopt . task-001 worker --pane pane-3 --agent hh-task-001-w-1
+
+# 3) 이후는 평소와 같다
+herdr-harness observe . task-001 worker
+```
+
+- `--print-only`는 **아무 상태도 남기지 않습니다**(Context Packet만 씁니다). 시작하지 않은 시도를 Attempt로 남기면 전이 게이트가 헐거워지기 때문입니다.
+- `adopt`는 등록 전에 `herdr agent get`으로 그 Agent가 실제로 살아 있는지 확인하고, 없으면 거부합니다.
+- `adopt`로 등록한 Pane은 사람이 만든 것이므로 `close-agent`가 `--force` 없이는 닫지 않습니다.
+
+### Agent 승인 정책 — `.harness/policies/agent-policy.yaml`
+
+Agent를 띄울 때마다 "이 명령을 실행할까요? (y/n)"을 반복해서 물으면 진행만 막힙니다. `dispatch`는 `agent_policy.approval_mode`에 따라 Provider CLI에 승인 우회 인수를 붙여 **도구 실행 승인만** 건너뜁니다.
+
+| 모드 | 의미 | claude | codex | agy |
+| --- | --- | --- | --- | --- |
+| `ask` | Provider 기본값, 매번 물어봄 | (인수 없음) | (인수 없음) | (인수 없음) |
+| `auto` (기본값) | 파일 편집·작업 트리 안 명령은 자동 승인 | `--permission-mode acceptEdits` | `--ask-for-approval never --sandbox workspace-write` | `--mode accept-edits` |
+| `bypass` | 도구 실행 승인을 전부 건너뜀 | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` | `--dangerously-skip-permissions` |
+
+여기서 사라지는 것은 리눅스 명령 실행 같은 **도구 단위 승인**뿐입니다. 작업 방향성에 대한 결정 — Task 상태 전이, 완료 승인 — 은 그대로 사람 몫으로 남습니다.
+
+승인을 건너뛰게 되면 Agent는 셸 명령을 자유롭게 돌릴 수 있으므로, "직접 전이하지 마라"는 프롬프트 지시만으로는 Agent가 스스로 `approve --confirm-user-approval`을 실행하는 것을 막을 수 없습니다. 그래서 `transition`과 `approve`는 **호출한 Pane이 Harness가 띄운 Agent Pane이면 거부합니다** — `herdr pane current`로 현재 pane을 확인해 `.harness/runtime/*.meta`에 기록된 `pane_id`와 대조합니다(`HERDR_PANE_ID` 환경변수를 믿지 않으므로 `env -u`로 지워도 통하지 않습니다). 사람 Pane과 Orchestrator Pane은 기록에 없으므로 영향을 받지 않습니다.
+
+> **이것은 가드레일이지 보안 경계가 아닙니다.** Agent는 사용자와 같은 권한으로 돌기 때문에 `.meta`를 고치거나 `lib/40-transition.sh` 자체를 고칠 수 있습니다. 여기서 막는 것은 "지시를 따르다가 흘러가서" 스스로 완료를 선언하는 기본 동작이지, 적대적 Agent가 아닙니다. 진짜 경계를 원하면 OS 수준 분리(별도 계정·컨테이너)가 필요하고 그건 아직 Deferred 항목입니다.
+
+- 프로젝트를 만들 때 `herdr-harness init PATH --approval-mode ask|auto|bypass`로 정하고, 이후에는 `agent-policy.yaml`을 직접 고칩니다.
+- 표의 값은 공백으로 나뉘어 `herdr agent start ... -- <인수>`로 전달됩니다. **임의의 Provider 옵션을 넣는 통로가 아닙니다** — Provider별로, 그리고 **모드별로** 허용 플래그와 허용 값이 갈립니다. `--add-dir /`, `--model opus` 같은 승인과 무관한 인수는 거부되고, `auto` 칸에 `--permission-mode bypassPermissions`나 `--dangerously-*`를 넣는 것도 거부됩니다(같은 값이 `bypass` 칸에서는 통과). 그러지 않으면 정책 파일 한 줄로 `auto`가 사실상 full-access가 되면서 기록에는 계속 `auto`로 남습니다.
+- claude의 `bypassPermissions`는 디렉터리마다 처음 한 번 확인 화면을 띄울 수 있고, 그러면 `herdr agent start`가 그 화면에서 멈춥니다. 기본값 `auto`(`acceptEdits`)는 그 화면이 없습니다.
+- 실제로 쓰인 모드와 인수는 Attempt·Evidence 문서에 기록됩니다.
+- 이 파일이 없는 예전 프로젝트에서는 인수를 붙이지 않습니다(= `ask`와 같음).
+
 ### `quota-retry`, `auto-step` — opt-in 제약된 자동화
 
 두 명령 모두 기본은 꺼져 있고(opt-in), 완전 자율 실행이 아니라 **유한하고 되돌릴 수 있는 범위**만 자동화합니다. 둘 다 실행 전에 같은 Task에 대한 mkdir 기반 Task Lock(`.harness/runtime/TASK_ID.lock`)을 잡아, `quota-retry`/`auto-step` 두 자동화 경로끼리 같은 Task에 동시에 들어가는 것을 막습니다 — SQLite Lease나 Fencing Token 같은 완전한 락은 아니며, 사람이 그 사이에 수동으로 `dispatch`/`transition`을 실행하는 것까지 막지는 않으므로 자동 명령이 도는 동안은 `status --live`로 확인하고 수동 개입을 삼가세요.

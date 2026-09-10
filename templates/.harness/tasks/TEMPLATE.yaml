@@ -17,9 +17,18 @@ resources: []
 inputs:
   references: []
   artifacts: []
+# transition submitted 시점에 Harness가 직접 실행한다. type: command 는 하나라도
+# 실패(종료코드 != 0)하면 전이가 거부된다. type: manual-review 는 자동 검증이
+# 불가능하므로 실행하지 않고 manual로 기록만 하며, 판단은 Reviewer가 한다.
+# 실행 결과는 .harness/evidence/<TASK>-attempt-<N>-checks.yaml 에 남는다.
 acceptance_criteria:
   - criterion_id: AC-001
     statement: 검증 가능한 완료 조건  # 착수 게이트(선행 결정·조건)는 여기 적지 않는다 — intent.md의 Open Questions / Decision Gates로
+    verified_by:
+      type: command
+      command: pytest tests/test_feature.py
+  - criterion_id: AC-002
+    statement: 자동 검증이 불가능한 조건
     verified_by:
       type: manual-review
       instruction: 구체적인 확인 방법

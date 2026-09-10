@@ -203,6 +203,218 @@ approval_record_matches() {
   grep -qxF "근거 Review: $review_relative" "$approval"
 }
 
+# ---------------------------------------------------------------------------
+# Acceptance Criteria 게이트 — submitted 전이 시 Harness가 직접 검증한다.
+#
+# 지금까지 "verified_by 명령을 실행하라"는 것은 Skill 문서의 지시였을 뿐이라,
+# Agent가 실행하지 않았거나 실패를 무시해도 submitted로 넘어갔다. 그래서
+# "됐다고 했는데 실제로는 안 된"(wrong completion) 경우를 아무도 못 잡았다.
+# 여기서 Harness가 직접 실행하고, 하나라도 실패하면 전이를 거부한다.
+#
+# verified_by.type:
+#   command       — command 필드의 명령을 실행한다. 종료코드 0이어야 통과.
+#   manual-review — 자동 검증이 불가능하다. 실행하지 않고 manual로 기록만 하며
+#                   전이를 막지 않는다. 판단은 Reviewer 몫이다.
+#
+# 파서는 init이 만드는 고정 스키마만 읽는다(lib/30-yaml.sh와 같은 원칙).
+# 모양이 다르면 조용히 넘어가지 않고 실패한다 — 검증을 건너뛴 것을 통과로
+# 착각하는 것이 이 게이트에서 가장 위험하기 때문이다.
+# ---------------------------------------------------------------------------
+_ac_entries() {
+  # 출력 한 줄 = "criterion_id<TAB>type<TAB>command"
+  #
+  # verified_by 블록 안의 type/command만 읽는다. 블록을 구분하지 않고 acceptance
+  # 영역의 모든 type:/command:를 주우면 두 방향으로 틀린다 — metadata.type 같은
+  # 엉뚱한 키가 검증 방식으로 인식돼 검증을 건너뛰고 통과시키거나, 다른 중첩
+  # 객체의 command가 실행돼 버린다. 여기서는 들여쓰기 깊이로 블록을 닫는다.
+  local task_file="$1"
+  awk '
+    function flush() { if (id != "") print id "\t" type "\t" command }
+    function indent_of(line,   n) { match(line, /^[[:space:]]*/); return RLENGTH }
+    /^acceptance_criteria:[[:space:]]*$/ { inside = 1; next }
+    inside && /^[^[:space:]#]/ { inside = 0 }
+    !inside { next }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*-[[:space:]]*criterion_id:[[:space:]]*/ {
+      flush()
+      id = $0; sub(/^[[:space:]]*-[[:space:]]*criterion_id:[[:space:]]*/, "", id)
+      type = ""; command = ""; in_verified = 0; verified_indent = -1
+      next
+    }
+    /^[[:space:]]*verified_by:[[:space:]]*$/ {
+      in_verified = 1; verified_indent = indent_of($0); next
+    }
+    {
+      if (in_verified && indent_of($0) <= verified_indent) { in_verified = 0 }
+      if (!in_verified) next
+      if ($0 ~ /^[[:space:]]*type:[[:space:]]*/) {
+        type = $0; sub(/^[[:space:]]*type:[[:space:]]*/, "", type); next
+      }
+      if ($0 ~ /^[[:space:]]*command:[[:space:]]*/) {
+        command = $0; sub(/^[[:space:]]*command:[[:space:]]*/, "", command); next
+      }
+    }
+    END { flush() }
+  ' "$task_file" |
+  sed -e "s/\r$//" -e "s/[[:space:]]*$//"
+}
+
+_ac_unquote() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  case "$value" in
+    \'*\') value="${value:1:${#value}-2}"; value="${value//\'\'/\'}" ;;
+    \"*\") value="${value:1:${#value}-2}" ;;
+  esac
+  printf '%s' "$value"
+}
+
+_ac_latest_attempt() {
+  local root="$1" task_id="$2" path base number maximum=0
+  shopt -s nullglob
+  for path in "$root/.harness/attempts/$task_id-attempt-"*.md; do
+    base="${path##*/}"; number="${base#"$task_id-attempt-"}"; number="${number%.md}"
+    [[ "$number" =~ ^[0-9]+$ ]] || continue
+    (( number > maximum )) && maximum="$number"
+  done
+  shopt -u nullglob
+  printf '%s' "$maximum"
+}
+
+_ac_remote_enabled() {
+  local root="$1"
+  local config="$root/.harness/policies/remote.yaml"
+  [[ -f "$config" ]] || return 1
+  awk '/^  enabled:[[:space:]]*true[[:space:]]*$/ { found = 1 } END { exit found ? 0 : 1 }' "$config"
+}
+
+# Evidence 정본 검사 — 이름과 필수 필드를 함께 본다.
+#
+# 글롭으로 "<task>-*.yaml이 하나라도 있으면 통과"시키면 빈 task-001-garbage.yaml
+# 하나로도 게이트를 지나간다. checks 파일까지 같은 글롭에 걸린다. 정본은
+# dispatch/observe가 만든 <task>-<role>-attempt-<N>.yaml 뿐이고, 그 안에
+# 판단에 필요한 필드가 실제로 들어 있어야 한다.
+_transition_require_evidence() {
+  local root="$1" task_id="$2" path base key found=""
+  shopt -s nullglob
+  for path in "$root/.harness/evidence/$task_id-worker-attempt-"*.yaml \
+              "$root/.harness/evidence/$task_id-reviewer-attempt-"*.yaml; do
+    base="${path##*/}"
+    [[ "$base" =~ ^"$task_id"-(worker|reviewer)-attempt-[0-9]+\.yaml$ ]] || continue
+    local complete=1
+    for key in task role attempt result status; do
+      grep -q "^${key}:" "$path" || { complete=0; break; }
+    done
+    (( complete == 1 )) || continue
+    found="$path"
+    break
+  done
+  shopt -u nullglob
+  [[ -n "$found" ]] ||
+    die "Evidence 정본이 없어 submitted로 전이할 수 없습니다.
+   필요한 것: .harness/evidence/${task_id}-<worker|reviewer>-attempt-<N>.yaml
+   (task·role·attempt·result·status 필드를 모두 갖춰야 하며, dispatch/observe가 만듭니다)"
+}
+
+_transition_require_acceptance_criteria() {
+  local root="$1" task_id="$2" task_file="$3"
+  local line id type command output status attempt checks_file temporary
+  local total=0 passed=0 failed=0 manual=0 timeout_s
+
+  timeout_s="$(awk '/^  acceptance_check_timeout_seconds:/{print $2; exit}' \
+    "$root/.harness/policies/project-policy.yaml" 2>/dev/null || true)"
+  [[ "$timeout_s" =~ ^[1-9][0-9]*$ ]] || timeout_s=600
+
+  attempt="$(_ac_latest_attempt "$root" "$task_id")"
+  [[ "$attempt" != 0 ]] || attempt=1
+  checks_file="$root/.harness/evidence/$task_id-attempt-$attempt-checks.yaml"
+  mkdir -p "$root/.harness/evidence"
+  temporary="$(mktemp "$root/.harness/evidence/.checks.XXXXXX")"
+
+  {
+    printf 'task: %s\n' "$(yaml_quote "$task_id")"
+    printf 'attempt: %s\n' "$attempt"
+    printf 'ran_at: %s\n' "$(yaml_quote "$(date -u +'%Y-%m-%dT%H:%M:%SZ')")"
+    printf 'runner: %s\n' "$(yaml_quote "$(_ac_remote_enabled "$root" && printf 'remote' || printf 'local')")"
+    printf 'checks:\n'
+  } >"$temporary"
+
+  while IFS=$'\t' read -r id type command; do
+    [[ -n "$id" ]] || continue
+    id="$(_ac_unquote "$id")"
+    type="$(_ac_unquote "$type")"
+    command="$(_ac_unquote "$command")"
+    total=$((total + 1))
+    case "$type" in
+      command)
+        [[ -n "$command" ]] || {
+          rm -f -- "$temporary"
+          die "$id 의 verified_by.type이 command인데 command 필드가 없습니다: $task_file"
+        }
+        info "AC 검증 실행: $id — $command"
+        set +e
+        if _ac_remote_enabled "$root"; then
+          # cmd_remote_run은 인자 1개만 받고, 설정이 미리 로드돼 있어야 한다.
+          # 원격에서도 무한 루프가 전이를 영원히 붙잡지 않도록 timeout을 건다.
+          output="$( _remote_require "$root" &&
+                     cmd_remote_run "timeout -k 10 $timeout_s bash -c $(printf '%q' "$command")" 2>&1 )"
+        else
+          # -k 없이는 TERM을 무시하는 명령이 계속 돌아 전이가 끝나지 않는다.
+          output="$(cd "$root" && timeout -k 10 "$timeout_s" bash -c "$command" 2>&1)"
+        fi
+        status=$?
+        set -e
+        if (( status == 0 )); then
+          passed=$((passed + 1))
+        else
+          failed=$((failed + 1))
+        fi
+        {
+          printf '  - criterion_id: %s\n' "$(yaml_quote "$id")"
+          printf '    command: %s\n' "$(yaml_quote "$command")"
+          printf '    exit_code: %s\n' "$status"
+          printf '    result: %s\n' "$( ((status == 0)) && printf "'pass'" || printf "'fail'" )"
+          printf '    output_tail: %s\n' "$(yaml_quote "$(printf '%s' "$output" | tail -n 5 | tr '\n' ' ')")"
+        } >>"$temporary"
+        ;;
+      manual-review)
+        manual=$((manual + 1))
+        {
+          printf '  - criterion_id: %s\n' "$(yaml_quote "$id")"
+          printf "    result: 'manual'\n"
+          printf "    note: 'Harness가 자동 검증할 수 없다 — Reviewer가 판단한다'\n"
+        } >>"$temporary"
+        ;;
+      *)
+        rm -f -- "$temporary"
+        die "$id 의 verified_by.type을 알 수 없습니다: ${type:-없음} (command | manual-review): $task_file"
+        ;;
+    esac
+  done < <(_ac_entries "$task_file")
+
+  {
+    printf 'summary:\n'
+    printf '  total: %s\n  passed: %s\n  failed: %s\n  manual: %s\n' "$total" "$passed" "$failed" "$manual"
+  } >>"$temporary"
+
+  if _runtime_has_secret "$temporary"; then
+    : >"$temporary"
+    printf '# checks withheld\n' >"$temporary"
+    printf "note: 'Secret 의심 패턴이 발견되어 원문을 저장하지 않았습니다'\n" >>"$temporary"
+    printf 'summary:\n  total: %s\n  passed: %s\n  failed: %s\n  manual: %s\n' \
+      "$total" "$passed" "$failed" "$manual" >>"$temporary"
+  fi
+  chmod 0644 "$temporary"
+  mv -f -- "$temporary" "$checks_file"
+
+  (( total > 0 )) ||
+    die "acceptance_criteria가 비어 있어 submitted로 전이할 수 없습니다: $task_file"
+  (( failed == 0 )) ||
+    die "Acceptance Criteria 검증에 실패했습니다 ($failed/$total). 결과: ${checks_file#"$root/"}"
+  info "AC 검증 통과: pass $passed / manual $manual / 전체 $total → ${checks_file#"$root/"}"
+}
+
 cmd_transition() {
   local root_arg="" task_id="" to_state="" note=""
   while [[ $# -gt 0 ]]; do
@@ -227,6 +439,7 @@ cmd_transition() {
 
   local root path from_state
   root="$(project_root "$root_arg")"
+  _runtime_require_human_caller "$root" transition
   path="$(task_file "$root" "$task_id")"
   valid_task_status "$to_state" || die "알 수 없는 목표 상태: $to_state"
   from_state="$(yaml_scalar "$path" status)"
@@ -253,8 +466,8 @@ cmd_transition() {
     submitted)
       compgen -G "$root/.harness/attempts/${task_id}-attempt-*.md" >/dev/null ||
         die "Attempt 기록이 없어 submitted로 전이할 수 없습니다: .harness/attempts/${task_id}-attempt-*.md"
-      compgen -G "$root/.harness/evidence/${task_id}-*.md" >/dev/null ||
-        die "Evidence 기록이 없어 submitted로 전이할 수 없습니다: .harness/evidence/${task_id}-*.md"
+      _transition_require_evidence "$root" "$task_id"
+      _transition_require_acceptance_criteria "$root" "$task_id" "$path"
       ;;
     reviewing)
       local worker reviewer
@@ -349,6 +562,7 @@ cmd_approve() {
 
   local root path declared_id task_status latest_review verdict review_relative approval
   root="$(project_root "$root_arg")"
+  _runtime_require_human_caller "$root" approve
   path="$(task_file "$root" "$task_id")"
   declared_id="$(yaml_scalar "$path" task_id)"
   [[ "$declared_id" == "$task_id" ]] ||

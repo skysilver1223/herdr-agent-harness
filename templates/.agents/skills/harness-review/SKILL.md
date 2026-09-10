@@ -10,7 +10,7 @@ Worker와 독립된 제3의 Provider 관점에서 코드 변경(Diff), 자체 �
 
 ## 1. 적용조건과 입력
 - Task 상태가 `submitted` 또는 `reviewing`, 자신이 그 Task의 `primary_worker`와 다른 Provider(`provider_must_differ_from_worker: true`), Attempt·Evidence가 제출돼 있음.
-- Context Packet(dispatch가 주입)에 Task 계약과 acceptance_criteria가 들어 있다. 추가로 읽을 것: `AGENTS.md`, `.agents/roles/reviewer.agent.md`, `.harness/policies/review-policy.yaml`, 이 Task의 `.harness/intents/task-*-intent.md`(Not/Constraints/Invariants/Verification Intent 정본), 최신 `.harness/attempts/task-XXX-attempt-N.md`·`.harness/evidence/task-XXX-evidence-N.md`, `git diff` 결과.
+- Context Packet(dispatch가 주입)에 Task 계약과 acceptance_criteria가 들어 있다. 추가로 읽을 것: `AGENTS.md`, `.agents/roles/reviewer.agent.md`, `.harness/policies/review-policy.yaml`, 이 Task의 `.harness/intents/task-*-intent.md`(Not/Constraints/Invariants/Verification Intent 정본), 최신 `.harness/attempts/task-XXX-attempt-N.md`·`.harness/evidence/task-XXX-<역할>-attempt-N.yaml`(정본)과 `.harness/evidence/task-XXX-attempt-N-checks.yaml`(AC 검증 결과), `git diff` 결과.
 
 ## 2. 절차
 1. 독립성 확인 — 자신이 Worker와 같은 Provider이면 즉시 검토를 거부하고 보고한다.

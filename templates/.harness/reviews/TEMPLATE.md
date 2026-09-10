@@ -16,7 +16,8 @@
 - [ ] Task Contract: `.harness/tasks/{{TASK_ID}}.yaml`
 - [ ] Intent 문서: `.harness/intents/{{TASK_ID}}-intent.md`
 - [ ] Attempt 문서: `.harness/attempts/{{TASK_ID}}-attempt-{{ATTEMPT_NUMBER}}.md`
-- [ ] Evidence 문서: `.harness/evidence/{{TASK_ID}}-evidence-{{ATTEMPT_NUMBER}}.md`
+- [ ] Evidence 정본: `.harness/evidence/{{TASK_ID}}-worker-attempt-{{ATTEMPT_NUMBER}}.yaml`
+- [ ] AC 검증 결과: `.harness/evidence/{{TASK_ID}}-attempt-{{ATTEMPT_NUMBER}}-checks.yaml`
 - [ ] Git Diff 변경분
 
 ## 3. 8대 정책 기준 검토 (Review Focus Checklist)

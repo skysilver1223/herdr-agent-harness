@@ -30,6 +30,7 @@ cmd_test() {
     .harness/decisions/TEMPLATE.md
     .harness/intents/TEMPLATE.md .harness/intents/README.md
     .harness/policies/review-policy.yaml .harness/policies/remote.yaml
+    .harness/policies/agent-policy.yaml
     .agents/roles/orchestrator.agent.md .agents/roles/worker.agent.md .agents/roles/reviewer.agent.md
     .agents/roles/interviewer.agent.md .agents/roles/planner.agent.md .agents/roles/advisor.agent.md
     .agents/skills/harness-spec/SKILL.md .agents/skills/harness-plan/SKILL.md
@@ -132,9 +133,93 @@ HARNESS_YAML_CHECK
   printf '# attempt\n' >"$test_project/.harness/attempts/task-001-attempt-1.md"
   expect_fail "active->submitted (Evidence 없음)" \
     bash "$SELF_PATH" transition "$test_project" task-001 submitted
-  printf '# evidence\n' >"$test_project/.harness/evidence/task-001-worker-attempt-1.md"
+  _ac_set_criteria() {
+    python3 - "$1" "$2" <<'AC_PY'
+import sys, re
+path, block = sys.argv[1], sys.argv[2]
+text = open(path, encoding='utf-8').read()
+text = re.sub(r'(?ms)^acceptance_criteria:.*?(?=^[^\s#])', block, text)
+open(path, 'w', encoding='utf-8').write(text)
+AC_PY
+  }
+
+  printf "task: 'task-001'\nrole: 'worker'\nattempt: 1\nresult:\n  summary: 'x'\nstatus: 'settled'\n" \
+    >"$test_project/.harness/evidence/task-001-worker-attempt-1.yaml"
+
+  # Evidence 게이트는 이름과 필수 필드를 함께 본다 — 글롭만 보면 빈 yaml 하나로
+  # 통과한다(checks 파일까지 같은 글롭에 걸린다).
+  local stray="$test_project/.harness/evidence/task-001-garbage.yaml"
+  local real_evidence="$test_project/.harness/evidence/task-001-worker-attempt-1.yaml"
+  local saved_evidence="$test_root/saved-evidence.yaml"
+  mv "$real_evidence" "$saved_evidence"
+  : >"$stray"
+  expect_fail "active->submitted (이름만 맞는 쓰레기 yaml)" \
+    bash "$SELF_PATH" transition "$test_project" task-001 submitted
+  printf "task: 'task-001'\nrole: 'worker'\nattempt: 1\nstatus: 'settled'\n" >"$real_evidence"
+  expect_fail "active->submitted (필수 필드 빠진 Evidence)" \
+    bash "$SELF_PATH" transition "$test_project" task-001 submitted
+  rm -f "$stray"
+  mv "$saved_evidence" "$real_evidence"
+
+  # verified_by 블록 밖의 type/command를 주우면 검증을 건너뛰고 통과시킨다.
+  _ac_set_criteria "$task" "acceptance_criteria:
+  - criterion_id: AC-001
+    statement: verified_by가 없는 항목
+    metadata:
+      type: manual-review
+"
+  expect_fail "active->submitted (verified_by 없이 metadata.type만)" \
+    bash "$SELF_PATH" transition "$test_project" task-001 submitted
+
+  # --- Acceptance Criteria 게이트 -------------------------------------------
+  # 지금까지 "verified_by를 실행하라"는 Skill 문서의 지시였을 뿐이라, Agent가
+  # 실행하지 않았거나 실패를 무시해도 submitted로 넘어갔다. 이제 Harness가
+  # 직접 실행하고 하나라도 실패하면 거부한다.
+  _ac_set_criteria "$task" "acceptance_criteria:
+  - criterion_id: AC-001
+    statement: 실패하는 검증
+    verified_by:
+      type: command
+      command: 'false'
+"
+  expect_fail "active->submitted (AC 명령 실패)" \
+    bash "$SELF_PATH" transition "$test_project" task-001 submitted
+  grep -q "result: 'fail'" "$test_project/.harness/evidence/task-001-attempt-1-checks.yaml" ||
+    die "AC 실패가 checks 파일에 기록되지 않았습니다."
+
+  _ac_set_criteria "$task" "acceptance_criteria:
+  - criterion_id: AC-001
+    statement: 알 수 없는 검증 방식
+    verified_by:
+      type: telepathy
+      instruction: 없음
+"
+  expect_fail "active->submitted (알 수 없는 verified_by.type)" \
+    bash "$SELF_PATH" transition "$test_project" task-001 submitted
+
+  _ac_set_criteria "$task" "acceptance_criteria: []
+"
+  expect_fail "active->submitted (acceptance_criteria 비어 있음)" \
+    bash "$SELF_PATH" transition "$test_project" task-001 submitted
+
+  _ac_set_criteria "$task" "acceptance_criteria:
+  - criterion_id: AC-001
+    statement: 통과하는 검증
+    verified_by:
+      type: command
+      command: 'true'
+  - criterion_id: AC-002
+    statement: 사람이 봐야 하는 조건
+    verified_by:
+      type: manual-review
+      instruction: Reviewer 확인
+"
   expect_pass "active->submitted" \
     bash "$SELF_PATH" transition "$test_project" task-001 submitted
+  local checks_file="$test_project/.harness/evidence/task-001-attempt-1-checks.yaml"
+  grep -q "  passed: 1$" "$checks_file" || die "AC 통과 수가 기록되지 않았습니다."
+  grep -q "  manual: 1$" "$checks_file" || die "manual-review가 기록되지 않았습니다."
+  grep -q "  failed: 0$" "$checks_file" || die "AC 실패 수가 0으로 기록되지 않았습니다."
 
   expect_pass "submitted->reviewing" \
     bash "$SELF_PATH" transition "$test_project" task-001 reviewing
@@ -285,12 +370,132 @@ HARNESS_YAML_CHECK
   expect_fail "validate가 Git 기준선 누락을 통과시킴" \
     bash "$SELF_PATH" validate "$no_git"
 
+  # --- Context Packet에 직전 라운드가 들어가는가 ------------------------------
+  # 안 들어가면 changes_requested 재시도에서 Worker가 Reviewer 지적을 못 보고
+  # 같은 접근을 반복한다 — Rework 지표가 하네스 결함으로 부풀려진다.
+  mkdir -p "$test_project/.harness/runtime"
+  local packet="$test_project/.harness/runtime/packet-check.md"
+  _runtime_context_packet "$test_project" task-001 worker "$task" "$packet" ||
+    die "Context Packet 생성에 실패했습니다."
+  grep -q '## 직전 시도' "$packet" ||
+    die "Context Packet에 직전 시도 절이 없습니다."
+  grep -q '최신 Review 판정: APPROVED' "$packet" ||
+    die "Context Packet에 최신 Review 판정이 없습니다."
+  grep -q 'Acceptance Criteria 검증 결과' "$packet" ||
+    die "Context Packet에 AC 검증 결과가 없습니다."
+  grep -q '같은 접근을 그대로 반복하지 않는다' "$packet" ||
+    die "Context Packet에 재시도 지시가 없습니다."
+
+  # "가장 큰 attempt 번호"가 아니라 "파일이 실제로 있는 최근 attempt"를 찾아야
+  # 한다. 번호만 보면 2번 dispatch가 Evidence를 남기기 전에 죽었을 때 1번의
+  # 증적과 AC 결과가 통째로 빠진다 — 이 기능이 막으려던 바로 그 상황이다.
+  printf '# a2\n' >"$test_project/.harness/attempts/task-001-attempt-2.md"
+  _runtime_context_packet "$test_project" task-001 worker "$task" "$packet" ||
+    die "Context Packet 재생성에 실패했습니다."
+  grep -q 'Acceptance Criteria 검증 결과' "$packet" ||
+    die "Attempt 번호만 올라갔는데 직전 AC 결과가 Packet에서 사라졌습니다."
+  grep -q 'Evidence (worker' "$packet" ||
+    die "Attempt 번호만 올라갔는데 직전 Evidence가 Packet에서 사라졌습니다."
+  rm -f "$test_project/.harness/attempts/task-001-attempt-2.md"
+
+  # 첫 시도(이력 없음)에는 아무것도 붙지 않아야 한다.
+  local fresh_task="$test_project/.harness/tasks/task-fresh.yaml"
+  sed -e 's/^task_id: .*/task_id: task-fresh/' "$task" >"$fresh_task"
+  _runtime_context_packet "$test_project" task-fresh worker "$fresh_task" \
+    "$test_project/.harness/runtime/packet-fresh.md" ||
+    die "첫 시도 Context Packet 생성에 실패했습니다."
+  grep -q '직전 시도' "$test_project/.harness/runtime/packet-fresh.md" &&
+    die "이력이 없는데 직전 시도 절이 붙었습니다."
+  rm -f "$fresh_task"
+
   expect_fail "dispatch 잘못된 ROLE" \
     bash "$SELF_PATH" dispatch "$test_project" task-001 architect
   expect_fail "observe 인자 부족" \
     bash "$SELF_PATH" observe "$test_project"
   expect_fail "close-agent 기록 없는 Task" \
     bash "$SELF_PATH" close-agent "$test_project" task-999
+  expect_fail "adopt --pane 없음" \
+    bash "$SELF_PATH" adopt "$test_project" task-001 worker --agent hh-x-w-1
+  expect_fail "adopt --agent 없음" \
+    bash "$SELF_PATH" adopt "$test_project" task-001 worker --pane pane-1
+  expect_fail "adopt 잘못된 ROLE" \
+    bash "$SELF_PATH" adopt "$test_project" task-001 architect --pane pane-1 --agent hh-x-w-1
+  expect_fail "adopt Agent 이름 형식" \
+    bash "$SELF_PATH" adopt "$test_project" task-001 worker --pane pane-1 --agent "Bad Name"
+
+  # --- dispatch --print-only: Herdr 밖에서도 되고, 아무 상태도 남기지 않는다 ---
+  # 기본 경로(dispatch)는 Pane 생성까지 하므로 Herdr 안에서만 동작한다.
+  # --print-only는 그 게이트를 지나가되 Agent를 띄우지 않으므로, Attempt·meta가
+  # 생기면 안 된다 — 실제로 시작하지 않은 시도를 남기면 전이 게이트가 헐거워진다.
+  local print_only_output attempts_before attempts_after
+  attempts_before="$(find "$test_project/.harness/attempts" -maxdepth 1 -name 'task-001-attempt-*.md' | wc -l)"
+  print_only_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$test_project" task-001 worker --print-only)"
+  printf '%s' "$print_only_output" | grep -q '^dispatch_result=print_only$' ||
+    die "--print-only가 print_only 결과를 내지 않았습니다."
+  printf '%s' "$print_only_output" | grep -q 'herdr agent start ' ||
+    die "--print-only 출력에 herdr agent start 명령이 없습니다."
+  printf '%s' "$print_only_output" | grep -q ' adopt .* --pane PANE_ID --agent ' ||
+    die "--print-only 출력에 adopt 등록 명령이 없습니다."
+  [[ ! -e "$test_project/.harness/runtime/task-001-worker.meta" ]] ||
+    die "--print-only가 Runtime 기록을 남겼습니다."
+  attempts_after="$(find "$test_project/.harness/attempts" -maxdepth 1 -name 'task-001-attempt-*.md' | wc -l)"
+  [[ "$attempts_before" -eq "$attempts_after" ]] ||
+    die "--print-only가 Attempt를 남겼습니다($attempts_before → $attempts_after)."
+  [[ -f "$test_project/.harness/runtime/task-001-context-worker.md" ]] ||
+    die "--print-only가 Context Packet을 만들지 않았습니다."
+
+  # --- 호출자 게이트: Harness가 띄운 Agent Pane은 전이·승인을 못 한다 -------
+  # 승인 우회 정책 때문에 Agent가 셸 명령을 자유롭게 돌릴 수 있게 됐으므로,
+  # "상태 전이·완료 승인은 사람 몫"을 지시가 아니라 코드로 막아야 한다.
+  mkdir -p "$test_project/.harness/runtime"
+  printf 'task_id=task-001\nrole=worker\nagent_name=hh-task-001-w-8\npane_id=wTEST:p99\nprovider=codex\nattempt=8\nadopted=0\n' \
+    >"$test_project/.harness/runtime/task-001-worker.meta"
+  set +e
+  HERDR_PANE_ID=wTEST:p99 bash "$SELF_PATH" transition "$test_project" task-001 blocked >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] ||
+    die "Agent Pane에서 transition이 실행됐습니다(호출자 게이트 실패)."
+  set +e
+  HERDR_PANE_ID=wTEST:p99 bash "$SELF_PATH" approve "$test_project" task-001 --confirm-user-approval >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] ||
+    die "Agent Pane에서 approve가 실행됐습니다(호출자 게이트 실패)."
+  # 사람 Pane(기록에 없는 pane_id)은 게이트에 걸리지 않아야 한다 — 여기서는
+  # 게이트가 아니라 전이 규칙 때문에 실패하므로 메시지로 구분한다.
+  set +e
+  local human_error
+  human_error="$(HERDR_PANE_ID=wTEST:p1 bash "$SELF_PATH" transition "$test_project" task-001 completed 2>&1)"
+  set -e
+  [[ "$human_error" != *"Agent Pane에서 실행할 수 없습니다"* ]] ||
+    die "사람 Pane인데 호출자 게이트에 걸렸습니다."
+  rm -f "$test_project/.harness/runtime/task-001-worker.meta"
+
+  # --- --print-only 출력은 붙여 넣어도 안전하게 인용돼 있어야 한다 ----------
+  local tricky_project="$test_root/tricky dir; touch INJECTED"
+  bash "$SELF_PATH" init "$tricky_project" --name tricky --goal "인용 검사" >/dev/null
+  cp "$test_project/.harness/tasks/task-001.yaml" "$tricky_project/.harness/tasks/task-001.yaml"
+  local tricky_output
+  tricky_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tricky_project" task-001 worker --print-only)"
+  # 붙여 넣을 명령 줄(두 칸 들여쓴 줄)만 본다 — 맨 위 'Context Packet:' 안내
+  # 줄은 명령이 아니라 경로 표시라 인용하지 않는다.
+  local tricky_commands
+  tricky_commands="$(printf '%s' "$tricky_output" | grep '^  ' || true)"
+  printf '%s' "$tricky_commands" | grep -qF 'tricky\ dir\;\ touch\ INJECTED' ||
+    die "--print-only 출력의 경로가 셸 인용되지 않았습니다."
+  printf '%s' "$tricky_commands" | grep -qF 'tricky dir; touch INJECTED' &&
+    die "--print-only 명령 줄에 인용되지 않은 경로가 남아 있습니다."
+  [[ ! -e "$test_root/INJECTED" && ! -e "INJECTED" ]] ||
+    die "--print-only 인용 검사 중 인젝션이 실행됐습니다."
+
+  # --- close-agent는 adopt로 등록한(사람이 만든) Pane을 --force 없이 닫지 않는다 ---
+  mkdir -p "$test_project/.harness/runtime"
+  printf 'task_id=task-001\nrole=worker\nagent_name=hh-task-001-w-9\npane_id=pane-9\nprovider=codex\nattempt=9\nadopted=1\n' \
+    >"$test_project/.harness/runtime/task-001-worker.meta"
+  expect_fail "close-agent가 adopt한 Pane을 --force 없이 닫음" \
+    bash "$SELF_PATH" close-agent "$test_project" task-001 worker
+  rm -f "$test_project/.harness/runtime/task-001-worker.meta"
 
   # --- Task Lock: 동시 획득 거부, release, stale 회수 -----------------------
   local task2="$test_project/.harness/tasks/task-002.yaml"
@@ -711,6 +916,101 @@ STUB
       --remote-host host.example --remote-path "$(printf '/srv/one\ntwo')"
 
   # ---------------------------------------------------------------------------
+  # Agent 승인 정책(agent-policy.yaml)
+  # 도구 실행 승인만 건너뛰고, 작업 방향성 결정(전이·승인)은 건드리지 않는다.
+  # 정책 파일을 이리저리 고쳐 보므로 다른 검사와 섞이지 않게 별도 프로젝트를 쓴다.
+  local approval_project="$test_root/approval-project"
+  bash "$SELF_PATH" init "$approval_project" --name approval-project --goal "승인 정책 검사" >/dev/null
+  local agent_policy="$approval_project/.harness/policies/agent-policy.yaml"
+  grep -q "^  approval_mode: 'auto'$" "$agent_policy" ||
+    die "init 기본 approval_mode가 auto가 아닙니다: $agent_policy"
+
+  # 표에 적힌 인수가 mode·Provider 조합대로 나와야 한다.
+  [[ "$(_runtime_agent_args "$approval_project" claude)" == "--permission-mode acceptEdits" ]] ||
+    die "approval_mode=auto에서 claude 인수가 표와 다릅니다."
+  [[ "$(_runtime_agent_args "$approval_project" codex)" == "--ask-for-approval never --sandbox workspace-write" ]] ||
+    die "approval_mode=auto에서 codex 인수가 표와 다릅니다."
+  sed -i "s/^  approval_mode: 'auto'$/  approval_mode: 'bypass'/" "$agent_policy"
+  [[ "$(_runtime_agent_args "$approval_project" agy)" == "--dangerously-skip-permissions" ]] ||
+    die "approval_mode=bypass에서 agy 인수가 표와 다릅니다."
+  sed -i "s/^  approval_mode: 'bypass'$/  approval_mode: 'ask'/" "$agent_policy"
+  [[ -z "$(_runtime_agent_args "$approval_project" claude)" ]] ||
+    die "approval_mode=ask에서 인수가 붙었습니다."
+
+  # 설정 파일 값이 그대로 argv가 되므로 허용 문자를 벗어나면 거부해야 한다.
+  # 명령 치환 문자와 glob 문자 둘 다 — glob은 분리 뒤에 검사하면 경로 확장에
+  # 먼저 걸려 빠져나가므로 회귀 방지로 함께 확인한다.
+  sed -i "s/^  approval_mode: 'ask'$/  approval_mode: 'auto'/" "$agent_policy"
+  local rejected_value
+  for rejected_value in '--permission-mode \$(id)' '--permission-mode *' '--permission-mode "x"'; do
+    sed -i "s|^  claude_auto: .*$|  claude_auto: '$rejected_value'|" "$agent_policy"
+    set +e
+    ( _runtime_agent_args "$approval_project" claude ) >/dev/null 2>&1
+    failure_status=$?
+    set -e
+    [[ "$failure_status" -ne 0 ]] ||
+      die "agent-policy.yaml의 인수에 허용되지 않는 문자가 있는데 통과했습니다: $rejected_value"
+  done
+
+  # 문자 집합만으로는 부족하다 — 승인과 무관한 Provider 옵션이 통과하면
+  # 정책 파일 한 줄로 auto가 사실상 full-access가 된다(기록은 계속 auto).
+  # 그래서 Provider별 허용 플래그·허용 값 목록으로 막는다.
+  local rejected_arg
+  for rejected_arg in '--add-dir /' '--permission-mode acceptEdits --add-dir /' '--model opus'; do
+    sed -i "s|^  claude_auto: .*$|  claude_auto: '$rejected_arg'|" "$agent_policy"
+    set +e
+    ( _runtime_agent_args "$approval_project" claude ) >/dev/null 2>&1
+    failure_status=$?
+    set -e
+    [[ "$failure_status" -ne 0 ]] ||
+      die "승인과 무관한 Provider 인수가 정책을 통과했습니다: $rejected_arg"
+  done
+  # auto가 bypass 수준 플래그를 받아들이면 기록은 auto인데 실제 권한만
+  # full-access가 된다 — mode별로 허용 목록이 갈려야 한다.
+  local escalation
+  for escalation in '--permission-mode bypassPermissions' '--dangerously-skip-permissions'; do
+    sed -i "s|^  claude_auto: .*$|  claude_auto: '$escalation'|" "$agent_policy"
+    set +e
+    ( _runtime_agent_args "$approval_project" claude ) >/dev/null 2>&1
+    failure_status=$?
+    set -e
+    [[ "$failure_status" -ne 0 ]] ||
+      die "auto 모드가 bypass 수준 인수를 통과시켰습니다: $escalation"
+  done
+  # 같은 인수라도 bypass 모드에서는 허용돼야 한다.
+  sed -i "s/^  approval_mode: 'auto'$/  approval_mode: 'bypass'/" "$agent_policy"
+  sed -i "s|^  claude_bypass: .*$|  claude_bypass: '--permission-mode bypassPermissions'|" "$agent_policy"
+  [[ "$(_runtime_agent_args "$approval_project" claude)" == "--permission-mode bypassPermissions" ]] ||
+    die "bypass 모드에서 bypassPermissions가 거부됐습니다."
+  sed -i "s/^  approval_mode: 'bypass'$/  approval_mode: 'auto'/" "$agent_policy"
+
+  # 허용 플래그라도 허용 값이 아니면 거부한다.
+  sed -i "s|^  claude_auto: .*$|  claude_auto: '--permission-mode wideOpen'|" "$agent_policy"
+  set +e
+  ( _runtime_agent_args "$approval_project" claude ) >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "허용되지 않는 --permission-mode 값이 통과했습니다."
+  # 실패는 die가 아니라 반환값이어야 한다 — auto-step처럼 커맨드 치환 안에서
+  # 불릴 때 안쪽 die는 삼켜져 "인수 없음"으로 조용히 진행되기 때문이다.
+  set +e
+  ( _runtime_agent_args "$approval_project" claude >/dev/null 2>&1; printf 'reached=%s' "$?" ) | grep -q 'reached=1' ||
+    die "_runtime_agent_args가 반환값으로 실패를 알리지 않았습니다."
+  set -e
+  sed -i "s|^  claude_auto: .*$|  claude_auto: '--permission-mode acceptEdits'|" "$agent_policy"
+
+  # 정책 파일이 없는 기존 프로젝트는 종전대로 인수 없이 동작해야 한다.
+  rm -f "$agent_policy"
+  [[ -z "$(_runtime_agent_args "$approval_project" claude)" ]] ||
+    die "agent-policy.yaml이 없는데 인수가 붙었습니다."
+
+  # init의 --approval-mode 값 검증.
+  set +e
+  bash "$SELF_PATH" init "$test_root/bad-approval" --name bad --goal g --approval-mode nonsense >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "잘못된 --approval-mode 값이 통과했습니다."
+
   # 도움말 정합성: 명령 목록이 세 곳(99-main.sh의 case, 15-help.sh의 요약표와
   # topic 분기, 85-completion.sh의 설명 목록)에 흩어져 있어 쉽게 갈라진다.
   # 하나라도 빠지면 사용자는 "탭에는 있는데 help는 없는" 명령을 만난다.
@@ -819,17 +1119,37 @@ STUB
   printf 'PASS: 신규 프로젝트 보호\n'
   printf 'PASS: 비대화형 명시적 실패\n'
   printf 'PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)\n'
+  printf 'PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)\n'
+  printf 'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)\n'
   printf 'PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)\n'
   printf 'PASS: 이벤트 로그 기록\n'
   printf 'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)\n'
-  printf 'PASS: 스텝 명령 인자 검증\n'
+  printf 'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)\n'
+  printf 'PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)\n'
   printf 'PASS: Agent 호출 없음\n'
   printf 'PASS: 탭 완성 스크립트 문법\n'
+  printf 'PASS: Agent 승인 정책 (기본 auto/인수표/ask 무인수/문자·플래그·값·모드별 권한상승 거부/반환값 실패/정책 없음/init 값)\n'
   printf 'PASS: 도움말 정합성 (dispatch↔help 요약·상세↔탭 완성 설명, 없는 명령 거부)\n'
   printf 'PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호 미저장/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키)\n'
   printf 'PASS: Task Lock (동시 획득 거부/release/stale 회수)\n'
   printf 'PASS: quota-retry/auto-step opt-in 게이트\n'
   printf 'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)\n'
-  printf 'PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범)\n'
+  # 나중에 생긴 .gitignore 줄(evidence/raw/)이 기존 프로젝트에도 반영돼야 한다 —
+  # 안 그러면 Agent 출력 덤프가 untracked로 노출된다.
+  local gi_project="$test_root/gitignore-project"
+  bash "$SELF_PATH" init "$gi_project" --name gi --goal "gitignore 검사" >/dev/null
+  grep -v '^\.harness/evidence/raw/$' "$gi_project/.gitignore" >"$gi_project/.gitignore.tmp"
+  mv "$gi_project/.gitignore.tmp" "$gi_project/.gitignore"
+  bash "$SELF_PATH" sync-templates "$gi_project" >/dev/null
+  grep -qxF '.harness/evidence/raw/' "$gi_project/.gitignore" &&
+    die "dry-run인데 .gitignore가 바뀌었습니다."
+  bash "$SELF_PATH" sync-templates "$gi_project" --apply >/dev/null
+  grep -qxF '.harness/evidence/raw/' "$gi_project/.gitignore" ||
+    die "sync-templates --apply가 .gitignore의 누락된 줄을 채우지 않았습니다."
+  bash "$SELF_PATH" sync-templates "$gi_project" --apply >/dev/null
+  [[ "$(grep -cxF '.harness/evidence/raw/' "$gi_project/.gitignore")" -eq 1 ]] ||
+    die "sync-templates --apply가 .gitignore 줄을 중복 추가했습니다."
+
+  printf 'PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범, .gitignore 누락 줄 보충·멱등)\n'
   printf 'PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)\n'
 }

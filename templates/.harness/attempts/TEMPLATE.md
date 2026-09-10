@@ -30,7 +30,7 @@
 ## 4. 자체 검증 결과 (Self Verification)
 | Criterion ID | 검증 명령어 | 종료 코드 | 결과 (PASS/FAIL) | 증적 파일 링크 |
 |---|---|---|---|---|
-| AC-001 | `pytest tests/test_feature.py` | 0 | PASS | `.harness/evidence/{{TASK_ID}}-evidence-{{ATTEMPT_NUMBER}}.md` |
+| AC-001 | `pytest tests/test_feature.py` | 0 | PASS | `.harness/evidence/raw/{{TASK_ID}}-worker-attempt-{{ATTEMPT_NUMBER}}.md` |
 
 ## 5. 주의사항 및 잔여 이슈 (Notes & Known Issues)
 - 변경에 따른 영향 범위:
