@@ -28,7 +28,7 @@ _herdr_harness_completions() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local subcommands="init sync-templates start status doctor test uninstall validate transition approve dispatch observe close-agent quota-check quota-retry auto-step completion"
+  local subcommands="init sync-templates start status doctor test uninstall validate transition approve dispatch observe close-agent quota-check quota-retry auto-step remote completion"
 
   if (( COMP_CWORD == 1 )); then
     COMPREPLY=($(compgen -W "$subcommands" -- "$cur"))
@@ -41,12 +41,14 @@ _herdr_harness_completions() {
       case "$prev" in
         --profile) COMPREPLY=($(compgen -W "generic python-timeseries network-device" -- "$cur")) ;;
         --orchestrator|--worker|--reviewer) COMPREPLY=($(compgen -W "claude codex agy" -- "$cur")) ;;
-        --name|--goal|--fallback) ;;
+        --name|--goal|--fallback|--remote-host|--remote-user|--remote-path) ;;
+        --remote-vcs) COMPREPLY=($(compgen -W "git svn none" -- "$cur")) ;;
+        --remote-mount) COMPREPLY=($(compgen -d -- "$cur")) ;;
         *)
           if (( COMP_CWORD == 2 )); then
             COMPREPLY=($(compgen -d -- "$cur"))
           else
-            COMPREPLY=($(compgen -W "--name --goal --profile --orchestrator --worker --reviewer --fallback" -- "$cur"))
+            COMPREPLY=($(compgen -W "--name --goal --profile --orchestrator --worker --reviewer --fallback --remote-host --remote-user --remote-path --remote-mount --remote-vcs" -- "$cur"))
           fi
           ;;
       esac
@@ -124,6 +126,15 @@ _herdr_harness_completions() {
         :
       else
         COMPREPLY=($(compgen -W "--max-turns" -- "$cur"))
+      fi
+      ;;
+    remote)
+      local remote_subs="deps doctor bootstrap-key mount unmount status run vcs shell help"
+      if (( COMP_CWORD == 2 )); then
+        COMPREPLY=($(compgen -W "$remote_subs" -- "$cur"))
+        COMPREPLY+=($(compgen -d -- "$cur"))
+      elif (( COMP_CWORD == 3 )) && [[ " $remote_subs " != *" ${COMP_WORDS[2]} "* ]]; then
+        COMPREPLY=($(compgen -W "$remote_subs" -- "$cur"))
       fi
       ;;
     uninstall)

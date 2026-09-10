@@ -29,7 +29,7 @@ cmd_test() {
     .harness/reviews/TEMPLATE.md .harness/handovers/TEMPLATE.md
     .harness/decisions/TEMPLATE.md
     .harness/intents/TEMPLATE.md .harness/intents/README.md
-    .harness/policies/review-policy.yaml
+    .harness/policies/review-policy.yaml .harness/policies/remote.yaml
     .agents/roles/orchestrator.agent.md .agents/roles/worker.agent.md .agents/roles/reviewer.agent.md
     .agents/roles/interviewer.agent.md .agents/roles/planner.agent.md .agents/roles/advisor.agent.md
     .agents/skills/harness-spec/SKILL.md .agents/skills/harness-plan/SKILL.md
@@ -498,6 +498,118 @@ EOF
     info "install.sh가 없어(설치본) ~/.bashrc 등록 테스트는 건너뜁니다."
   fi
 
+  # ---------------------------------------------------------------------------
+  # 원격 실행 모드: 설정이 꺼져 있으면 어떤 remote 하위 명령도 SSH를 시도하지
+  # 않고 거부해야 한다. 여기서는 네트워크를 쓰지 않는 게이트만 검증한다.
+  # ---------------------------------------------------------------------------
+  grep -q '^  enabled: false$' "$test_project/.harness/policies/remote.yaml" ||
+    die "init 기본값은 원격 모드 비활성(enabled: false)이어야 합니다."
+
+  local remote_message
+  set +e
+  remote_message="$(bash "$SELF_PATH" remote "$test_project" status 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "비활성 원격 모드에서 remote status가 실행됐습니다."
+  printf '%s' "$remote_message" | grep -q '원격 모드가 꺼져' ||
+    die "비활성 원격 모드 거부 메시지가 없습니다: $remote_message"
+
+  expect_fail "remote: Harness 프로젝트 아님" \
+    bash "$SELF_PATH" remote "$test_root" status
+  bash "$SELF_PATH" remote help >/dev/null || die "remote help 실패"
+
+  # enabled: true로 바꾸면 필수 키 검증과 인자 검증이 살아난다(여기까지도 SSH 없음).
+  local remote_project="$test_root/remote-project"
+  bash "$SELF_PATH" init "$remote_project" \
+    --name remote-project --goal "원격 실행 모드 테스트" \
+    --remote-host 203.0.113.9 --remote-user builder \
+    --remote-path /srv/remote-project --remote-vcs svn >/dev/null
+  grep -q "^  enabled: true$" "$remote_project/.harness/policies/remote.yaml" ||
+    die "--remote-host를 줬는데 원격 모드가 켜지지 않았습니다."
+  grep -q "^  vcs: 'svn'$" "$remote_project/.harness/policies/remote.yaml" ||
+    die "--remote-vcs 값이 반영되지 않았습니다."
+  if grep -qi 'password' "$remote_project/.harness/policies/remote.yaml"; then
+    die "remote.yaml에 비밀번호 관련 키가 있으면 안 됩니다."
+  fi
+  grep -qx '\.harness/remote-mount/' "$remote_project/.gitignore" ||
+    die ".gitignore에 원격 마운트 경로가 없습니다."
+
+  expect_fail "init: --remote-host만 주고 --remote-path 누락" \
+    bash "$SELF_PATH" init "$test_root/remote-no-path" --name r --goal g --remote-host h
+  expect_fail "init: 잘못된 --remote-vcs" \
+    bash "$SELF_PATH" init "$test_root/remote-bad-vcs" --name r --goal g --remote-vcs hg
+  expect_fail "remote run: 명령 인자 없음" \
+    bash "$SELF_PATH" remote "$remote_project" run
+  expect_fail "remote vcs: 하위 명령 없음" \
+    bash "$SELF_PATH" remote "$remote_project" vcs
+
+  # 오타 하위 명령을 경로로 삼켜 도움말만 찍고 0으로 끝내면 안 된다.
+  expect_fail "remote: 알 수 없는 하위 명령(단일 인자)" \
+    bash "$SELF_PATH" remote teleport
+  expect_fail "remote: 알 수 없는 하위 명령(PATH 뒤)" \
+    bash "$SELF_PATH" remote "$remote_project" teleport
+  bash "$SELF_PATH" remote "$remote_project" help >/dev/null ||
+    die "remote PATH help 실패"
+
+  # SSH 목적지 옵션 인젝션(-oProxyCommand=...)과 원격 경로 탈출을 설정·환경변수
+  # 양쪽에서 막아야 한다. 여기서도 SSH는 시도하지 않는다(검증 단계에서 종료).
+  expect_fail "init: -로 시작하는 --remote-user" \
+    bash "$SELF_PATH" init "$test_root/remote-bad-user" --name r --goal g \
+      --remote-host h --remote-path /srv/p --remote-user '-oProxyCommand=touch /tmp/pwned'
+  expect_fail "init: 상대경로 --remote-path" \
+    bash "$SELF_PATH" init "$test_root/remote-rel-path" --name r --goal g \
+      --remote-host h --remote-path srv/p
+  expect_fail "remote: 환경변수로 주입한 옵션형 user" \
+    env HH_REMOTE_USER='-oProxyCommand=touch /tmp/pwned' \
+      bash "$SELF_PATH" remote "$remote_project" status
+  expect_fail "remote: 환경변수로 주입한 상대 path" \
+    env HH_REMOTE_PATH='srv/p' bash "$SELF_PATH" remote "$remote_project" status
+
+  # 값 뒤 주석과 중복 키: 사람이 직접 편집하는 파일이므로 오파싱/조용한 무시 금지.
+  local remote_config="$remote_project/.harness/policies/remote.yaml"
+  local remote_config_backup="$test_root/remote.yaml.bak"
+  cp "$remote_config" "$remote_config_backup"
+  sed -i "s|^  host: .*|  host: 'build.internal' # 사내 빌드 서버|" "$remote_config"
+  # status는 SSH 확인 실패로 비영 종료할 수 있다(테스트 환경엔 원격이 없다).
+  # 여기서 보는 것은 파싱 결과 한 줄뿐이므로 종료 코드는 무시한다.
+  local remote_status_output=""
+  set +e
+  remote_status_output="$(bash "$SELF_PATH" remote "$remote_project" status 2>&1)"
+  set -e
+  printf '%s' "$remote_status_output" | grep -q "^원격 대상:  builder@build.internal$" ||
+    die "값 뒤 주석이 있는 host를 잘못 파싱했습니다: $remote_status_output"
+  cp "$remote_config_backup" "$remote_config"
+  # 필수 키(host)와 선택 키(mount_path) 모두에서 중복이 잡혀야 한다. 선택 키는
+  # 값이 비어도 기본값으로 진행할 수 있어, 검사가 서브셸에서 삼켜지면 조용히
+  # 통과하던 자리다.
+  local duplicate_key
+  for duplicate_key in "  host: 'other.internal'" "  mount_path: '/tmp/other-mount'"; do
+    cp "$remote_config_backup" "$remote_config"
+    printf '%s\n' "$duplicate_key" >>"$remote_config"
+    expect_fail "remote: remote.yaml 중복 키(${duplicate_key%%:*})" \
+      bash "$SELF_PATH" remote "$remote_project" status
+  done
+  cp "$remote_config_backup" "$remote_config"
+
+  # YAML 주석 규칙: #는 줄 첫머리이거나 앞이 공백일 때만 주석이다.
+  # `enabled: true#x`를 true로 읽어 원격 모드가 켜지면 안 된다.
+  sed -i "s|^  enabled: .*|  enabled: true#disabled|" "$remote_config"
+  local enabled_message
+  set +e
+  enabled_message="$(bash "$SELF_PATH" remote "$remote_project" status 2>&1)"
+  set -e
+  printf '%s' "$enabled_message" | grep -q '원격 모드가 꺼져' ||
+    die "값에 붙은 #를 주석으로 오파싱했습니다: $enabled_message"
+  cp "$remote_config_backup" "$remote_config"
+
+  # 포트가 붙은 호스트, 개행이 든 값은 init 단계에서 거부한다.
+  expect_fail "init: 포트가 붙은 --remote-host" \
+    bash "$SELF_PATH" init "$test_root/remote-host-port" --name r --goal g \
+      --remote-host host.example:22 --remote-path /srv/p
+  expect_fail "init: 개행이 든 --remote-path" \
+    bash "$SELF_PATH" init "$test_root/remote-newline" --name r --goal g \
+      --remote-host host.example --remote-path "$(printf '/srv/one\ntwo')"
+
   rm -rf -- "$test_root"
   trap - EXIT
 
@@ -516,6 +628,7 @@ EOF
   printf 'PASS: 스텝 명령 인자 검증\n'
   printf 'PASS: Agent 호출 없음\n'
   printf 'PASS: 탭 완성 스크립트 문법\n'
+  printf 'PASS: 원격 실행 모드 (opt-in 게이트/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키/비밀번호 미저장)\n'
   printf 'PASS: Task Lock (동시 획득 거부/release/stale 회수)\n'
   printf 'PASS: quota-retry/auto-step opt-in 게이트\n'
   printf 'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)\n'

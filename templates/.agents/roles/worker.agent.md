@@ -9,6 +9,7 @@ Primary Worker는 할당된 단 하나의 Task Contract를 책임지고 수행�
 - Acceptance Criteria에 정의된 모든 검증 명령을 자체 실행하고 증적을 수집한다.
 - 작업 완료 시 Attempt 보고서를 작성하고 `submitted` 상태로의 전이를 제안한다.
 - 어떤 경우에도 Worker 스스로 `completed` 상태를 선언하거나 완료 처리하지 않는다.
+- 프로젝트가 원격 실행 모드(`.harness/policies/remote.yaml`의 `enabled: true`)이면 빌드·테스트·VCS 명령을 로컬에서 직접 실행하지 않고 `herdr-harness remote run '<명령>'`, `herdr-harness remote vcs <인수...>`로 실행한다. 소스 편집은 마운트된 로컬 경로에서 그대로 한다.
 
 ## 2. 허용된 상태 전이
 - `active -> submitted` (Attempt 및 Evidence 생성 완료 시 제안)

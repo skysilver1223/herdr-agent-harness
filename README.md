@@ -430,6 +430,53 @@ herdr-harness approve ~/Projects/snmp-normalizer task-001 --confirm-user-approva
 - **`quota-retry`**: `.harness/policies/quota-policy.yaml`의 `automatic_failover: true`로 켜야 동작합니다. `quota-check`가 남긴 연속 `low` 판정이 `low_confirm_count`회 이상, 그 간격이 `cooldown_seconds` 이상일 때만 진행하며, Task당 1회만 허용합니다(flapping 방지). 진행 시 기존 `close-agent`/`transition`을 그대로 호출해 Provider를 `fallback_chain`의 다음 값으로 바꾸고, `handover_required` 전이 전에 `.harness/handovers/TASK_ID-handover-N.md` stub(사유·Provider 교체·`git diff --stat`·다음 한 단계)을 자동 생성한 뒤 `handover_required`까지 전이하고 **거기서 멈춥니다**(`transition`이 인계 문서를 요구하므로 자동 경로도 인계 문맥을 남깁니다). `ready`로 재개하려면 사람이 `.harness/decisions/TASK_ID-failover-approval.md`에 `승인: yes`를 쓰고 `transition ... ready`를 직접 실행해야 합니다 — `completed`는 물론 이 재개 단계도 자동화하지 않습니다.
 - **`auto-step`**: `.harness/policies/loop-policy.yaml`의 `enabled: true`로 켜야 동작하고, `--max-turns`는 `max_turns_ceiling`(기본 5)을 넘을 수 없습니다. 상주 루프가 아니라 호출 1회가 반드시 끝납니다: 1턴째만 `dispatch`로 Pane을 새로 만들고, 이후 턴은 같은 Agent를 `observe`로만 재조회합니다(반복 dispatch는 Pane을 고아로 만들기 때문에 하지 않습니다). `settled`/`blocked`/오류에 도달하면 즉시 멈추고 판단을 사람에게 넘깁니다 — `reviewing`·`awaiting_approval`·`completed`로 이어지는 코드 경로 자체가 없습니다.
 
+## 원격 실행 모드 (opt-in)
+
+소스가 원격 서버에만 있고 빌드·테스트·SVN도 그 서버에서만 되는 환경을 위한 모드입니다. **Agent는 언제나 로컬에서 실행됩니다** — 원격은 소스를 SSHFS로 로컬에 노출하고, 검증 명령만 SSH로 실행하는 실행 환경일 뿐입니다.
+
+```bash
+herdr-harness init ~/Projects/normalize-telemetry \
+  --name normalize-telemetry \
+  --goal "원격 빌드 서버의 텔레메트리 정규화 모듈 개선" \
+  --remote-host 192.168.2.77 \
+  --remote-user nsotdb \
+  --remote-path /home/nsotdb/Normalize_Telemetry \
+  --remote-mount ~/workspace/Normalize_Telemetry \
+  --remote-vcs svn
+```
+
+설정 정본은 `.harness/policies/remote.yaml`이고, `enabled: true`가 아니면 모든 `remote` 하위 명령이 즉시 거부합니다(기존 프로젝트는 영향 없음). 기존 프로젝트에 나중에 켜려면 이 파일의 `enabled`와 `host`/`user`/`path`를 채우면 됩니다.
+
+```bash
+# 최초 1회: 비밀번호로 접속해 전용 SSH 키를 등록하고, 이후로는 키 인증만 사용.
+# 명령줄에 비밀번호를 직접 쓰면 셸 히스토리에 남으므로 read -rs로 입력받습니다.
+read -rsp '원격 비밀번호: ' HH_REMOTE_PASSWORD; echo
+HH_REMOTE_PASSWORD="$HH_REMOTE_PASSWORD" herdr-harness remote . bootstrap-key
+unset HH_REMOTE_PASSWORD
+
+herdr-harness remote . doctor            # 의존성·SSH·원격 경로·도구·마운트 진단
+herdr-harness remote . mount             # 원격 소스를 로컬 경로에 노출
+herdr-harness remote . run 'make -j4 && ctest'   # 빌드·테스트를 원격에서 실행
+herdr-harness remote . vcs status        # remote.yaml의 vcs(git|svn)를 원격에서 실행
+herdr-harness remote . status            # 설정·연결·마운트 요약
+herdr-harness remote . unmount
+```
+
+Worker/Reviewer는 Task의 `verified_by` 명령을 로컬에서 직접 돌리지 않고 `remote run`으로 실행합니다(역할 문서와 `harness-work` Skill에 명시되어 있습니다). Evidence에는 평소처럼 명령 전문과 종료 코드를 남깁니다.
+
+**비밀번호는 어떤 파일에도 저장하지 않습니다.** `remote.yaml`에는 비밀번호 키 자체가 없고, 코드가 비밀번호를 파일이나 명령줄 인자(argv)에 쓰지도 않습니다(`sshpass -e`로 환경변수 경유).
+
+다만 다음 두 가지는 한계로 알고 쓰세요.
+
+- `ssh_key` 파일이 아직 없으면 `bootstrap-key`뿐 아니라 `run`·`status`·`mount` 등 **모든 원격 명령이 비밀번호 인증으로 떨어집니다**. 키를 등록하고 나면 그 뒤로는 키 인증만 씁니다 — 그래서 설치 직후 `bootstrap-key`를 먼저 돌리는 것을 권합니다.
+- 환경변수에 담긴 비밀번호는 같은 사용자나 root가 `/proc/<pid>/environ`으로 볼 수 있습니다. 키 등록이 끝나면 `unset HH_REMOTE_PASSWORD`로 지우세요.
+
+로컬에 `openssh-client`, `sshfs`, `util-linux`가 필요하고, 키 등록 전까지만 `sshpass`가 필요합니다.
+
+호스트·사용자명은 `-oProxyCommand=...` 같은 SSH 옵션으로 해석될 수 있는 형태를 거부하고, 원격 경로는 절대경로만 허용하며 원격 셸에 넘길 때 인용합니다 — 설정 파일과 환경변수 override 양쪽 모두에 적용됩니다.
+
+환경변수 override: `HH_REMOTE_HOST`, `HH_REMOTE_USER`, `HH_REMOTE_PATH`, `HH_REMOTE_MOUNT_PATH`, `HH_REMOTE_SSH_KEY`, `HH_REMOTE_VCS`, `HH_REMOTE_PASSWORD`.
+
 ## 생성되는 프로젝트 구조
 
 ```text
@@ -448,7 +495,7 @@ project/
     ├── SPEC.md
     ├── MILESTONES.md
     ├── STATE.md
-    ├── policies/          # project·quota·loop·review-policy.yaml
+    ├── policies/          # project·quota·loop·review·remote.yaml
     ├── profiles/
     ├── tasks/
     ├── waves/

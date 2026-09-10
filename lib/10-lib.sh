@@ -16,6 +16,14 @@ Herdr Agent/Skills Harness
   $SCRIPT_NAME uninstall [--yes]  설치된 Harness 명령 제거
   $SCRIPT_NAME completion bash    Bash 탭 완성 스크립트 출력(설치: source <(herdr-harness completion bash))
 
+원격 실행 모드 (opt-in, .harness/policies/remote.yaml의 enabled: true일 때만):
+  $SCRIPT_NAME remote [PATH] doctor          SSH·원격 경로·도구·마운트 일괄 진단
+  $SCRIPT_NAME remote [PATH] bootstrap-key   전용 SSH 키를 원격에 1회 등록
+  $SCRIPT_NAME remote [PATH] mount|unmount   원격 소스를 SSHFS로 로컬에 노출/해제
+  $SCRIPT_NAME remote [PATH] run '<명령>'    원격에서 빌드·테스트 실행
+  $SCRIPT_NAME remote [PATH] vcs <인수...>   원격에서 git|svn 실행
+  $SCRIPT_NAME remote [PATH] status|deps|shell
+
 Agent Loop 스텝 명령 (호출 1회 = 1스텝, 상주 루프 없음):
   $SCRIPT_NAME validate [PATH] [--wave ID]        읽기 전용 사전 검증
   $SCRIPT_NAME transition PATH TASK_ID TO_STATE   상태 전이 강제
@@ -35,6 +43,11 @@ init 옵션:
   --worker PROVIDER               claude | codex | agy
   --reviewer PROVIDER             claude | codex | agy
   --fallback PROVIDERS            쉼표 구분 Provider 목록
+  --remote-host HOST              원격 실행 모드 활성화(SSH 호스트)
+  --remote-user USER              원격 계정 (기본: 현재 사용자)
+  --remote-path PATH              원격 프로젝트 경로 (--remote-host 사용 시 필수)
+  --remote-mount PATH             SSHFS 마운트 경로 (기본: PROJECT/.harness/remote-mount)
+  --remote-vcs VCS                git | svn | none (기본: git)
 
 예시:
   $SCRIPT_NAME init ~/Projects/snmp-normalizer \

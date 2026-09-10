@@ -16,7 +16,7 @@ compatibility: Herdr pane, Git repository, project-local .harness directory
 1. intent.md의 `Not`·`Constraints`·`Invariants`를 정독한다. `Open Questions / Decision Gates`에 미해소 항목이 있으면 구현을 시작하지 않고 즉시 Orchestrator에게 알린다.
 2. `git status`로 기준선을 확인한다.
 3. `write_scope`에 지정된 경로 안에서만 코드를 작성·수정한다. 허용되지 않은 파일(설정·다른 모듈·정책 문서)은 건드리지 않는다. `write_scope`에 있어도 intent의 `Not` 범위는 침범하지 않는다.
-4. `acceptance_criteria`의 각 `verified_by` 명령(테스트 러너·린터·빌드·스키마 검증기 등)을 실행해 자가 검증한다. stdout·stderr·종료 코드를 캡처하고, 파괴적 명령(`rm -rf`, 드롭 테이블)·운영 배포·외부 네트워크 쓰기는 거부한다. 출력의 비밀번호·토큰·개인정보 패턴은 `***REDACTED***`로 마스킹한다. 기존 회귀 테스트도 실행해 부작용이 없음을 확인한다.
+4. `acceptance_criteria`의 각 `verified_by` 명령(테스트 러너·린터·빌드·스키마 검증기 등)을 실행해 자가 검증한다. 원격 실행 모드(`.harness/policies/remote.yaml`의 `enabled: true`)면 각 명령을 `herdr-harness remote run '<명령>'`으로 원격에서 실행하고(VCS는 `herdr-harness remote vcs ...`), 마운트가 끊겼으면 `herdr-harness remote doctor`로 먼저 확인한다. stdout·stderr·종료 코드를 캡처하고, 파괴적 명령(`rm -rf`, 드롭 테이블)·운영 배포·외부 네트워크 쓰기는 거부한다. 출력의 비밀번호·토큰·개인정보 패턴은 `***REDACTED***`로 마스킹한다. 기존 회귀 테스트도 실행해 부작용이 없음을 확인한다.
 5. `.harness/evidence/task-XXX-evidence-N.md`에 검증 증적을 남긴다 — Criterion ID, 실행 시각·환경, 실행한 명령 전문, 종료 코드(0=PASS/비0=FAIL), 핵심 출력 발췌(100줄 내외), 수동 확인 필요 사항.
 6. `.harness/attempts/task-XXX-attempt-N.md`를 작성한다(N은 001부터) — 변경 요약, 수정 파일 목록과 `git diff --stat`, 자체 검증 명령·결과·종료 코드, Reviewer를 위한 중점 검토 포인트(intent의 Not/Invariants 대비 확인점 포함).
 7. `herdr-harness transition . <task_id> submitted` 전이를 요청한다.

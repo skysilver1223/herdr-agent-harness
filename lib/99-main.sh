@@ -18,6 +18,7 @@ main() {
     quota-check) cmd_quota_check "$@" ;;
     quota-retry) cmd_quota_retry "$@" ;;
     auto-step) cmd_auto_step "$@" ;;
+    remote) cmd_remote "$@" ;;
     completion) cmd_completion "$@" ;;
     doctor) cmd_doctor "$@" ;;
     test) cmd_test "$@" ;;

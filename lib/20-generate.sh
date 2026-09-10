@@ -69,6 +69,7 @@ cmd_init() {
 
   local name="" goal="" profile="generic"
   local orchestrator="claude" worker="codex" reviewer="agy" fallback="claude,agy"
+  local remote_host="" remote_user="" remote_path="" remote_mount="" remote_vcs="git"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -79,6 +80,11 @@ cmd_init() {
       --worker) [[ $# -ge 2 ]] || die "--worker 값이 필요합니다."; worker="$2"; shift 2 ;;
       --reviewer) [[ $# -ge 2 ]] || die "--reviewer 값이 필요합니다."; reviewer="$2"; shift 2 ;;
       --fallback) [[ $# -ge 2 ]] || die "--fallback 값이 필요합니다."; fallback="$2"; shift 2 ;;
+      --remote-host) [[ $# -ge 2 ]] || die "--remote-host 값이 필요합니다."; remote_host="$2"; shift 2 ;;
+      --remote-user) [[ $# -ge 2 ]] || die "--remote-user 값이 필요합니다."; remote_user="$2"; shift 2 ;;
+      --remote-path) [[ $# -ge 2 ]] || die "--remote-path 값이 필요합니다."; remote_path="$2"; shift 2 ;;
+      --remote-mount) [[ $# -ge 2 ]] || die "--remote-mount 값이 필요합니다."; remote_mount="$2"; shift 2 ;;
+      --remote-vcs) [[ $# -ge 2 ]] || die "--remote-vcs 값이 필요합니다."; remote_vcs="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) die "알 수 없는 init 옵션: $1" ;;
     esac
@@ -99,6 +105,33 @@ cmd_init() {
   valid_provider "$reviewer" || die "지원하지 않는 Reviewer입니다: $reviewer"
   [[ "$worker" != "$reviewer" ]] || die "Worker와 Reviewer는 다른 Provider여야 합니다."
 
+  # 원격 실행 모드는 --remote-host가 있을 때만 켜진다. 나머지 프로젝트는
+  # remote.yaml이 enabled: false로 생성되고 remote 명령이 즉시 거부한다.
+  case "$remote_vcs" in
+    git|svn|none) ;;
+    *) die "지원하지 않는 --remote-vcs입니다: $remote_vcs (git | svn | none)" ;;
+  esac
+  # 개행이 든 값은 생성된 YAML과 행 기반 리더를 동시에 깨뜨린다. 원격 모드를
+  # 켜지 않아도 mount 경로는 파일에 쓰이므로 둘 다 미리 막는다.
+  local remote_value
+  for remote_value in "$remote_host" "$remote_user" "$remote_path" "$remote_mount"; do
+    [[ "$remote_value" != *$'\n'* ]] || die "--remote-* 값에는 개행을 넣을 수 없습니다."
+  done
+  local remote_enabled=false
+  if [[ -n "$remote_host" ]]; then
+    [[ -n "$remote_path" ]] || die "--remote-host를 쓰면 --remote-path(원격 프로젝트 경로)도 필요합니다."
+    remote_enabled=true
+    [[ -n "$remote_user" ]] || remote_user="${USER:-$(id -un)}"
+    # SSH는 "-"로 시작하는 목적지를 옵션으로 해석한다. 잘못된 값이 설정 파일에
+    # 적히기 전에 여기서 막는다(45-remote.sh의 _remote_validate_endpoint와 같은 규칙).
+    [[ "$remote_user" =~ ^[A-Za-z0-9._][A-Za-z0-9._-]*$ ]] ||
+      die "--remote-user에 허용되지 않는 문자가 있습니다(영문·숫자·. _ -, 첫 글자는 - 불가): $remote_user"
+    [[ "$remote_host" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ || "$remote_host" =~ ^\[[0-9A-Fa-f:]+\]$ ]] ||
+      die "--remote-host 형식이 올바르지 않습니다(호스트명·IPv4 또는 [IPv6], 포트는 포함하지 않음): $remote_host"
+    [[ "$remote_path" == /* ]] || die "--remote-path는 절대경로여야 합니다: $remote_path"
+  fi
+  [[ -n "$remote_mount" ]] || remote_mount="$target/.harness/remote-mount"
+
   IFS=',' read -r -a fallback_items <<<"$fallback"
   for provider in "${fallback_items[@]}"; do
     valid_provider "$provider" || die "지원하지 않는 Fallback Provider입니다: $provider"
@@ -116,6 +149,7 @@ cmd_init() {
 .harness/runtime/
 .harness/evidence/raw/
 .harness/worktrees/
+.harness/remote-mount/
 __pycache__/
 .pytest_cache/
 .venv/
@@ -294,6 +328,27 @@ loop_policy:
   # Task Lock이 소유 프로세스가 죽은 채로 이 시간(초)을 넘기면 stale로
   # 보고 회수한다.
   stale_lock_seconds: 600
+EOF
+
+  # 원격 실행 모드 설정 정본. 기본은 enabled: false — 이 값이 true가 아니면
+  # `herdr-harness remote ...`는 아무 것도 하지 않고 거부한다. 비밀번호는
+  # 여기에 절대 적지 않는다(HH_REMOTE_PASSWORD 환경변수 + bootstrap-key 1회).
+  write_file "$target" ".harness/policies/remote.yaml" <<EOF
+schema_version: '1.0'
+remote:
+  # Agent는 항상 로컬에서 실행된다. 원격은 소스를 SSHFS로 로컬에 노출하고
+  # 빌드·테스트·VCS만 SSH로 실행하는 실행 환경이다.
+  enabled: $remote_enabled
+  host: $(yaml_quote "$remote_host")
+  user: $(yaml_quote "$remote_user")
+  # 원격 호스트에 있는 프로젝트 디렉터리
+  path: $(yaml_quote "$remote_path")
+  # SSHFS로 원격 소스를 붙일 로컬 경로. Agent는 이 경로의 파일을 직접 편집한다.
+  mount_path: $(yaml_quote "$remote_mount")
+  # bootstrap-key가 만들고 사용하는 전용 키. 파일이 있으면 항상 키 인증을 쓴다.
+  ssh_key: '~/.ssh/herdr_remote_ed25519'
+  # remote vcs <인수...>가 원격에서 실행할 명령: git | svn | none
+  vcs: '$remote_vcs'
 EOF
 
   write_file "$target" ".harness/profiles/generic.yaml" <<'EOF'

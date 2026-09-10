@@ -141,6 +141,16 @@ cmd_doctor() {
       [[ "$command_name" == herdr || "$command_name" == git ]] && failed=1
     fi
   done
+
+  # 원격 실행 모드용 도구는 옵션이다 — 없다고 doctor를 실패시키지 않는다.
+  # 프로젝트별 연결 진단은 `herdr-harness remote [PATH] doctor`가 한다.
+  for command_name in ssh sshfs sshpass; do
+    if command -v "$command_name" >/dev/null 2>&1; then
+      printf '[OK]      %-8s %s\n' "$command_name" "$(command -v "$command_name")"
+    else
+      printf '[OPTION]  %-8s (원격 실행 모드에서만 필요)\n' "$command_name"
+    fi
+  done
   if command -v herdr >/dev/null 2>&1; then
     printf '\nHerdr version:\n'
     herdr --version || true
