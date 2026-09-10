@@ -525,7 +525,7 @@ _runtime_caller_is_managed_agent() {
 _runtime_require_human_caller() {
   local root="$1" action="$2" meta
   meta="$(_runtime_caller_is_managed_agent "$root")" || return 0
-  die "$action 은(는) Harness가 띄운 Agent Pane에서 실행할 수 없습니다 (pane=$(_runtime_current_pane_id), 기록=$meta).
+  die "$action 은(는) Harness가 추적 중인 Agent Pane에서 실행할 수 없습니다 (pane=$(_runtime_current_pane_id), 기록=$meta).
 작업 방향성에 대한 결정은 사람이 자기 Pane에서 직접 내려야 합니다 — Agent는 결과를 제출(submitted)까지만 할 수 있습니다."
 }
 

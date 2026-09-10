@@ -112,6 +112,9 @@ EOF
   diff 미리보기(--dry-run과 같다)이며 --apply를 줘야 실제로 쓴다. PATH를 생략하면
   현재 디렉터리를 쓴다. SPEC.md·STATE.md·Task 파일
   같은 프로젝트 산출물은 건드리지 않는다.
+  예외로 .gitignore에는 Harness가 요구하는 줄(.harness/runtime/,
+  .harness/evidence/raw/ 등)이 빠져 있으면 --apply가 그 줄만 덧붙인다 —
+  없으면 원문 덤프가 untracked로 노출된다. 기존 줄은 지우지 않는다.
 
 예시:
   $SCRIPT_NAME sync-templates ~/Projects/telemetry          # 무엇이 바뀔지만 확인
@@ -166,6 +169,14 @@ EOF
   YAML과 STATE.md를 갱신한다. 예를 들어 submitted는 Attempt·Evidence가,
   awaiting_approval은 최신 Review의 APPROVED 판정이 있어야 한다.
 
+Acceptance Criteria (submitted):
+  submitted 전이에서는 Task의 acceptance_criteria[].verified_by를 Harness가
+  직접 실행하고, 하나라도 실패하면 전이를 거부한다. type: command는 종료
+  코드로 판정하고(제한 시간은 project-policy.yaml의
+  acceptance_check_timeout_seconds, 기본 600초), type: manual-review는 기록만
+  하고 막지 않는다(Reviewer 몫). 결과는
+  .harness/evidence/TASK-attempt-N-checks.yaml에 남는다.
+
 상태:
   draft ready active submitted blocked handover_required
   reviewing changes_requested awaiting_approval completed
@@ -190,7 +201,7 @@ EOF
       ;;
     dispatch) cat <<EOF
 구문:
-  $SCRIPT_NAME dispatch PATH TASK_ID ROLE [--timeout MS]
+  $SCRIPT_NAME dispatch PATH TASK_ID ROLE [--timeout MS] [--print-only]
 
 무엇을 하나:
   Task 계약·SPEC 발췌·intent를 Context Packet으로 묶어 Herdr Pane에서 Agent를

@@ -318,16 +318,22 @@ PASS: Git 기준선 생성
 PASS: 신규 프로젝트 보호
 PASS: 비대화형 명시적 실패
 PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)
+PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)
+PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)
 PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)
 PASS: 이벤트 로그 기록
 PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
-PASS: 스텝 명령 인자 검증
+PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)
+PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)
 PASS: Agent 호출 없음
 PASS: 탭 완성 스크립트 문법
+PASS: Agent 승인 정책 (기본 auto/인수표/ask 무인수/문자·플래그·값·모드별 권한상승 거부/반환값 실패/정책 없음/init 값)
+PASS: 도움말 정합성 (dispatch↔help 요약·상세↔탭 완성 설명, 없는 명령 거부)
+PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호 미저장/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키)
 PASS: Task Lock (동시 획득 거부/release/stale 회수)
 PASS: quota-retry/auto-step opt-in 게이트
 PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)
-PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범)
+PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범, .gitignore 누락 줄 보충·멱등)
 PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)
 ```
 
@@ -382,6 +388,7 @@ herdr-harness init ~/Projects/timeseries-inference \
 | Worker | `codex` |
 | Reviewer | `agy` |
 | Fallback | `claude,agy` |
+| Agent 승인 모드 | `auto` (`--approval-mode ask\|auto\|bypass`) |
 | 활성 Task | 최대 5개 |
 | 병렬 Worker | 최대 2개 |
 
@@ -437,17 +444,27 @@ $ herdr-harness help dispatch
 dispatch — Task와 역할에 맞는 Agent를 Pane에서 한 턴 실행한다
 
 구문:
-  herdr-harness dispatch PATH TASK_ID ROLE [--timeout MS]
+  herdr-harness dispatch PATH TASK_ID ROLE [--timeout MS] [--print-only]
 
 무엇을 하나:
   Task 계약·SPEC 발췌·intent를 Context Packet으로 묶어 Herdr Pane에서 Agent를
   한 턴 실행하고, 결과를 Evidence로 남긴다. 호출 1회 = 1턴이며 상주 루프가 아니다.
+
+승인 정책:
+  .harness/policies/agent-policy.yaml의 approval_mode(ask|auto|bypass)에 따라
+  Provider CLI에 승인 우회 인수를 붙인다. 도구 실행 승인만 건너뛴다 — 상태
+  전이와 완료 승인은 이 설정과 무관하게 transition/approve로만 가능하다.
+  ...
 
 역할(ROLE): worker | reviewer
 
 예시:
   herdr-harness dispatch . task-001 worker
   herdr-harness dispatch . task-001 reviewer --timeout 600000
+
+--print-only:
+  Pane을 만들지도 Agent를 띄우지도 않고, Context Packet 경로와 직접 실행할
+  herdr 명령만 출력한다. ...
 ```
 
 ## Agent Loop 스텝 명령
@@ -457,10 +474,11 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | 명령 | 책임 |
 |---|---|
 | `herdr-harness validate [PATH] [--wave ID] [--no-git]` | Git 기준선, Task/Wave, Provider, 의존성, 실행 상한과 write scope를 읽기 전용 검증 |
-| `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제 |
+| `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제. `submitted`로 갈 때는 Acceptance Criteria의 `verified_by` 명령을 직접 실행하고 하나라도 실패하면 거부 |
 | `herdr-harness approve PATH TASK_ID --confirm-user-approval` | 사용자 명시 승인 확인 후 승인 증거를 원자적으로 기록하고 기존 `transition` 게이트로 `completed` 전이 |
-| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS]` | Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록 |
+| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS] [--print-only]` | Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
 | `herdr-harness observe PATH TASK_ID [worker\|reviewer]` | 기존 Agent를 재조회하고 Evidence에 추가 |
+| `herdr-harness adopt PATH TASK_ID worker\|reviewer --pane PANE --agent NAME [--provider P]` | 사람이 직접 띄운 Agent를 Harness 추적에 등록(`--print-only` 폴백의 마지막 단계) |
 | `herdr-harness close-agent PATH TASK_ID [worker\|reviewer] [--force]` | Harness runtime에 등록된 Pane만 정리 |
 | `herdr-harness status [PATH] --live [--json]` | 문서·Herdr·Git 실시간 상태 대조 |
 | `herdr-harness quota-check PATH TASK_ID worker\|reviewer` | 실행 중인 Agent의 쿼터 확인(claude·codex는 `/status` 전송, agy는 `--print "/usage"`) |
@@ -522,7 +540,7 @@ Agent를 띄울 때마다 "이 명령을 실행할까요? (y/n)"을 반복해서
 
 여기서 사라지는 것은 리눅스 명령 실행 같은 **도구 단위 승인**뿐입니다. 작업 방향성에 대한 결정 — Task 상태 전이, 완료 승인 — 은 그대로 사람 몫으로 남습니다.
 
-승인을 건너뛰게 되면 Agent는 셸 명령을 자유롭게 돌릴 수 있으므로, "직접 전이하지 마라"는 프롬프트 지시만으로는 Agent가 스스로 `approve --confirm-user-approval`을 실행하는 것을 막을 수 없습니다. 그래서 `transition`과 `approve`는 **호출한 Pane이 Harness가 띄운 Agent Pane이면 거부합니다** — `herdr pane current`로 현재 pane을 확인해 `.harness/runtime/*.meta`에 기록된 `pane_id`와 대조합니다(`HERDR_PANE_ID` 환경변수를 믿지 않으므로 `env -u`로 지워도 통하지 않습니다). 사람 Pane과 Orchestrator Pane은 기록에 없으므로 영향을 받지 않습니다.
+승인을 건너뛰게 되면 Agent는 셸 명령을 자유롭게 돌릴 수 있으므로, "직접 전이하지 마라"는 프롬프트 지시만으로는 Agent가 스스로 `approve --confirm-user-approval`을 실행하는 것을 막을 수 없습니다. 그래서 `transition`과 `approve`는 **호출한 Pane이 Harness가 추적 중인 Agent Pane이면 거부합니다**(`dispatch`가 띄운 Pane뿐 아니라 `adopt`로 등록한 Pane도 포함) — `herdr pane current`로 현재 pane을 확인해 `.harness/runtime/*.meta`에 기록된 `pane_id`와 대조합니다(환경변수보다 `herdr pane current`를 우선하므로 `HERDR_PANE_ID`를 `env -u`로 지우는 것만으로는 통하지 않습니다. `herdr` 조회 자체가 실패하면 그 환경변수로 떨어지고, 그것도 비어 있으면 Pane을 특정할 수 없어 통과시킵니다 — 아래 단서대로 가드레일이지 경계가 아닙니다). `.meta`에 기록이 없는 사람 Pane과 Orchestrator Pane은 영향을 받지 않습니다.
 
 > **이것은 가드레일이지 보안 경계가 아닙니다.** Agent는 사용자와 같은 권한으로 돌기 때문에 `.meta`를 고치거나 `lib/40-transition.sh` 자체를 고칠 수 있습니다. 여기서 막는 것은 "지시를 따르다가 흘러가서" 스스로 완료를 선언하는 기본 동작이지, 적대적 Agent가 아닙니다. 진짜 경계를 원하면 OS 수준 분리(별도 계정·컨테이너)가 필요하고 그건 아직 Deferred 항목입니다.
 
@@ -531,6 +549,54 @@ Agent를 띄울 때마다 "이 명령을 실행할까요? (y/n)"을 반복해서
 - claude의 `bypassPermissions`는 디렉터리마다 처음 한 번 확인 화면을 띄울 수 있고, 그러면 `herdr agent start`가 그 화면에서 멈춥니다. 기본값 `auto`(`acceptEdits`)는 그 화면이 없습니다.
 - 실제로 쓰인 모드와 인수는 Attempt·Evidence 문서에 기록됩니다.
 - 이 파일이 없는 예전 프로젝트에서는 인수를 붙이지 않습니다(= `ask`와 같음).
+
+### Acceptance Criteria 게이트 — `transition ... submitted`가 직접 검증한다
+
+`submitted` 전이는 Attempt·Evidence의 존재만 보지 않습니다. Harness가 Task YAML의 `acceptance_criteria[].verified_by`를 **직접 실행**하고, 하나라도 실패하면 전이를 거부합니다. "됐다"는 Agent의 보고와 실제 저장소 상태가 갈라지는 경우를 여기서 잡습니다.
+
+```yaml
+acceptance_criteria:
+  - criterion_id: AC-001
+    statement: 벤더 A Dump가 공통 스키마로 정규화된다
+    verified_by:
+      type: command
+      command: pytest tests/test_vendor_a.py -q
+  - criterion_id: AC-002
+    statement: 스키마 문서가 실제 필드와 일치한다
+    verified_by:
+      type: manual-review
+      instruction: 구체적인 확인 방법
+```
+
+- `type: command` — 프로젝트 루트에서 실행하고 종료 코드로 판정합니다. 명령 하나당 제한 시간은 `.harness/policies/project-policy.yaml`의 `acceptance_check_timeout_seconds`(기본 600초)이며, 시간을 넘기면 강제 종료됩니다.
+- `type: manual-review` — 자동 검증이 불가능한 기준입니다. `manual`로 기록만 하고 전이를 막지 않습니다. 판단은 Reviewer가 합니다.
+- `verified_by`의 `type`은 `command` 또는 `manual-review`입니다. 값 뒤에 인라인 주석(`type: command  # ...`)을 붙이면 주석까지 값으로 읽혀 전이가 거부되므로, 설명은 항목 위 줄 주석으로 답니다.
+- 항목 키는 `criterion_id`입니다(`.harness/tasks/TEMPLATE.yaml`과 같음). 파서는 `- criterion_id:`로 시작하는 항목만 인식하므로 다른 키를 쓰면 기준이 0개로 읽혀 전이가 거부됩니다.
+- `acceptance_criteria`가 비어 있으면 `submitted`로 전이할 수 없습니다.
+- 원격 실행 모드(`remote.yaml`의 `enabled: true`)에서는 같은 명령을 원격에서 실행합니다.
+- 결과는 `.harness/evidence/TASK-attempt-N-checks.yaml`에 남고, Reviewer의 Context Packet에 그대로 주입됩니다.
+
+### Evidence 구조 — 정본 YAML과 `raw/` 분리
+
+Evidence는 "Worker가 말한 것과 실제 저장소 상태가 일치하는가"를 판단하는 데 쓰입니다. 그 판단에 쓰이는 필드만 정본 YAML에 두고, Agent 출력 원문 같은 긴 덤프는 디버깅용으로 분리합니다. Agent에게 보낸 Context Packet 전문은 Evidence가 아니라 `.harness/runtime/TASK-context-ROLE.md`에 있습니다.
+
+| 파일 | 내용 | Git |
+|---|---|---|
+| `.harness/evidence/TASK-<worker\|reviewer>-attempt-N.yaml` | 정본 — `task`·`role`·`attempt`·`result`·`changes`(`git status --short`)·`status`·`raw` | 추적 |
+| `.harness/evidence/TASK-attempt-N-checks.yaml` | AC 검증 결과 — 기준별 `command`·`exit_code`·`result`·`output_tail`과 `summary` | 추적 |
+| `.harness/evidence/raw/TASK-<role>-attempt-N.md` | 원문 덤프 — `git status --short`/`diff --stat`, Agent 상태·출력, `observe` 관측 기록 | `.gitignore` 제외 |
+
+`submitted` 게이트는 글롭이 아니라 파일 이름과 필수 필드를 함께 확인합니다. 빈 YAML을 하나 놓아 두는 것으로는 통과하지 못하며, 정본은 `dispatch`/`observe`만 만듭니다. Secret 의심 패턴이 발견되면 원문 대신 요약만 남깁니다.
+
+### Context Packet에 직전 라운드가 들어간다
+
+`dispatch`가 만드는 `.harness/runtime/TASK-context-ROLE.md`에는 SPEC 발췌·Task 계약·intent 안내에 더해 **직전 라운드**가 함께 들어갑니다.
+
+- 최신 Worker·Reviewer Evidence 정본
+- 최신 AC 검증 결과(`checks.yaml`)
+- 최신 Review 판정과 본문 발췌
+
+`changes_requested` 후 재시도에서 Worker가 Reviewer의 지적을 못 본 채 같은 접근을 반복하는 것을 막기 위한 것입니다. "가장 큰 attempt 번호"가 아니라 파일이 실제로 존재하는 최근 attempt를 찾고, 길이가 예측 불가능한 Review·checks는 줄 수와 줄 길이를 함께 잘라 넣습니다.
 
 ### `quota-retry`, `auto-step` — opt-in 제약된 자동화
 
@@ -628,14 +694,14 @@ project/
     ├── SPEC.md
     ├── MILESTONES.md
     ├── STATE.md
-    ├── policies/          # project·quota·loop·review·remote.yaml
+    ├── policies/          # project·quota·agent·loop·review·remote.yaml
     ├── profiles/
     ├── tasks/
     ├── waves/
     ├── intents/           # Task별 intent.md (착수 게이트·제외 범위·불변식)
     ├── references/
     ├── attempts/
-    ├── evidence/
+    ├── evidence/           # 정본 YAML + AC checks (원문 덤프는 evidence/raw/, Git 제외)
     ├── reviews/
     ├── handovers/
     ├── decisions/
@@ -655,7 +721,8 @@ project/
 - 기존 코드·데이터·문서·Dump를 먼저 조사합니다.
 - Worker와 다른 Provider가 Review합니다.
 - 실패나 쿼터 소진이 확인된 경우에만 Provider를 교체합니다.
-- Agent는 `submitted`까지만 제안하고 사용자가 `completed`를 승인합니다.
+- `submitted` 전이 시 Harness가 Acceptance Criteria의 `verified_by` 명령을 직접 실행합니다. Agent의 자기 보고만으로는 통과하지 못합니다.
+- Agent는 `submitted`까지만 제안하고 사용자가 `completed`를 승인합니다. `transition`·`approve`는 Harness가 추적 중인 Agent Pane(`dispatch`·`adopt` 모두)에서 호출하면 거부됩니다.
 - Skill과 정책은 운영 지침이며 OS 수준의 보안 격리는 아닙니다.
 
 자세한 내용은 [ARCHITECTURE.md](ARCHITECTURE.md)를 참고하세요.

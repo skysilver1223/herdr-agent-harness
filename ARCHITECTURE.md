@@ -26,6 +26,7 @@ Spec(자산 조사 + 인터뷰) → SPEC 승인 → Plan → Work(구현 + 자�
 | `.agents/skills/` | 재사용 가능한 실행 절차 |
 | `.claude/skills/` | Claude가 공통 Skill을 읽기 위한 연결 |
 | `.harness/` | SPEC, Wave, Task, Intent, Attempt, Evidence, Review, Handover, Decision, Runtime 상태 |
+| `.harness/policies/` | 실행·쿼터·Agent 승인·루프·Review·원격 정책 (`project`·`quota`·`agent`·`loop`·`review`·`remote`.yaml) |
 | 사용자 | SPEC, Wave, Failover, Integration, 완료 승인 |
 
 ## 3. 역할
@@ -81,7 +82,29 @@ stateDiagram-v2
 
 Worker는 `completed`를 선언하지 않습니다. Reviewer는 품질 판정을 기록하고 사용자가 완료를 승인합니다.
 
-일반 상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`를 사용합니다. `submitted`에는 Attempt와 Evidence, `handover_required`에는 `.harness/handovers/TASK-handover-*.md` 인계 문서, `awaiting_approval`에는 `판정: APPROVED`인 Review가 필요합니다. 사용자가 완료를 명시적으로 승인한 뒤에는 `herdr-harness approve PATH TASK_ID --confirm-user-approval`이 승인 기록을 원자적으로 만들고 기존 `transition ... completed` 게이트를 호출합니다. 수동 승인 파일과 직접 `transition`하는 기존 흐름도 유지됩니다.
+일반 상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`를 사용합니다. `submitted`에는 Attempt와 Evidence(정본 YAML — 이름과 필수 필드를 함께 확인), `handover_required`에는 `.harness/handovers/TASK-handover-*.md` 인계 문서, `awaiting_approval`에는 `판정: APPROVED`인 Review가 필요합니다. 또한 `submitted` 전이에서는 Harness가 Task의 `acceptance_criteria[].verified_by`를 **직접 실행**하고 하나라도 실패하면 전이를 거부합니다(§5.1). 사용자가 완료를 명시적으로 승인한 뒤에는 `herdr-harness approve PATH TASK_ID --confirm-user-approval`이 승인 기록을 원자적으로 만들고 기존 `transition ... completed` 게이트를 호출합니다. 수동 승인 파일과 직접 `transition`하는 기존 흐름도 유지됩니다.
+
+### 5.1 Acceptance Criteria 게이트
+
+`verified_by`는 지금까지 Skill 문서의 지시였을 뿐이라, Agent가 실행하지 않았거나 실패를 무시해도 `submitted`로 넘어갔습니다. 이제 게이트를 Harness가 직접 잡습니다.
+
+- `type: command` — 프로젝트 루트에서 실행하고 종료 코드로 판정합니다. 명령당 제한 시간은 `project-policy.yaml`의 `acceptance_check_timeout_seconds`(기본 600초)이며, TERM을 무시하는 명령도 끝나도록 강제 종료를 겁니다.
+- `type: manual-review` — 자동 검증이 불가능하므로 `manual`로 기록만 하고 막지 않습니다. 판단은 Reviewer 몫입니다.
+- `acceptance_criteria`가 비어 있으면 `submitted`로 전이할 수 없습니다.
+- 원격 실행 모드(§11.1)에서는 같은 명령을 원격에서 실행하며, 원격에도 같은 제한 시간을 겁니다.
+- 결과는 `.harness/evidence/TASK-attempt-N-checks.yaml`(기준별 `exit_code`·`result`·`output_tail`, `summary`)에 남고 다음 Context Packet에 주입됩니다.
+
+### 5.2 Evidence 구조
+
+Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실제 저장소 상태가 일치하는가" 하나입니다. 그 판단에 쓰이는 필드만 정본으로 두고 긴 원문은 분리합니다(Agent에게 보낸 Context Packet 전문은 Evidence가 아니라 `.harness/runtime/`에 있습니다).
+
+| 파일 | 성격 | Git |
+|---|---|---|
+| `evidence/TASK-<role>-attempt-N.yaml` | 정본 — `task`·`role`·`attempt`·`result`·`changes`(`git status --short`)·`status`·`raw` | 추적 |
+| `evidence/TASK-attempt-N-checks.yaml` | AC 검증 결과 | 추적 |
+| `evidence/raw/TASK-<role>-attempt-N.md` | 원문 덤프 — `git status --short`/`diff --stat`, Agent 상태·출력, `observe` 관측 기록 | 제외 |
+
+정본은 `dispatch`/`observe`만 만들고, 게이트는 글롭이 아니라 이름과 필수 필드를 함께 봅니다 — 빈 YAML 하나로는 통과하지 못합니다. Secret 의심 패턴이 발견되면 원문 대신 요약만 남깁니다.
 
 ## 6. Skills
 
@@ -103,13 +126,29 @@ Worker는 `completed`를 선언하지 않습니다. Reviewer는 품질 판정을
 1. `init`이 프로젝트 파일과 Git 저장소를 만들고 가능한 경우 기준 commit을 생성합니다.
 2. `harness-spec`(자산 조사 + 인터뷰)과 `harness-plan` 후 사용자가 SPEC과 Wave를 승인합니다.
 3. Orchestrator가 `validate [PATH] --wave ID`로 실행 전제를 검사합니다.
-4. `transition ... active` 후 `dispatch ... worker`로 Worker 한 턴만 실행합니다.
+4. `transition ... active` 후 `dispatch ... worker`로 Worker 한 턴만 실행합니다. Herdr나 Provider CLI 문제로 이 경로가 막히면 `dispatch ... --print-only`로 실행할 명령만 받아 사람이 직접 띄운 뒤 `adopt`로 등록합니다(§7.1).
 5. `blocked`, `timeout`, `stalled`이면 `observe`로 상태를 재조회하고 Orchestrator가 사용자 질문, 대기 또는 중단을 결정합니다.
-6. Attempt와 Evidence가 준비되면 `transition ... submitted`, 이어서 `transition ... reviewing`을 수행합니다.
+6. Attempt와 Evidence가 준비되면 `transition ... submitted`를 수행합니다. 이 시점에 Harness가 Acceptance Criteria를 직접 실행하고, 모두 통과해야 전이됩니다(§5.1). 이어서 `transition ... reviewing`을 수행합니다.
 7. `dispatch ... reviewer`로 다른 Provider의 읽기 전용 Review 한 턴을 실행합니다.
 8. Review 판정에 따라 `changes_requested` 또는 `awaiting_approval`로 전이합니다.
 9. 사용자가 현재 Task의 완료를 명시적으로 승인한 뒤 Orchestrator가 `approve ... --confirm-user-approval`을 호출합니다. 명령은 Task ID·`awaiting_approval`·최신 `APPROVED` Review를 검증하고 승인 파일을 원자적으로 기록한 뒤 기존 `transition` 게이트로 `completed` 전이합니다. 사용자 의도를 추론하거나 무승인으로 호출하지 않습니다.
 10. 등록된 Agent는 `close-agent`, 전체 상태는 `status --live`로 정리·관측합니다.
+
+### 7.1 Agent 생성 경로와 승인 정책
+
+기본은 `dispatch`입니다. 취향이 아니라 구조 때문입니다 — `transition` 게이트가 Attempt·Evidence의 존재를 요구하므로, Agent 생성을 사람 손에 넘기면 그 게이트가 헐거워집니다. `dispatch`에서만 `pane_id`·`agent_name`·baseline commit·승인 모드가 자동 기록되고, `observe`·`close-agent`·`quota-check`·`auto-step`이 그 Agent를 찾을 수 있습니다.
+
+`--print-only`는 상태를 전혀 남기지 않고(Context Packet만 씀) 실행할 `herdr` 명령만 출력하는 폴백이며, `adopt`는 `herdr agent get`으로 생존을 확인한 뒤에만 등록합니다. `adopt`로 등록한 Pane은 사람이 만든 것이므로 `close-agent`가 `--force` 없이는 닫지 않습니다.
+
+`dispatch`는 `.harness/policies/agent-policy.yaml`의 `approval_mode`에 따라 Provider CLI에 승인 우회 인수를 붙입니다.
+
+| 모드 | 의미 |
+|---|---|
+| `ask` | Provider 기본값, 매번 물어봄 |
+| `auto` (기본값) | 파일 편집·작업 트리 안 명령은 자동 승인 |
+| `bypass` | 도구 실행 승인을 전부 건너뜀 |
+
+사라지는 것은 **도구 단위 승인**뿐이며 상태 전이와 완료 승인은 그대로 사람 몫입니다. 정책 파일은 임의의 Provider 옵션을 넣는 통로가 아니라, Provider별·모드별로 허용 플래그와 값이 고정된 표입니다. 실제로 쓰인 모드와 인수는 Attempt·Evidence에 기록되고, 이 파일이 없는 예전 프로젝트에서는 인수를 붙이지 않습니다(= `ask`).
 
 ## 8. 실패와 쿼터
 
@@ -158,6 +197,9 @@ Provider를 바꾸지 않습니다** — 아래 확인된 실패 조건과 별�
 - 현재 Task Contract 전문 — `write_scope`·`resources`·`inputs`·`acceptance_criteria`가 이 YAML 안에 있음
 - 착수 게이트·제외 범위·불변식은 Task의 `intent.md`를 읽으라는 안내 한 줄
 - 다음 한 단계 (Worker는 submitted 제안까지, Reviewer는 읽기 전용 판정 기록)
+- 직전 라운드 — 최신 Worker·Reviewer Evidence 정본, 최신 AC 검증 결과, 최신 Review 판정과 발췌. 없으면 통째로 생략합니다.
+
+직전 라운드를 넣지 않으면 `changes_requested` 재시도에서 Worker가 Reviewer의 지적을 못 본 채 같은 접근을 반복합니다. 대상은 "가장 큰 attempt 번호"가 아니라 파일이 실제로 존재하는 최근 attempt이며(Reviewer가 attempt를 하나 더 만드는 일반적인 재작업 흐름에서 Worker 증적이 통째로 빠지지 않도록), 길이를 예측할 수 없는 Review·checks는 줄 수와 줄 길이를 함께 잘라 넣습니다.
 
 같은 사실을 재추출해 덧붙이던 `## Write scope`·`## References and inputs`·`## Verification commands` 블록은 중복이라 제거됐습니다(모두 Task Contract YAML 안에 이미 있음).
 
@@ -210,6 +252,7 @@ Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않�
 ## 12. 보안과 신뢰 경계
 
 - `write_scope`와 Skill은 운영 지침이지 Sandbox가 아닙니다.
+- 승인 우회 모드에서는 Agent가 셸을 자유롭게 쓸 수 있으므로, 프롬프트 지시만으로는 Agent가 스스로 `approve`를 실행하는 것을 막을 수 없습니다. 그래서 `transition`과 `approve`는 호출한 Pane이 Harness가 추적 중인 Agent Pane(`dispatch`가 띄운 것과 `adopt`로 등록한 것 모두)이면 거부합니다 — 현재 Pane은 환경변수가 아니라 `herdr pane current`(터미널을 직접 보고 답함)를 우선 사용해 `.harness/runtime/*.meta`의 `pane_id`와 대조하므로, `HERDR_PANE_ID`를 `env -u`로 지우는 것만으로는 우회되지 않습니다. `herdr` 조회 자체가 실패하면 그 환경변수로 떨어지고, 그것도 비어 있으면 Pane을 특정할 수 없어 통과시킵니다 — 아래 단서 그대로 가드레일이지 경계가 아닙니다. `.meta`에 기록이 없는 사람·Orchestrator Pane은 영향받지 않습니다. 이것은 가드레일이지 보안 경계가 아닙니다(Agent는 사용자와 같은 권한이라 `.meta`나 스크립트 자체를 고칠 수 있습니다).
 - Secret을 Prompt, Evidence, Pane 기록에 넣지 않습니다.
 - 배포, 삭제, 외부 쓰기는 사용자 승인을 받습니다.
 - Worker의 자체 테스트만으로 완료하지 않습니다.
@@ -223,7 +266,7 @@ Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않�
 
 ### 선택적 고도화
 
-- Event Log와 Replay — `append_event`로 상태 전이(`transition`, `approve`가 호출한 완료 전이 포함)와 신규 `quota-retry`/`auto-step`/Task Lock 이벤트는 `.harness/evidence/events.tsv`에 남지만, `dispatch`/`observe`/`quota-check` 자체는 아직 기록하지 않고 Replay 도구도 없습니다 — 부분 구현.
+- Event Log와 Replay — `append_event`로 상태 전이(`transition`, `approve`가 호출한 완료 전이 포함), `sync-templates`, `adopt`, `quota-retry`/`auto-step`, Task Lock 회수 이벤트는 `.harness/evidence/events.tsv`에 남지만, `dispatch`/`observe`/`quota-check` 자체는 아직 기록하지 않고 Replay 도구도 없습니다 — 부분 구현.
 - SQLite Lease와 Controller Epoch
 - Fencing Token — §8.1/§8.2의 Task Lock(`mkdir` 기반)이 최소 버전으로 구현되어 있습니다. PID 생존 확인과 stale 회수까지만 하는 권고적 잠금이며, SQLite Lease/Epoch 수준의 완전한 Fencing Token은 아닙니다.
 - Atomic Outbox

@@ -534,6 +534,27 @@ test` 18 PASS, `init` 샘플 생성·`validate` 통과 확인.
 
 ---
 
+## 10. 2026-09-09~10 후속 — 문서 반영 완료 항목
+
+9-★(2026-09-06) 이후 추가된 기능과, 그것이 반영된 문서 위치를 남긴다.
+BACKLOG의 미결 항목은 아니며 기록용이다.
+
+| 기능 | 커밋 | 문서 |
+|---|---|---|
+| 원격 실행 모드(`remote`, `remote setup`) | `902eb5a`·`f9a15a5` | README `## 원격 실행 모드`, ARCHITECTURE §11.1 |
+| Bash 탭 완성(설명 포함) + `help <명령>` | `a9bfecb`·`9590926`·`c6ee9c6`·`799482e` | README `### 8-1`, `## 명령 사용법 찾기` |
+| Agent 승인 정책(`agent-policy.yaml`, `init --approval-mode`) | `aa99b21` | README `### Agent 승인 정책`, ARCHITECTURE §7.1·§12 |
+| dispatch 폴백(`--print-only` + `adopt`) | `aa99b21` | README `### Agent를 어떻게 띄우는가`, ARCHITECTURE §7.1 |
+| 호출자 게이트(Agent Pane의 `transition`/`approve` 거부) | `aa99b21` | README `## 운영 원칙`, ARCHITECTURE §12 |
+| Acceptance Criteria 게이트(Harness 직접 실행) | `4bfb871` | README `### Acceptance Criteria 게이트`, ARCHITECTURE §5.1 |
+| Evidence 정본 YAML ↔ `raw/` 분리 | `4bfb871` | README `### Evidence 구조`, ARCHITECTURE §5.2 |
+| Context Packet 직전 라운드 주입 | `4bfb871` | README `### Context Packet에 직전 라운드가 들어간다`, ARCHITECTURE §9 |
+
+`bash harness.sh test` 26 PASS 기준이다(항목 6의 "12개 PASS", 9-12의 "18 PASS"는
+그 시점 기록이다).
+
+---
+
 ## 참고: 이번 작업에서 확정한 설계 원칙
 
 Codex는 처음 `run-wave` 자율 루프를 제안했고 AGY는 설계 철학(`unattended_execution: false`) 위반이라
