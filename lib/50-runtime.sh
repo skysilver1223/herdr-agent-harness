@@ -71,9 +71,15 @@ _runtime_yaml_scalar() {
 # YAML/헤더 형태('token: ...', 'Authorization: Bearer ...')와 Provider 토큰
 # 접두사를 통째로 놓쳤다 — Evidence·Review를 Context Packet에 넣기 시작하면서
 # 사람이 붙여 넣은 값이 그대로 Agent에게 흘러갈 수 있는 경로가 생겼다.
+# Provider 토큰 접두사는 단어 경계에서만 본다.
+#
+# 앞 문자를 보지 않으면 sk-·ghp_ 같은 접두사가 낱말 가운데서도 걸린다 —
+# ta"sk-political-lri-trend" 같은 평범한 Task ID가 OpenAI 키로 오인돼
+# Context Packet 생성이 거부되고, 그 프로젝트에서는 dispatch가 Provider와
+# 무관하게 영구히 막힌다(실제로 발생했다). 앞이 영숫자·_·-가 아닐 때만 본다.
 _runtime_has_secret() {
   LC_ALL=C grep -Eqi \
-    'AKIA[0-9A-Z]{8,}|BEGIN[[:space:]]+(RSA |EC |DSA |OPENSSH )?PRIVATE KEY|(password|passwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)[[:space:]]*[:=][[:space:]]*[^[:space:]]|authorization[[:space:]]*:[[:space:]]*(bearer|basic)[[:space:]]|(gh[pousr]_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.)' \
+    'AKIA[0-9A-Z]{8,}|BEGIN[[:space:]]+(RSA |EC |DSA |OPENSSH )?PRIVATE KEY|(password|passwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)[[:space:]]*[:=][[:space:]]*[^[:space:]]|authorization[[:space:]]*:[[:space:]]*(bearer|basic)[[:space:]]|(^|[^A-Za-z0-9_-])(gh[pousr]_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.)' \
     "$1"
 }
 

@@ -1107,6 +1107,36 @@ STUB
   set -e
   [[ "$failure_status" -ne 0 ]] || die "없는 명령에 대한 help가 성공으로 끝났습니다."
 
+  # --- Secret 스캐너: 낱말 가운데 접두사는 오탐이 아니어야 한다 -------------
+  #
+  # ta"sk-..." 처럼 평범한 Task ID가 OpenAI 키 패턴에 걸리면 Context Packet
+  # 생성이 거부되고 그 프로젝트의 dispatch가 Provider와 무관하게 영구히 막힌다.
+  # 반대로 진짜 접두사는 계속 걸려야 하므로 양방향으로 본다.
+  local secret_probe
+  secret_probe="$(mktemp)"
+  local benign_sample malicious_sample
+  for benign_sample in \
+    'task-political-lri-trend' \
+    'task-overview-today-summary-attempt-1' \
+    '.harness/reviews/task-cross-domain-news-counts-review-1.md'; do
+    printf '%s\n' "$benign_sample" >"$secret_probe"
+    if _runtime_has_secret "$secret_probe"; then
+      rm -f -- "$secret_probe"
+      die "Secret 스캐너가 평범한 식별자를 Secret으로 오탐했습니다: $benign_sample"
+    fi
+  done
+  for malicious_sample in \
+    'OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwx' \
+    'token: ghp_abcdefghijklmnopqrstuv' \
+    'Authorization: Bearer abcdef'; do
+    printf '%s\n' "$malicious_sample" >"$secret_probe"
+    if ! _runtime_has_secret "$secret_probe"; then
+      rm -f -- "$secret_probe"
+      die "Secret 스캐너가 실제 Secret 패턴을 놓쳤습니다: $malicious_sample"
+    fi
+  done
+  rm -f -- "$secret_probe"
+
   rm -rf -- "$test_root"
   trap - EXIT
 
@@ -1120,6 +1150,7 @@ STUB
   printf 'PASS: 비대화형 명시적 실패\n'
   printf 'PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)\n'
   printf 'PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)\n'
+  printf 'PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)\n'
   printf 'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)\n'
   printf 'PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)\n'
   printf 'PASS: 이벤트 로그 기록\n'

@@ -874,6 +874,23 @@ agy --version
 herdr-harness doctor
 ```
 
+### `dispatch`가 `stalled`로 끝나고 Agent가 확인 화면에 멈춰 있음
+
+Provider CLI가 **디렉터리마다 최초 1회** 띄우는 확인 화면이 있습니다. 이 화면은 승인 정책(`agent-policy.yaml`)으로 건너뛸 수 없고, `dispatch`가 보낸 Context Packet이 그 화면에 입력돼 사라집니다.
+
+- agy: `Do you trust the contents of this project?`
+- claude: `--permission-mode bypassPermissions`의 첫 확인 화면
+
+```bash
+herdr-harness observe . TASK_ID reviewer          # 지금 어느 화면인지 확인
+herdr agent read hh-...-r-1 --source visible      # 화면 직접 확인
+herdr agent send-keys hh-...-r-1 enter            # 확인 화면 응답(내용을 보고 사람이 판단)
+herdr agent prompt hh-...-r-1 "$(cat .harness/runtime/TASK_ID-context-ROLE.md)" --wait --timeout 240000
+herdr-harness observe . TASK_ID reviewer          # Evidence 갱신
+```
+
+같은 디렉터리에서 한 번 응답하면 이후 `dispatch`는 그대로 통과합니다. claude에서 이 화면을 피하려면 `approval_mode: auto`(`acceptEdits`)를 씁니다.
+
 ### 자체 테스트에서 YAML 검사를 건너뜀
 
 PyYAML은 선택 사항입니다. YAML 파싱까지 검사하려면:
