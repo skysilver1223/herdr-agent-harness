@@ -29,7 +29,9 @@ Agent Loop 스텝 명령 (호출 1회 = 1스텝, 상주 루프 없음):
   $SCRIPT_NAME validate [PATH] [--wave ID]        읽기 전용 사전 검증
   $SCRIPT_NAME transition PATH TASK_ID TO_STATE   상태 전이 강제
   $SCRIPT_NAME dispatch PATH TASK_ID ROLE         Agent 한 턴 실행
+  $SCRIPT_NAME dispatch PATH TASK_ID ROLE --print-only  Pane을 만들지 않고 실행할 명령만 출력(폴백)
   $SCRIPT_NAME observe PATH TASK_ID [ROLE]        기존 Agent 재조회
+  $SCRIPT_NAME adopt PATH TASK_ID ROLE --pane ID --agent NAME  사람이 띄운 Agent를 Harness에 등록
   $SCRIPT_NAME close-agent PATH TASK_ID [ROLE]    Harness가 만든 Pane 정리
   $SCRIPT_NAME quota-check PATH TASK_ID ROLE       실행 중인 Agent의 쿼터 확인(claude/codex는 /status, agy는 --print)
   $SCRIPT_NAME quota-check PATH --provider agy    Task 없이 agy 쿼터만 바로 확인
@@ -44,6 +46,7 @@ init 옵션:
   --worker PROVIDER               claude | codex | agy
   --reviewer PROVIDER             claude | codex | agy
   --fallback PROVIDERS            쉼표 구분 Provider 목록
+  --approval-mode MODE            Agent 도구 실행 승인: ask | auto | bypass (기본 auto)
   --remote-host HOST              원격 실행 모드 활성화(SSH 호스트)
   --remote-user USER              원격 계정 (기본: 현재 사용자)
   --remote-path PATH              원격 프로젝트 경로 (--remote-host 사용 시 필수)

@@ -185,10 +185,19 @@ cmd_auto_step() {
     cmd_transition "$root" "$task_id" active --note "auto-step"
   fi
 
-  local turn=1 result
+  local turn=1 result dispatch_status
   set +e
   result="$(cmd_dispatch "$root" "$task_id" worker)"
+  dispatch_status=$?
   set -e
+  # dispatch가 dispatch_result를 내기도 전에 죽는 경우가 있다(정책 값 오류 등).
+  # 종료 상태를 안 보면 그 실패가 빈 result로 기록되고 auto-step은 성공으로
+  # 끝난다 — 오류가 조용히 사라진다.
+  if [[ "$result" != *dispatch_result=* ]]; then
+    append_event "$root" auto_step_turn "$task_id" active error "turn=$turn/$max_turns action=dispatch exit=$dispatch_status"
+    printf '%s\n' "$result" >&2
+    die "auto-step: dispatch가 결과를 내지 못하고 종료했습니다 (exit $dispatch_status)."
+  fi
   result="${result#*dispatch_result=}"
   append_event "$root" auto_step_turn "$task_id" active "$result" "turn=$turn/$max_turns action=dispatch"
 

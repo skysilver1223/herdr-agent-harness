@@ -70,6 +70,7 @@ cmd_init() {
   local name="" goal="" profile="generic"
   local orchestrator="claude" worker="codex" reviewer="agy" fallback="claude,agy"
   local remote_host="" remote_user="" remote_path="" remote_mount="" remote_vcs="git"
+  local approval_mode="auto"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -80,6 +81,7 @@ cmd_init() {
       --worker) [[ $# -ge 2 ]] || die "--worker 값이 필요합니다."; worker="$2"; shift 2 ;;
       --reviewer) [[ $# -ge 2 ]] || die "--reviewer 값이 필요합니다."; reviewer="$2"; shift 2 ;;
       --fallback) [[ $# -ge 2 ]] || die "--fallback 값이 필요합니다."; fallback="$2"; shift 2 ;;
+      --approval-mode) [[ $# -ge 2 ]] || die "--approval-mode 값이 필요합니다."; approval_mode="$2"; shift 2 ;;
       --remote-host) [[ $# -ge 2 ]] || die "--remote-host 값이 필요합니다."; remote_host="$2"; shift 2 ;;
       --remote-user) [[ $# -ge 2 ]] || die "--remote-user 값이 필요합니다."; remote_user="$2"; shift 2 ;;
       --remote-path) [[ $# -ge 2 ]] || die "--remote-path 값이 필요합니다."; remote_path="$2"; shift 2 ;;
@@ -104,6 +106,10 @@ cmd_init() {
   valid_provider "$worker" || die "지원하지 않는 Worker입니다: $worker"
   valid_provider "$reviewer" || die "지원하지 않는 Reviewer입니다: $reviewer"
   [[ "$worker" != "$reviewer" ]] || die "Worker와 Reviewer는 다른 Provider여야 합니다."
+  case "$approval_mode" in
+    ask|auto|bypass) ;;
+    *) die "지원하지 않는 --approval-mode입니다: $approval_mode (ask | auto | bypass)" ;;
+  esac
 
   # 원격 실행 모드는 --remote-host가 있을 때만 켜진다. 나머지 프로젝트는
   # remote.yaml이 enabled: false로 생성되고 remote 명령이 즉시 거부한다.
@@ -263,6 +269,9 @@ execution:
   # 사용자 승인 없이 다음 Wave로 진행하지 않는다.
   unattended_execution: false
   rebase_while_attempt_running: false
+  # transition submitted가 acceptance_criteria의 verified_by 명령을 직접 실행할 때
+  # 명령 하나당 허용하는 최대 시간(초).
+  acceptance_check_timeout_seconds: 600
 
 security:
   # 운영 지침이며 OS 수준 Sandbox는 아니다.
@@ -313,6 +322,42 @@ quota_policy:
   # dispatch/observe는 Agent 출력에서 알려진 쿼터 경고 문구를 지나가는 김에
   # 스캔해 evidence에 "쿼터 신호(자동 감지)" 절로 남긴다(확정 아님, 참고용).
   passive_scan_on_dispatch: true
+EOF
+
+  # Agent 승인 정책 정본. dispatch가 Agent를 띄울 때 Provider CLI에 붙일
+  # 인수를 여기서 정한다. 도구 실행(파일 편집·셸 명령) 승인만 대상이며,
+  # 작업 방향성에 대한 판단은 그대로 사람에게 남는다 — Task 상태 전이와
+  # 완료 승인은 Agent가 아니라 herdr-harness transition/approve로만 가능하다.
+  write_file "$target" ".harness/policies/agent-policy.yaml" <<EOF
+schema_version: '1.0'
+agent_policy:
+  # ask    : Provider 기본값. 도구 실행마다 사용자에게 물어본다.
+  # auto   : 작업 트리 안의 편집·명령은 묻지 않고 실행한다. 기본값.
+  #          트리 밖 쓰기·네트워크처럼 그 범위를 벗어나는 작업의 처리는
+  #          Provider마다 다르다 — claude(acceptEdits)는 사용자에게 묻고,
+  #          codex(--ask-for-approval never + --sandbox workspace-write)는
+  #          묻지 않고 즉시 실패를 모델에 돌려준다. 묻게 하려면 codex_auto를
+  #          '--ask-for-approval on-request --sandbox workspace-write'로 바꾼다.
+  # bypass : 도구 실행 승인을 전부 건너뛴다. Git 기준선이 있고 write_scope로
+  #          범위가 묶인 프로젝트에서만 쓴다.
+  approval_mode: '$approval_mode'
+
+  # approval_mode를 Provider CLI 인수로 옮기는 표. dispatch는 이 값을 공백으로
+  # 나눠 \`herdr agent start ... -- <인수>\`로 그대로 넘긴다. 빈 값이면 인수를
+  # 붙이지 않는다(= 그 Provider는 ask와 같게 동작한다).
+  #
+  # Provider CLI가 바뀌면 코드가 아니라 이 표를 고친다. 허용 문자는
+  # 영문·숫자와 = _ . / - 뿐이다 — 그 밖의 문자가 있으면 dispatch가 거부한다.
+  #
+  # 주의: claude의 bypassPermissions는 디렉터리마다 처음 한 번 확인 화면을
+  # 띄울 수 있다. 그러면 agent start가 그 화면에서 멈춘다 — 그런 경우 auto
+  # (acceptEdits)를 쓰거나, 이미 확인을 마친 디렉터리에서만 bypass를 쓴다.
+  claude_auto: '--permission-mode acceptEdits'
+  claude_bypass: '--permission-mode bypassPermissions'
+  codex_auto: '--ask-for-approval never --sandbox workspace-write'
+  codex_bypass: '--dangerously-bypass-approvals-and-sandbox'
+  agy_auto: '--mode accept-edits'
+  agy_bypass: '--dangerously-skip-permissions'
 EOF
 
   write_file "$target" ".harness/policies/loop-policy.yaml" <<'EOF'
@@ -433,6 +478,29 @@ EOF
 # 않고 diff만 보여준다 — 병합은 사람이 판단한다.
 # ---------------------------------------------------------------------------
 
+# 기존 프로젝트의 .gitignore에 Harness가 요구하는 줄이 빠져 있으면 채운다.
+# evidence/raw/ 처럼 나중에 생긴 경로는 init 시점에만 쓰이면 기존 프로젝트에
+# 영영 반영되지 않아, Agent 출력 덤프가 untracked로 노출된다.
+_sync_gitignore() {
+  # local은 빌트인이라 인자가 "할당 전에" 한꺼번에 단어 확장된다. 같은 local
+  # 안에서 방금 선언한 변수를 참조하면 set -u에서 unbound로 죽는다 — 분리한다.
+  local target="$1" apply="$2"
+  local file="$target/.gitignore" line
+  local missing=()
+  local required=(".harness/runtime/" ".harness/evidence/raw/" ".harness/worktrees/" ".harness/remote-mount/")
+  [[ -f "$file" ]] || return 0
+  for line in "${required[@]}"; do
+    grep -qxF "$line" "$file" || missing+=("$line")
+  done
+  (( ${#missing[@]} > 0 )) || return 0
+  if [[ "$apply" == apply ]]; then
+    printf '%s\n' "${missing[@]}" >>"$file"
+    info ".gitignore에 누락된 줄을 추가했습니다: ${missing[*]}"
+  else
+    info ".gitignore에 추가될 줄(--apply 필요): ${missing[*]}"
+  fi
+}
+
 cmd_sync_templates() {
   local root_arg="." apply=0
   while [[ $# -gt 0 ]]; do
@@ -552,6 +620,8 @@ cmd_sync_templates() {
     fi
     rm -f "$generated"
   done
+
+  _sync_gitignore "$root" "$([[ "$apply" -eq 1 ]] && printf apply || printf dry-run)"
 
   # dry-run에서는 SYNC_WOULD_CHANGE에, apply에서는 SYNC_CHANGED에 쌓인다 —
   # 둘 다 아니라 SYNC_CHANGED만 세면 dry-run 요약이 항상 "변경 0"으로

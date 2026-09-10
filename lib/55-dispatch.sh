@@ -2,12 +2,13 @@
 
 
 cmd_dispatch() {
-  local path="${1:-}" task_id="${2:-}" role="${3:-}" timeout=120000
-  [[ -n "$path" && -n "$task_id" && -n "$role" ]] || die "사용법: dispatch PATH TASK_ID ROLE(worker|reviewer) [--timeout MS]"
+  local path="${1:-}" task_id="${2:-}" role="${3:-}" timeout=120000 print_only=0
+  [[ -n "$path" && -n "$task_id" && -n "$role" ]] || die "사용법: dispatch PATH TASK_ID ROLE(worker|reviewer) [--timeout MS] [--print-only]"
   shift 3
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --timeout) [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || die "--timeout에는 양의 밀리초가 필요합니다."; timeout="$2"; shift 2 ;;
+      --print-only) print_only=1; shift ;;
       *) die "알 수 없는 dispatch 옵션: $1" ;;
     esac
   done
@@ -21,8 +22,13 @@ cmd_dispatch() {
   root="$(project_root "$path")"
   task_file="$root/.harness/tasks/$task_id.yaml"
   [[ -f "$task_file" ]] || die "Task YAML을 찾을 수 없습니다: $task_file"
-  command -v herdr >/dev/null 2>&1 || die "herdr 명령을 찾을 수 없습니다."
-  [[ "${HERDR_ENV:-}" == 1 ]] || die "dispatch는 Herdr Pane 안에서 실행해야 합니다."
+  # --print-only는 Pane을 만들지도 Agent를 띄우지도 않는다. Context Packet과
+  # 실행할 명령만 출력하므로 Herdr 안이 아니어도 된다 — Herdr나 Provider가
+  # 깨졌을 때 수동으로 진행하기 위한 폴백 경로다.
+  if (( print_only == 0 )); then
+    command -v herdr >/dev/null 2>&1 || die "herdr 명령을 찾을 수 없습니다."
+    [[ "${HERDR_ENV:-}" == 1 ]] || die "dispatch는 Herdr Pane 안에서 실행해야 합니다."
+  fi
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "Git 저장소가 아닙니다: $root"
 
   runtime_dir="$root/.harness/runtime"
@@ -41,6 +47,20 @@ cmd_dispatch() {
     provider="$(_runtime_yaml_scalar "$task_file" reviewer)"
   fi
   [[ "$provider" =~ ^(claude|codex|agy)$ ]] || die "Task의 Provider가 유효하지 않습니다: $provider"
+
+  # 도구 실행 승인만 정책으로 건너뛴다. 작업 방향성(상태 전이·완료 승인)은
+  # 여기서 바뀌지 않는다 — transition/approve를 거쳐야만 움직인다.
+  local approval_mode agent_args_raw
+  local -a agent_args=()
+  approval_mode="$(_runtime_approval_mode "$root")"
+  # _runtime_agent_args는 die하지 않고 반환값으로 실패를 알린다 — auto-step처럼
+  # cmd_dispatch가 커맨드 치환 안에서 불릴 때 안쪽 die가 삼켜지면 검증 실패가
+  # 조용한 무인수 실행으로 바뀌기 때문이다. 여기서 명시적으로 멈춘다.
+  if ! agent_args_raw="$(_runtime_agent_args "$root" "$provider")"; then
+    die "agent-policy.yaml의 승인 정책 값이 유효하지 않아 dispatch를 중단합니다."
+  fi
+  read -r -a agent_args <<<"$agent_args_raw"
+
   attempt="$(_runtime_next_attempt "$root" "$task_id")"
   started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
   baseline="$(git -C "$root" rev-parse HEAD 2>/dev/null || printf 'unborn')"
@@ -48,6 +68,34 @@ cmd_dispatch() {
   agent_name="hh-${task_slug//[^a-z0-9_-]/-}-${role:0:1}-$attempt"
   agent_name="${agent_name:0:32}"
   [[ "$agent_name" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "생성된 Agent 이름이 유효하지 않습니다: $agent_name"
+
+  if (( print_only == 1 )); then
+    # 여기서 상태를 남기지 않는다 — 아직 아무것도 시작하지 않았기 때문이다.
+    # Attempt·Evidence·meta는 사람이 실제로 Agent를 띄운 뒤 adopt가 만든다.
+    # 출력한 줄은 사람이 그대로 복사해 셸에 붙여 넣는다. 경로에 공백이나
+    # 세미콜론이 있으면 잘못 분리되거나 명령이 하나 더 실행된다 — %q로 인용한다.
+    local quoted_root quoted_context quoted_path
+    printf -v quoted_root '%q' "$root"
+    printf -v quoted_context '%q' "$context"
+    printf -v quoted_path '%q' "$path"
+    printf 'Context Packet: %s\n\n' "$context"
+    printf '아래를 Herdr Pane 안에서 차례로 실행한 뒤, 마지막 adopt로 Harness에 등록한다.\n'
+    printf '(PANE_ID는 첫 명령이 출력하는 pane_id로 바꾼다.)\n\n'
+    printf '  herdr pane split --current --direction right --cwd %s --no-focus\n' "$quoted_root"
+    if [[ -n "$agent_args_raw" ]]; then
+      printf '  herdr agent start %s --kind %s --pane PANE_ID --timeout %s -- %s\n' \
+        "$agent_name" "$provider" "$timeout" "$agent_args_raw"
+    else
+      printf '  herdr agent start %s --kind %s --pane PANE_ID --timeout %s\n' \
+        "$agent_name" "$provider" "$timeout"
+    fi
+    printf '  herdr agent prompt %s "$(cat %s)" --wait --timeout %s\n' "$agent_name" "$quoted_context" "$timeout"
+    printf '  %s adopt %s %s %s --pane PANE_ID --agent %s\n\n' \
+      "$SCRIPT_NAME" "$quoted_path" "$task_id" "$role" "$agent_name"
+    printf '승인 모드: %s / Provider 인수: %s\n' "$approval_mode" "${agent_args_raw:-(없음)}"
+    printf 'dispatch_result=print_only\n'
+    return 0
+  fi
 
   set +e
   pane_output="$(herdr pane split --current --direction right --cwd "$root" --no-focus 2>&1)"
@@ -67,13 +115,13 @@ cmd_dispatch() {
   temporary="$(mktemp "$root/.harness/attempts/.attempt.XXXXXX")"
   {
     printf '# Attempt %s: %s\n\n' "$attempt" "$task_id"
-    printf -- '- Started: %s\n- Role: %s\n- Provider: %s\n- Pane ID: %s\n- Agent name: %s\n- Baseline commit: %s\n' "$started_at" "$role" "$provider" "$pane_id" "$agent_name" "$baseline"
+    printf -- '- Started: %s\n- Role: %s\n- Provider: %s\n- Pane ID: %s\n- Agent name: %s\n- Baseline commit: %s\n- Approval mode: %s\n- Provider args: %s\n' "$started_at" "$role" "$provider" "$pane_id" "$agent_name" "$baseline" "$approval_mode" "${agent_args_raw:-(없음)}"
   } >"$temporary"
   _runtime_atomic_copy "$temporary" "$attempt_file"
   rm -f -- "$temporary"
 
   set +e
-  start_output="$(_runtime_start_agent_when_ready "$agent_name" "$provider" "$pane_id" "$timeout")"
+  start_output="$(_runtime_start_agent_when_ready "$agent_name" "$provider" "$pane_id" "$timeout" 30 "${agent_args[@]}")"
   start_status=$?
   set -e
   if (( start_status != 0 )); then
@@ -99,11 +147,12 @@ cmd_dispatch() {
   local quota_signal
   quota_signal="$(_runtime_scan_quota_signal "$prompt_output"$'\n'"$read_output" || true)"
 
-  evidence_file="$root/.harness/evidence/$task_id-$role-attempt-$attempt.md"
+  evidence_file="$(_runtime_evidence_raw_path "$root" "$task_id" "$role" "$attempt")"
+  mkdir -p "$(dirname "$evidence_file")"
   temporary="$(mktemp "$root/.harness/evidence/.capture.XXXXXX")"
   {
     printf '# Evidence: %s / %s / Attempt %s\n\n' "$task_id" "$role" "$attempt"
-    printf -- '- Captured: %s\n- Dispatch result: %s\n- Prompt exit: %s\n- Agent get exit: %s\n- Agent read exit: %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$result" "$prompt_status" "$get_status" "$read_status"
+    printf -- '- Captured: %s\n- Dispatch result: %s\n- Approval mode: %s\n- Prompt exit: %s\n- Agent get exit: %s\n- Agent read exit: %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$result" "$approval_mode" "$prompt_status" "$get_status" "$read_status"
     printf '## Git status --short\n\n'
     git -C "$root" status --short 2>&1 || true
     printf '\n## Git diff --stat\n\n'
@@ -122,9 +171,95 @@ cmd_dispatch() {
   fi
   _runtime_atomic_copy "$temporary" "$evidence_file"
   rm -f -- "$temporary"
+  # 정본은 판단에 쓰이는 6필드 YAML이다. Reviewer와 transition은 이것만 읽는다.
+  _runtime_write_evidence_yaml "$root" "$task_id" "$role" "$attempt" "$result" \
+    "dispatch 결과 $result (Provider $provider, 승인 모드 $approval_mode). 원문은 raw 참조." 0
   _runtime_write_result "$root" "$task_id" "$role" "$result"
   printf 'dispatch_result=%s\n' "$result"
   [[ "$result" == settled || "$result" == blocked ]]
+}
+
+# ---------------------------------------------------------------------------
+# adopt — 사람이 직접 띄운 Agent를 Harness 추적에 되돌려 넣는다.
+#
+# 기본 경로는 dispatch가 Pane 생성·Agent 실행·프롬프트까지 한 번에 하는 것이다
+# (그래야 Attempt·Evidence가 빠짐없이 남고 transition의 게이트가 성립한다).
+# adopt는 그 경로가 막혔을 때 — Herdr나 Provider CLI가 깨졌거나, 이미 띄워 둔
+# Agent를 이어서 쓰고 싶을 때 — 쓰는 폴백이다. `dispatch --print-only`가
+# 출력하는 마지막 명령이 바로 이것이다.
+# ---------------------------------------------------------------------------
+cmd_adopt() {
+  local path="${1:-}" task_id="${2:-}" role="${3:-}" pane_id="" agent_name="" provider=""
+  [[ -n "$path" && -n "$task_id" && -n "$role" ]] ||
+    die "사용법: adopt PATH TASK_ID ROLE(worker|reviewer) --pane PANE_ID --agent AGENT_NAME [--provider P]"
+  shift 3
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pane) [[ $# -ge 2 ]] || die "--pane 값이 필요합니다."; pane_id="$2"; shift 2 ;;
+      --agent) [[ $# -ge 2 ]] || die "--agent 값이 필요합니다."; agent_name="$2"; shift 2 ;;
+      --provider) [[ $# -ge 2 ]] || die "--provider 값이 필요합니다."; provider="$2"; shift 2 ;;
+      *) die "알 수 없는 adopt 옵션: $1" ;;
+    esac
+  done
+  [[ "$role" == worker || "$role" == reviewer ]] || die "ROLE은 worker 또는 reviewer여야 합니다."
+  _runtime_require_id "$task_id"
+  [[ -n "$pane_id" ]] || die "--pane PANE_ID가 필요합니다(herdr pane split이 출력한 값)."
+  [[ -n "$agent_name" ]] || die "--agent AGENT_NAME이 필요합니다(herdr agent start에 쓴 이름)."
+  [[ "$agent_name" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "Agent 이름 형식이 올바르지 않습니다: $agent_name"
+
+  local root task_file attempt baseline get_output get_status temporary attempt_file
+  root="$(project_root "$path")"
+  task_file="$root/.harness/tasks/$task_id.yaml"
+  [[ -f "$task_file" ]] || die "Task YAML을 찾을 수 없습니다: $task_file"
+  command -v herdr >/dev/null 2>&1 || die "herdr 명령을 찾을 수 없습니다."
+
+  if [[ -z "$provider" ]]; then
+    if [[ "$role" == worker ]]; then
+      provider="$(_runtime_yaml_scalar "$task_file" primary_worker)"
+    else
+      provider="$(_runtime_yaml_scalar "$task_file" reviewer)"
+    fi
+  fi
+  [[ "$provider" =~ ^(claude|codex|agy)$ ]] || die "Provider가 유효하지 않습니다: $provider"
+
+  # 등록하기 전에 그 Agent가 실제로 살아 있는지 확인한다. 죽은 이름을 등록하면
+  # observe·close-agent가 조용히 agent_lost만 반복하게 된다.
+  set +e
+  get_output="$(herdr agent get "$agent_name" 2>&1)"
+  get_status=$?
+  set -e
+  (( get_status == 0 )) || {
+    printf '%s\n' "$get_output" >&2
+    die "그 이름의 Agent를 Herdr에서 찾지 못했습니다: $agent_name"
+  }
+  # --pane 값을 그대로 믿지 않는다. 사용자가 오타를 내면 observe·close-agent가
+  # 엉뚱한 Pane을 보게 되고, 호출자 게이트도 잘못된 pane을 기준으로 판단한다.
+  local actual_pane
+  actual_pane="$(_runtime_json_field "$get_output" pane_id)"
+  [[ -n "$actual_pane" ]] ||
+    die "Herdr가 $agent_name 의 pane_id를 알려주지 않았습니다."
+  [[ "$actual_pane" == "$pane_id" ]] ||
+    die "--pane 값이 Herdr가 아는 Agent Pane과 다릅니다: 입력=$pane_id, 실제=$actual_pane"
+
+  mkdir -p "$root/.harness/runtime" "$root/.harness/attempts" "$root/.harness/evidence"
+  attempt="$(_runtime_next_attempt "$root" "$task_id")"
+  baseline="$(git -C "$root" rev-parse HEAD 2>/dev/null || printf 'unborn')"
+  _runtime_write_meta "$root" "$task_id" "$role" "$agent_name" "$pane_id" "$provider" "$attempt" 1
+
+  attempt_file="$root/.harness/attempts/$task_id-attempt-$attempt.md"
+  temporary="$(mktemp "$root/.harness/attempts/.attempt.XXXXXX")"
+  {
+    printf '# Attempt %s: %s\n\n' "$attempt" "$task_id"
+    printf -- '- Started: %s\n- Role: %s\n- Provider: %s\n- Pane ID: %s\n- Agent name: %s\n- Baseline commit: %s\n- Adopted: yes (사람이 띄운 Agent를 adopt로 등록)\n' \
+      "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$role" "$provider" "$pane_id" "$agent_name" "$baseline"
+  } >"$temporary"
+  _runtime_atomic_copy "$temporary" "$attempt_file"
+  rm -f -- "$temporary"
+
+  append_event "$root" agent_adopted "$task_id" "" "" "role=$role agent=$agent_name pane=$pane_id provider=$provider"
+  info "Agent를 Harness에 등록했습니다: $agent_name ($pane_id, attempt $attempt)"
+  printf '이제 %s observe %s %s %s 로 출력을 Evidence에 담을 수 있습니다.\n' "$SCRIPT_NAME" "$path" "$task_id" "$role"
+  printf 'adopt_result=ok\n'
 }
 
 cmd_observe() {
@@ -150,7 +285,8 @@ cmd_observe() {
   result="$(_runtime_normalize_state "$get_status" "$get_output" 0 "")"
   local quota_signal
   quota_signal="$(_runtime_scan_quota_signal "$read_output" || true)"
-  evidence="$root/.harness/evidence/$task_id-$role-attempt-$attempt.md"
+  evidence="$(_runtime_evidence_raw_path "$root" "$task_id" "$role" "$attempt")"
+  mkdir -p "$(dirname "$evidence")"
   addition="$(mktemp "$root/.harness/evidence/.observe.XXXXXX")"
   {
     printf '\n## Observation %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -162,6 +298,10 @@ cmd_observe() {
   } >"$addition"
   _runtime_append_evidence "$evidence" "$addition"
   rm -f -- "$addition"
+  local observations
+  observations="$(_runtime_evidence_observations "$(_runtime_evidence_yaml_path "$root" "$task_id" "$role" "$attempt")")"
+  _runtime_write_evidence_yaml "$root" "$task_id" "$role" "$attempt" "$result" \
+    "observe 결과 $result. 원문은 raw 참조." "$((observations + 1))"
   _runtime_write_result "$root" "$task_id" "$role" "$result"
   printf 'observe_result=%s\n' "$result"
 }
@@ -184,6 +324,12 @@ cmd_close_agent() {
   agent_name="$(_runtime_meta_value "$meta" agent_name)"
   pane_id="$(_runtime_meta_value "$meta" pane_id)"
   [[ -n "$agent_name" && -n "$pane_id" ]] || die "Runtime 기록이 손상되었습니다: $meta"
+  # "Harness가 만든 Pane만 정리한다"는 불변식. adopt로 등록한 Pane은 사람이
+  # 만든 것이므로 --force로 명시할 때만 닫는다.
+  local adopted
+  adopted="$(_runtime_meta_value "$meta" adopted)"
+  [[ "$adopted" != 1 || "$force" -eq 1 ]] ||
+    die "adopt로 등록한(사람이 만든) Pane입니다. --force 없이는 닫지 않습니다: $pane_id"
   set +e
   get_output="$(herdr agent get "$agent_name" 2>&1)"
   get_status=$?

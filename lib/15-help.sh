@@ -22,6 +22,7 @@ HARNESS_COMMAND_SUMMARIES=(
   "approve:사용자 승인을 기록하고 awaiting_approval을 completed로 만든다"
   "dispatch:Task와 역할에 맞는 Agent를 Pane에서 한 턴 실행한다"
   "observe:이미 실행 중인 Agent의 출력을 다시 읽어 Evidence를 갱신한다"
+  "adopt:사람이 직접 띄운 Agent를 Harness 추적에 등록한다"
   "close-agent:Harness가 만든 Agent Pane을 정리한다"
   "quota-check:실행 중인 Agent의 남은 쿼터를 확인한다"
   "quota-retry:연속 저쿼터 확인 시 Provider 교체를 handover_required까지 처리한다 (opt-in)"
@@ -72,12 +73,20 @@ cmd_help_topic() {
 구문:
   $SCRIPT_NAME init PATH [--name NAME] [--goal TEXT] [--profile PROFILE]
                     [--orchestrator P] [--worker P] [--reviewer P] [--fallback P,P]
+                    [--approval-mode ask|auto|bypass]
                     [--remote-host H] [--remote-user U] [--remote-path /경로]
                     [--remote-mount /경로] [--remote-vcs git|svn|none]
 
 무엇을 하나:
   비어 있는 디렉터리에 AGENTS.md·SPEC.md·STATE.md·정책·역할·Skill 파일과 Git
   기준선을 만든다. 기존 디렉터리가 비어 있지 않으면 거부한다.
+
+  --approval-mode는 dispatch가 Agent를 띄울 때 붙일 승인 정책을
+  .harness/policies/agent-policy.yaml에 적는다. 도구 실행(파일 편집·셸 명령)
+  승인만 대상이며 작업 방향성 결정은 그대로 사람 몫이다.
+    ask    Provider 기본값 — 도구 실행마다 물어본다
+    auto   파일 편집·작업 트리 안의 명령은 자동 승인 (기본값)
+    bypass 도구 실행 승인을 전부 건너뛴다
 
 예시:
   $SCRIPT_NAME init ~/Projects/snmp-normalizer \\
@@ -187,11 +196,24 @@ EOF
   Task 계약·SPEC 발췌·intent를 Context Packet으로 묶어 Herdr Pane에서 Agent를
   한 턴 실행하고, 결과를 Evidence로 남긴다. 호출 1회 = 1턴이며 상주 루프가 아니다.
 
+승인 정책:
+  .harness/policies/agent-policy.yaml의 approval_mode(ask|auto|bypass)에 따라
+  Provider CLI에 승인 우회 인수를 붙인다. 도구 실행 승인만 건너뛴다 — 상태
+  전이와 완료 승인은 이 설정과 무관하게 transition/approve로만 가능하다.
+  쓰인 모드와 인수는 Attempt·Evidence 문서에 남는다.
+  이 파일이 없는 기존 프로젝트(init 이전 버전)에서는 인수를 붙이지 않는다 —
+  ask와 같게 동작하므로, 필요하면 파일을 직접 만들어 넣는다.
+
 역할(ROLE): worker | reviewer
 
 예시:
   $SCRIPT_NAME dispatch . task-001 worker
   $SCRIPT_NAME dispatch . task-001 reviewer --timeout 600000
+
+--print-only:
+  Pane을 만들지도 Agent를 띄우지도 않고, Context Packet 경로와 직접 실행할
+  herdr 명령만 출력한다. Herdr 밖에서도 쓸 수 있는 폴백 경로다. 직접 띄운
+  뒤에는 $SCRIPT_NAME adopt로 등록해야 observe·close-agent가 이어진다.
 EOF
       ;;
     observe) cat <<EOF
@@ -205,6 +227,32 @@ EOF
 예시:
   $SCRIPT_NAME observe . task-001
   $SCRIPT_NAME observe . task-001 reviewer
+EOF
+      ;;
+    adopt) cat <<EOF
+구문:
+  $SCRIPT_NAME adopt PATH TASK_ID ROLE --pane PANE_ID --agent AGENT_NAME
+               [--provider claude|codex|agy]
+
+무엇을 하나:
+  Herdr에 이미 떠 있는 Agent를 Task·역할에 묶어 Runtime 기록과 Attempt를
+  만든다. 그래야 observe·close-agent·quota-check가 그 Agent를 찾을 수 있다.
+  등록 전에 herdr agent get으로 실제로 살아 있는지 확인하고, 없으면 거부한다.
+
+언제 쓰나:
+  기본 경로는 $SCRIPT_NAME dispatch다 — Pane 생성·Agent 실행·프롬프트를 한 번에
+  하므로 Attempt·Evidence가 빠짐없이 남는다. adopt는 그 경로가 막혔을 때
+  (Herdr·Provider CLI 문제, 이미 띄워 둔 Agent를 이어 쓰고 싶을 때) 쓰는
+  폴백이다. $SCRIPT_NAME dispatch ... --print-only가 출력하는 마지막 명령이다.
+
+주의:
+  adopt로 등록한 Pane은 사람이 만든 것이므로 close-agent가 --force 없이는
+  닫지 않는다.
+
+예시:
+  $SCRIPT_NAME dispatch . task-001 worker --print-only
+  # (출력된 herdr 명령을 직접 실행한 뒤)
+  $SCRIPT_NAME adopt . task-001 worker --pane pane-3 --agent hh-task-001-w-1
 EOF
       ;;
     close-agent) cat <<EOF

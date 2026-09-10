@@ -14,6 +14,7 @@ main() {
     approve) cmd_approve "$@" ;;
     dispatch) cmd_dispatch "$@" ;;
     observe) cmd_observe "$@" ;;
+    adopt) cmd_adopt "$@" ;;
     close-agent) cmd_close_agent "$@" ;;
     quota-check) cmd_quota_check "$@" ;;
     quota-retry) cmd_quota_retry "$@" ;;

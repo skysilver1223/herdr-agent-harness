@@ -221,6 +221,7 @@ _herdr_harness_subcommand_help() {
     "approve::사용자 승인 기록 후 completed로 전이" \
     "dispatch::Task+역할로 Agent를 한 턴 실행" \
     "observe::실행 중인 Agent 출력을 다시 읽어 갱신" \
+    "adopt::사람이 직접 띄운 Agent를 Harness에 등록" \
     "close-agent::Harness가 만든 Agent Pane 정리" \
     "quota-check::실행 중인 Agent의 남은 쿼터 확인" \
     "quota-retry::저쿼터 시 Provider 교체(handover까지, opt-in)" \
@@ -263,7 +264,7 @@ _herdr_harness_completions() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local subcommands="init sync-templates start status doctor test uninstall validate transition approve dispatch observe close-agent quota-check quota-retry auto-step remote completion help"
+  local subcommands="init sync-templates start status doctor test uninstall validate transition approve dispatch observe adopt close-agent quota-check quota-retry auto-step remote completion help"
 
   if (( COMP_CWORD == 1 )); then
     local described=()
@@ -417,7 +418,7 @@ _herdr_harness_completions() {
           "--confirm-user-approval::사람이 승인했다는 명시 확인 — 없으면 거부한다"
       fi
       ;;
-    dispatch|observe|close-agent|quota-check|quota-retry)
+    dispatch|observe|adopt|close-agent|quota-check|quota-retry)
       if (( COMP_CWORD == 2 )); then
         COMPREPLY=($(compgen -d -- "$cur"))
         _herdr_harness_note "$cur" \
@@ -443,6 +444,15 @@ _herdr_harness_completions() {
         _herdr_harness_describe "$cur" \
           "--timeout::Agent 한 턴의 대기 한도(밀리초, 기본 120000)" \
           "--print-only::Pane을 만들지 않고 실행할 herdr 명령만 출력 (폴백)"
+      elif [[ "$cmd" == adopt && ( "$prev" == --pane || "$prev" == --agent ) ]]; then
+        :
+      elif [[ "$cmd" == adopt && "$prev" == --provider ]]; then
+        _herdr_harness_describe "$cur" "${_HERDR_HARNESS_PROVIDERS[@]}"
+      elif [[ "$cmd" == adopt ]]; then
+        _herdr_harness_describe "$cur" \
+          "--pane::herdr pane split이 출력한 pane_id (필수)" \
+          "--agent::herdr agent start에 쓴 Agent 이름 (필수)" \
+          "--provider::Task YAML 대신 쓸 Provider (claude|codex|agy)"
       elif [[ "$cmd" == close-agent ]]; then
         _herdr_harness_describe "$cur" \
           "--force::Agent가 살아 있어도 Pane을 정리한다"

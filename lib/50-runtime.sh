@@ -67,8 +67,14 @@ _runtime_yaml_scalar() {
   ' "$file"
 }
 
+# 값이 Prompt로 나가기 전에 거르는 마지막 그물이다. '=' 만 보던 좁은 규칙은
+# YAML/헤더 형태('token: ...', 'Authorization: Bearer ...')와 Provider 토큰
+# 접두사를 통째로 놓쳤다 — Evidence·Review를 Context Packet에 넣기 시작하면서
+# 사람이 붙여 넣은 값이 그대로 Agent에게 흘러갈 수 있는 경로가 생겼다.
 _runtime_has_secret() {
-  LC_ALL=C grep -Eqi 'AKIA[0-9A-Z]{8,}|BEGIN[[:space:]]+(RSA |EC |OPENSSH )?PRIVATE KEY|password[[:space:]]*=|token[[:space:]]*=|api[_-]?key[[:space:]]*=' "$1"
+  LC_ALL=C grep -Eqi \
+    'AKIA[0-9A-Z]{8,}|BEGIN[[:space:]]+(RSA |EC |DSA |OPENSSH )?PRIVATE KEY|(password|passwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)[[:space:]]*[:=][[:space:]]*[^[:space:]]|authorization[[:space:]]*:[[:space:]]*(bearer|basic)[[:space:]]|(gh[pousr]_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.)' \
+    "$1"
 }
 
 # 쿼터 경고 신호 스캔. 자동으로 Provider를 바꾸지 않는다 — 확인만 하고 정보로
@@ -107,8 +113,12 @@ _runtime_write_result() {
   _runtime_atomic_text "$root/.harness/runtime/$task_id-$role.result" "$result"
 }
 
+# adopted=1은 "Harness가 만들지 않고 사람이 띄운 Agent를 등록했다"는 뜻이다.
+# close-agent가 이 값을 보고 --force 없이는 닫지 않는다 — Harness가 만든
+# Pane만 정리한다는 불변식을 adopt 경로에서도 지키기 위해서다.
 _runtime_write_meta() {
   local root="$1" task_id="$2" role="$3" agent_name="$4" pane_id="$5" provider="$6" attempt="$7"
+  local adopted="${8:-0}"
   local destination temporary
   destination="$root/.harness/runtime/$task_id-$role.meta"
   temporary="$(mktemp "$root/.harness/runtime/.meta.XXXXXX")"
@@ -119,6 +129,7 @@ _runtime_write_meta() {
     printf 'pane_id=%s\n' "$pane_id"
     printf 'provider=%s\n' "$provider"
     printf 'attempt=%s\n' "$attempt"
+    printf 'adopted=%s\n' "$adopted"
   } >"$temporary"
   chmod 0644 "$temporary"
   mv -f -- "$temporary" "$destination"
@@ -245,6 +256,65 @@ _runtime_append_evidence() {
   mv -f -- "$temporary" "$evidence"
 }
 
+# ---------------------------------------------------------------------------
+# Evidence — 정본은 구조화 YAML, 원문 덤프는 raw/ 로 분리한다.
+#
+# Reviewer와 transition이 읽어야 하는 것은 "Worker가 말한 것과 실제 repository
+# 상태가 일치하는가" 하나다. Agent 출력 200줄과 prompt 전문은 그 판단에 쓰이지
+# 않으면서 파일만 키운다(메타데이터가 코드보다 커지는 문제). 그래서 판단에
+# 쓰이는 6필드만 정본으로 두고, 원문은 디버깅용으로 raw/에 남긴다.
+# raw/는 init이 만드는 .gitignore에 이미 들어 있어 커밋되지 않는다.
+# ---------------------------------------------------------------------------
+_runtime_evidence_yaml_path() {
+  printf '%s/.harness/evidence/%s-%s-attempt-%s.yaml' "$1" "$2" "$3" "$4"
+}
+
+_runtime_evidence_raw_path() {
+  printf '%s/.harness/evidence/raw/%s-%s-attempt-%s.md' "$1" "$2" "$3" "$4"
+}
+
+# 정본 YAML을 통째로 다시 쓴다. 제자리 수정(sed)으로 필드를 갈아끼우지 않는
+# 이유는, 값이 전부 호출자가 아는 것이라 재생성이 더 단순하고 깨지지 않기
+# 때문이다 — observe가 여러 번 돌아도 결과는 항상 같은 모양이다.
+_runtime_write_evidence_yaml() {
+  local root="$1" task_id="$2" role="$3" attempt="$4" status="$5" summary="$6"
+  local observations="${7:-0}"
+  local destination temporary raw_relative line
+  destination="$(_runtime_evidence_yaml_path "$root" "$task_id" "$role" "$attempt")"
+  raw_relative=".harness/evidence/raw/$task_id-$role-attempt-$attempt.md"
+  temporary="$(mktemp "$root/.harness/evidence/.evidence-yaml.XXXXXX")"
+  {
+    printf 'task: %s\n' "$(yaml_quote "$task_id")"
+    printf 'role: %s\n' "$(yaml_quote "$role")"
+    printf 'attempt: %s\n' "$attempt"
+    printf 'result:\n  summary: %s\n' "$(yaml_quote "$summary")"
+    printf 'changes:\n'
+    # git status --short 의 경로만 담는다. diff 본문은 raw에 있다.
+    if git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        printf '  - %s\n' "$(yaml_quote "$line")"
+      done < <(git -C "$root" status --short 2>/dev/null || true)
+    fi
+    printf 'checks:\n'
+    printf '  # acceptance_criteria 실행 결과는 transition submitted 시점에 Harness가\n'
+    printf '  # 직접 실행해 %s-attempt-%s-checks.yaml 로 기록한다.\n' "$task_id" "$attempt"
+    printf 'notes:\n'
+    printf '  - %s\n' "$(yaml_quote "관측 횟수: $observations")"
+    printf 'status: %s\n' "$(yaml_quote "$status")"
+    printf 'raw: %s\n' "$(yaml_quote "$raw_relative")"
+  } >"$temporary"
+  chmod 0644 "$temporary"
+  mv -f -- "$temporary" "$destination"
+}
+
+_runtime_evidence_observations() {
+  local yaml_file="$1" value
+  [[ -f "$yaml_file" ]] || { printf '0'; return 0; }
+  value="$(sed -n "s/^  - '관측 횟수: \([0-9]*\)'\$/\1/p" "$yaml_file" | head -n 1)"
+  printf '%s' "${value:-0}"
+}
+
 _runtime_normalize_state() {
   local get_status="$1" get_output="$2" prompt_status="${3:-0}" prompt_output="${4:-}"
   local state combined
@@ -281,6 +351,83 @@ _runtime_spec_section() {
   ' "$file"
 }
 
+# 직전 라운드 요약 — 최신 Attempt 정본(Evidence YAML), AC 검증 결과, 최신 Review
+# 판정·지적사항. 셋 다 없으면 아무것도 출력하지 않는다(첫 시도).
+# "가장 큰 attempt 번호"가 아니라 "그 파일이 실제로 있는 가장 최근 attempt"를
+# 찾는다. 번호만 보면, Attempt는 2까지 갔는데 2번 dispatch가 Agent를 띄우기
+# 전에 죽어 Evidence가 없는 경우 1번의 증적과 AC 결과가 통째로 사라진다 —
+# Packet은 "직전 시도" 절만 비어 있는 채로 나가고, 재시도가 같은 실수를
+# 반복하는 것을 막지 못한다(이 기능이 막으려던 바로 그 상황).
+# Packet에 넣는 조각의 상한. Review나 checks는 사람이 쓰거나 명령 출력이
+# 들어가서 크기를 예측할 수 없다 — 통째로 cat하면 Context Packet이 무한히
+# 커져, 전체 문서를 던지지 않는다는 Packet의 존재 이유가 무너진다.
+# 줄 수와 줄 길이를 함께 자른다(거대한 한 줄도 막아야 하므로).
+_runtime_excerpt() {
+  local file="$1" max_lines="${2:-80}" max_columns="${3:-500}" total
+  [[ -f "$file" ]] || return 0
+  total="$(wc -l <"$file" 2>/dev/null || printf 0)"
+  head -n "$max_lines" "$file" | cut -c "1-$max_columns"
+  if (( total > max_lines )); then
+    printf '... (%s줄 중 %s줄만 표시 — 전문은 원본 파일 참조)\n' "$total" "$max_lines"
+  fi
+}
+
+_runtime_latest_existing() {
+  # $1=root $2=글롭 앞부분 $3=글롭 뒷부분 → 가장 큰 N을 출력(없으면 빈 값)
+  local root="$1" prefix="$2" suffix="$3" path base number maximum=""
+  shopt -s nullglob
+  for path in "$root/.harness/evidence/$prefix"*"$suffix"; do
+    base="${path##*/}"
+    number="${base#"$prefix"}"
+    number="${number%"$suffix"}"
+    [[ "$number" =~ ^[0-9]+$ ]] || continue
+    [[ -n "$maximum" ]] && (( number <= maximum )) && continue
+    maximum="$number"
+  done
+  shopt -u nullglob
+  printf '%s' "$maximum"
+}
+
+_runtime_previous_round() {
+  local root="$1" task_id="$2"
+  local attempt evidence checks checks_attempt review verdict printed=0
+  local role
+
+  for role in worker reviewer; do
+    attempt="$(_runtime_latest_existing "$root" "$task_id-$role-attempt-" ".yaml")"
+    [[ -n "$attempt" ]] || continue
+    evidence="$(_runtime_evidence_yaml_path "$root" "$task_id" "$role" "$attempt")"
+    [[ -f "$evidence" ]] || continue
+    (( printed == 1 )) || { printf '\n## 직전 시도\n\n'; printed=1; }
+    printf '### Evidence (%s, Attempt %s)\n\n```yaml\n' "$role" "$attempt"
+    _runtime_excerpt "$evidence"
+    printf '```\n\n'
+  done
+
+  checks_attempt="$(_runtime_latest_existing "$root" "$task_id-attempt-" "-checks.yaml")"
+  if [[ -n "$checks_attempt" ]]; then
+    checks="$root/.harness/evidence/$task_id-attempt-$checks_attempt-checks.yaml"
+    if [[ -f "$checks" ]]; then
+      (( printed == 1 )) || { printf '\n## 직전 시도\n\n'; printed=1; }
+      printf '### Acceptance Criteria 검증 결과 (Attempt %s)\n\n```yaml\n' "$checks_attempt"
+      _runtime_excerpt "$checks"
+      printf '```\n\n'
+    fi
+  fi
+
+  review="$(latest_task_review "$root" "$task_id")"
+  if [[ -n "$review" && -f "$review" ]]; then
+    verdict="$(review_verdict "$review")"
+    (( printed == 1 )) || { printf '\n## 직전 시도\n\n'; printed=1; }
+    printf '### 최신 Review 판정: %s\n\n' "${verdict:-불명}"
+    printf '출처: %s\n\n' "${review#"$root/"}"
+    _runtime_excerpt "$review"
+    printf '\n'
+  fi
+
+  (( printed == 0 )) || printf '위 지적을 먼저 해소한다. 같은 접근을 그대로 반복하지 않는다.\n'
+}
+
 _runtime_context_packet() {
   local root="$1" task_id="$2" role="$3" task_file="$4" destination="$5"
   local temporary spec_file
@@ -302,6 +449,10 @@ _runtime_context_packet() {
     printf '\n## Task Contract\n\n'
     cat "$task_file"
     printf '\n`write_scope`, `resources`, `inputs`, `acceptance_criteria`는 위 Task Contract YAML 안에 있다. 착수 게이트·제외 범위·불변식은 `%s`를 읽는다.\n' "$(_runtime_yaml_scalar "$task_file" intent)"
+    # 직전 시도 결과를 넣지 않으면 changes_requested로 돌아온 재시도에서 Worker가
+    # Reviewer 지적을 못 본 채 같은 접근을 반복한다(Rework의 주된 원인).
+    # 전체 이력이 아니라 "최신 한 번"만 넣어 Packet이 부풀지 않게 한다.
+    _runtime_previous_round "$root" "$task_id"
     printf '\n## Next step\n\n'
     if [[ "$role" == worker ]]; then
       printf '이 Task만 수행하고 검증 결과와 Attempt 산출물을 남긴 뒤 submitted를 제안한다. 상태를 직접 전이하거나 completed로 만들지 않는다.\n'
@@ -317,16 +468,225 @@ _runtime_context_packet() {
   rm -f -- "$temporary"
 }
 
+# ---------------------------------------------------------------------------
+# 호출자 게이트 — "상태 전이·완료 승인은 사람 몫"을 지시가 아니라 코드로 막는다.
+#
+# agent-policy.yaml이 도구 실행 승인을 건너뛰게 되면서, dispatch가 띄운 Agent는
+# 셸 명령을 물어보지 않고 실행할 수 있게 됐다. 그러면 Agent가 스스로
+# `herdr-harness approve ... --confirm-user-approval`을 호출해 completed까지
+# 갈 수 있다 — Context Packet의 "직접 전이하지 않는다"는 지시는 기술적 게이트가
+# 아니기 때문이다.
+#
+# dispatch/adopt는 자기가 띄운 Agent의 pane_id를 .harness/runtime/*.meta에 적어
+# 둔다. `herdr pane current`가 답한 현재 pane이 거기 있으면, 지금 명령을 부른
+# 주체가 Harness가 관리하는 Agent라는 뜻이므로 거부한다.
+# 사람과 Orchestrator Pane은 meta에 없으므로 영향을 받지 않는다.
+#
+# 이것은 가드레일이지 보안 경계가 아니다. Agent는 사용자와 같은 권한으로
+# 돌기 때문에 .meta를 고치거나 이 파일 자체를 고칠 수 있다 — 적대적 Agent를
+# 막으려면 OS 수준 분리(별도 계정·컨테이너)가 필요하고, 그건 적용안에서
+# Deferred로 미뤄 둔 항목이다. 여기서 막는 것은 "지시를 따르다가 흘러가서"
+# 스스로 완료를 선언하는 기본 동작이다.
+# ---------------------------------------------------------------------------
+# 현재 pane id를 구한다. HERDR_PANE_ID 환경변수를 그대로 믿지 않는다 —
+# `env -u HERDR_PANE_ID herdr-harness approve ...` 한 줄로 지워지기 때문이다.
+# `herdr pane current`는 환경변수가 아니라 터미널을 보고 답하므로 그 우회가
+# 통하지 않는다. herdr가 없으면(= Herdr 밖이면) 빈 값이다.
+_runtime_current_pane_id() {
+  local output
+  if command -v herdr >/dev/null 2>&1; then
+    output="$(herdr pane current 2>/dev/null || true)"
+    output="$(_runtime_json_field "$output" pane_id)"
+    if [[ -n "$output" ]]; then
+      printf '%s' "$output"
+      return 0
+    fi
+  fi
+  printf '%s' "${HERDR_PANE_ID:-}"
+}
+
+_runtime_caller_is_managed_agent() {
+  local root="$1" pane meta recorded
+  pane="$(_runtime_current_pane_id)"
+  [[ -n "$pane" ]] || return 1
+  shopt -s nullglob
+  for meta in "$root"/.harness/runtime/*.meta; do
+    recorded="$(_runtime_meta_value "$meta" pane_id)"
+    if [[ -n "$recorded" && "$recorded" == "$pane" ]]; then
+      shopt -u nullglob
+      printf '%s' "${meta##*/}"
+      return 0
+    fi
+  done
+  shopt -u nullglob
+  return 1
+}
+
+_runtime_require_human_caller() {
+  local root="$1" action="$2" meta
+  meta="$(_runtime_caller_is_managed_agent "$root")" || return 0
+  die "$action 은(는) Harness가 띄운 Agent Pane에서 실행할 수 없습니다 (pane=$(_runtime_current_pane_id), 기록=$meta).
+작업 방향성에 대한 결정은 사람이 자기 Pane에서 직접 내려야 합니다 — Agent는 결과를 제출(submitted)까지만 할 수 있습니다."
+}
+
+# ---------------------------------------------------------------------------
+# Agent 승인 정책 — .harness/policies/agent-policy.yaml
+#
+# 여기서 정하는 것은 "도구 실행 승인"뿐이다. 리눅스 명령을 하나 돌릴 때마다
+# yes/no를 묻는 것은 진행을 막기만 하므로 Provider CLI 인수로 건너뛴다.
+# 반대로 작업 방향성에 대한 결정(상태 전이, 완료 승인, Provider 교체)은 이
+# 설정과 무관하게 사람이 herdr-harness transition/approve로만 할 수 있다.
+#
+# 정책 파일이 없는 기존 프로젝트에서는 아무 인수도 붙지 않는다(= 종전 동작).
+# ---------------------------------------------------------------------------
+# Provider별로 "승인 정책에 쓸 수 있는 인수"만 허용한다.
+#
+# 문자 집합만 검사하면 --add-dir / 나 --dangerously-* 같은 전혀 다른 옵션이
+# 정책 파일 한 줄로 들어와 auto 모드가 사실상 full-access로 바뀐다(기록에는
+# 계속 auto로 남는다). 그래서 표는 "어떤 승인 플래그를 쓸지"만 고를 수 있고,
+# 임의의 argv를 넣는 통로가 되지는 않는다.
+#
+# 형식: '<플래그>' 또는 '<플래그>=<허용값1>,<허용값2>,...'
+# Provider뿐 아니라 mode별로도 나눈다. auto가 bypass 수준 플래그를 받아들이면
+# 기록에는 auto로 남으면서 실제 권한만 full-access가 된다 — 정책 파일 한 줄로
+# 감사 기록과 실제 권한이 어긋나는 것이 여기서 가장 위험한 경우다.
+_runtime_agent_arg_allowlist() {
+  local provider="$1" mode="$2"
+  case "$provider:$mode" in
+    claude:auto) printf '%s\n' \
+      '--permission-mode=acceptEdits,plan' ;;
+    claude:bypass) printf '%s\n' \
+      '--permission-mode=acceptEdits,bypassPermissions,plan,dontAsk,auto,manual' \
+      '--dangerously-skip-permissions' ;;
+    codex:auto) printf '%s\n' \
+      '--ask-for-approval=on-request,never' \
+      '-a=on-request,never' \
+      '--sandbox=read-only,workspace-write' \
+      '-s=read-only,workspace-write' ;;
+    codex:bypass) printf '%s\n' \
+      '--ask-for-approval=on-request,never' \
+      '-a=on-request,never' \
+      '--sandbox=read-only,workspace-write,danger-full-access' \
+      '-s=read-only,workspace-write,danger-full-access' \
+      '--dangerously-bypass-approvals-and-sandbox' ;;
+    agy:auto) printf '%s\n' \
+      '--mode=accept-edits,plan' \
+      '--sandbox' ;;
+    agy:bypass) printf '%s\n' \
+      '--mode=accept-edits,plan' \
+      '--dangerously-skip-permissions' \
+      '--sandbox' ;;
+    *) return 1 ;;
+  esac
+}
+
+# 실패는 die가 아니라 반환값으로 알린다.
+#
+# cmd_dispatch는 auto-step 안에서 커맨드 치환으로 불린다. 그 안에서 die하면
+# 가장 안쪽 subshell만 끝나고 호출자는 "인수 없음"으로 계속 진행해 버린다 —
+# 검증 실패가 조용한 무인수 실행으로 바뀐다. 반환값으로 올리면 호출자가
+# 자기 문맥에서 멈출 수 있다.
+# 반환: 0=인수를 출력했다(없을 수도 있다), 1=정책 값이 유효하지 않다.
+_runtime_agent_args() {
+  local root="$1" provider="$2" policy mode value token flag flag_value
+  local -a allowed=()
+  policy="$root/.harness/policies/agent-policy.yaml"
+  [[ -f "$policy" ]] || return 0
+  mode="$(_runtime_yaml_scalar "$policy" approval_mode)"
+  [[ -n "$mode" ]] || mode=ask
+  case "$mode" in
+    ask) return 0 ;;
+    auto|bypass) ;;
+    *)
+      printf '경고: agent-policy.yaml의 approval_mode 값이 유효하지 않습니다: %s (ask로 취급)\n' "$mode" >&2
+      return 0
+      ;;
+  esac
+  value="$(_runtime_yaml_scalar "$policy" "${provider}_${mode}")"
+  [[ -n "$value" ]] || return 0
+
+  # 먼저 원문 전체를 본다 — 분리한 뒤에 검사하면 * 같은 문자가 경로 확장에
+  # 먼저 걸려 검사망을 빠져나간다.
+  if [[ ! "$value" =~ ^[-A-Za-z0-9=_./\ ]+$ ]]; then
+    printf 'agent-policy.yaml의 %s_%s 값에 허용되지 않는 문자가 있습니다: %s\n' \
+      "$provider" "$mode" "$value" >&2
+    return 1
+  fi
+
+  mapfile -t allowed < <(_runtime_agent_arg_allowlist "$provider" "$mode") || true
+  (( ${#allowed[@]} > 0 )) || {
+    printf 'Provider 또는 모드가 유효하지 않습니다: %s / %s\n' "$provider" "$mode" >&2
+    return 1
+  }
+
+  # 플래그와 값을 짝지어 확인한다. "다음 토큰이 값"인 플래그는 허용값 목록이
+  # 있는 항목뿐이고, 그 밖의 토큰은 어느 것도 통과하지 않는다.
+  local -a tokens=()
+  read -r -a tokens <<<"$value"
+  local i=0 entry matched expected
+  while (( i < ${#tokens[@]} )); do
+    token="${tokens[$i]}"
+    matched=0
+    for entry in "${allowed[@]}"; do
+      flag="${entry%%=*}"
+      [[ "$token" == "$flag" ]] || continue
+      matched=1
+      if [[ "$entry" == *=* ]]; then
+        expected="${entry#*=}"
+        (( i + 1 < ${#tokens[@]} )) || {
+          printf 'agent-policy.yaml의 %s_%s: %s 뒤에 값이 없습니다.\n' "$provider" "$mode" "$flag" >&2
+          return 1
+        }
+        flag_value="${tokens[$((i + 1))]}"
+        case ",$expected," in
+          *",$flag_value,"*) ;;
+          *)
+            printf 'agent-policy.yaml의 %s_%s: %s 에 허용되지 않는 값입니다: %s (허용: %s)\n' \
+              "$provider" "$mode" "$flag" "$flag_value" "$expected" >&2
+            return 1
+            ;;
+        esac
+        i=$((i + 1))
+      fi
+      break
+    done
+    if (( matched == 0 )); then
+      printf 'agent-policy.yaml의 %s_%s: 승인 정책에 쓸 수 없는 인수입니다: %s\n' \
+        "$provider" "$mode" "$token" >&2
+      printf '  (허용 인수: %s)\n' "${allowed[*]%%=*}" >&2
+      return 1
+    fi
+    i=$((i + 1))
+  done
+  printf '%s' "$value"
+}
+
+_runtime_approval_mode() {
+  local root="$1" policy mode
+  policy="$root/.harness/policies/agent-policy.yaml"
+  [[ -f "$policy" ]] || { printf 'ask (정책 파일 없음)'; return 0; }
+  mode="$(_runtime_yaml_scalar "$policy" approval_mode)"
+  printf '%s' "${mode:-ask}"
+}
+
 _runtime_start_agent_when_ready() {
   # 분할 직후 Pane은 Herdr가 "available shell"로 인정하기까지 수 초가 걸린다.
   # 측정 결과 4~7초. 그동안 agent start는 agent_pane_busy로 실패한다.
   # 이 대기는 Pane 준비 조건만 재확인하며, 실패한 Agent 턴을 재시도하지 않는다.
+  #
+  # 6번째 인자부터는 Provider CLI에 그대로 넘길 인수다(_runtime_agent_args).
   local agent_name="$1" provider="$2" pane_id="$3" timeout="$4"
   local deadline_s="${5:-30}"
+  shift 5
+  local -a agent_args=("$@")
   local waited=0 output status
   while :; do
     set +e
-    output="$(herdr agent start "$agent_name" --kind "$provider" --pane "$pane_id" --timeout "$timeout" 2>&1)"
+    if (( ${#agent_args[@]} > 0 )); then
+      output="$(herdr agent start "$agent_name" --kind "$provider" --pane "$pane_id" --timeout "$timeout" -- "${agent_args[@]}" 2>&1)"
+    else
+      output="$(herdr agent start "$agent_name" --kind "$provider" --pane "$pane_id" --timeout "$timeout" 2>&1)"
+    fi
     status=$?
     set -e
     if (( status == 0 )); then
