@@ -247,9 +247,34 @@ source ~/.bashrc
 herdr-harness <TAB><TAB>
 ```
 
+```text
+init             : 새 프로젝트에 Harness 문서·정책·역할 파일 생성
+sync-templates   : Skill·역할 파일을 지금 버전 템플릿으로 재동기화
+start            : 프로젝트 디렉터리에서 Herdr Session 열기
+status           : STATE.md 출력 (--live로 문서·Herdr·Git 대조)
+validate         : 상태를 바꾸지 않고 정합성만 검사
+transition       : Task 상태를 전이표에 따라 전이
+...
+remote           : 원격 서버에서 빌드·테스트·VCS 실행 (opt-in)
+help             : 명령 목록 또는 특정 명령 상세 사용법
+```
+
+후보가 여럿일 때는 `명령 : 설명` 형태로 함께 나오고, 후보가 하나로 좁혀지면 설명 없이
+명령만 입력됩니다. `herdr-harness remote <TAB><TAB>`도 하위 명령마다 설명을 보여 줍니다.
+
+```text
+$ herdr-harness remote <TAB><TAB>
+setup            : 최초 1회 설정 — 호스트·계정 입력 + SSH 키 등록
+doctor           : 의존성·SSH·원격 경로·도구·마운트 일괄 진단
+status           : 현재 원격 설정과 연결·마운트 상태 요약
+mount            : 원격 소스를 로컬 경로에 SSHFS로 붙임
+run              : 원격 프로젝트 디렉터리에서 명령 실행 (빌드·테스트)
+...
+```
+
 서브커맨드뿐 아니라 `init --profile`·`--orchestrator` 등의 옵션 값, `transition`의
 Task ID·상태, `approve`의 Task ID·확인 플래그, `dispatch`·`quota-check`의 Task
-ID·`worker`/`reviewer`도 완성됩니다.
+ID·`worker`/`reviewer`, `remote setup`의 옵션도 완성됩니다.
 Bash만 지원합니다.
 
 자동 등록을 원하지 않으면 위 3줄을 지우면 되고, 직접 관리하고 싶으면 마커 없이
@@ -390,6 +415,38 @@ herdr-harness status ~/Projects/snmp-normalizer --live --json
 ```
 
 기본 상태 명령은 `STATE.md`를 출력합니다. `--live`는 문서 상태와 Herdr Agent, Git 상태를 함께 대조하여 `DRIFT`와 `ORPHAN`을 표시합니다. 상태를 자동 수정하지는 않습니다.
+
+## 명령 사용법 찾기
+
+명령이 많으므로 세 가지 경로로 안내를 제공합니다.
+
+```bash
+herdr-harness help                 # 전체 명령 목록 한 줄 설명
+herdr-harness help remote          # 특정 명령의 목적·구문·예시·주의
+herdr-harness <TAB><TAB>           # 설명이 붙은 후보 목록
+herdr-harness remote help          # 원격 모드 하위 명령 목록
+```
+
+`help <명령>`은 그 명령이 무엇을 하는지, 어떤 인자를 받는지, 실제로 어떻게 치는지를
+예시와 함께 보여 줍니다.
+
+```text
+$ herdr-harness help dispatch
+dispatch — Task와 역할에 맞는 Agent를 Pane에서 한 턴 실행한다
+
+구문:
+  herdr-harness dispatch PATH TASK_ID ROLE [--timeout MS]
+
+무엇을 하나:
+  Task 계약·SPEC 발췌·intent를 Context Packet으로 묶어 Herdr Pane에서 Agent를
+  한 턴 실행하고, 결과를 Evidence로 남긴다. 호출 1회 = 1턴이며 상주 루프가 아니다.
+
+역할(ROLE): worker | reviewer
+
+예시:
+  herdr-harness dispatch . task-001 worker
+  herdr-harness dispatch . task-001 reviewer --timeout 600000
+```
 
 ## Agent Loop 스텝 명령
 

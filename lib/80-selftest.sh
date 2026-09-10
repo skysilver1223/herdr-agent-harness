@@ -710,6 +710,52 @@ STUB
     bash "$SELF_PATH" init "$test_root/remote-newline" --name r --goal g \
       --remote-host host.example --remote-path "$(printf '/srv/one\ntwo')"
 
+  # ---------------------------------------------------------------------------
+  # 도움말 정합성: 명령 목록이 세 곳(99-main.sh의 case, 15-help.sh의 요약표와
+  # topic 분기, 85-completion.sh의 설명 목록)에 흩어져 있어 쉽게 갈라진다.
+  # 하나라도 빠지면 사용자는 "탭에는 있는데 help는 없는" 명령을 만난다.
+  # ---------------------------------------------------------------------------
+  local dispatch_commands=() summary_commands=() completion_commands=()
+  mapfile -t dispatch_commands < <(
+    awk '/^    [a-z|-]+\) cmd_/ { line = $1; sub(/\)$/, "", line); split(line, parts, "|"); print parts[1] }' \
+      "$HARNESS_LIB_DIR/99-main.sh" | sort -u)
+  mapfile -t summary_commands < <(harness_command_names | sort -u)
+  mapfile -t completion_commands < <(
+    bash "$SELF_PATH" completion bash |
+      awk -F'"' '/^    "[a-z-]+::/ { split($2, parts, "::"); print parts[1] }' | sort -u)
+
+  [[ "${#dispatch_commands[@]}" -gt 10 ]] ||
+    die "도움말 정합성 검사가 명령 목록을 읽지 못했습니다(파서 확인 필요)."
+
+  local expected_command
+  for expected_command in "${dispatch_commands[@]}"; do
+    [[ "$expected_command" != help ]] || continue
+    case " ${summary_commands[*]} " in
+      *" $expected_command "*) ;;
+      *) die "HARNESS_COMMAND_SUMMARIES에 설명이 없는 명령: $expected_command (lib/15-help.sh)" ;;
+    esac
+    case " ${completion_commands[*]} " in
+      *" $expected_command "*) ;;
+      *) die "탭 완성 설명 목록에 없는 명령: $expected_command (lib/85-completion.sh)" ;;
+    esac
+    bash "$SELF_PATH" help "$expected_command" >/dev/null ||
+      die "help 상세 항목이 없는 명령: $expected_command (lib/15-help.sh의 cmd_help_topic)"
+  done
+
+  for expected_command in "${summary_commands[@]}"; do
+    [[ "$expected_command" != help ]] || continue
+    case " ${dispatch_commands[*]} " in
+      *" $expected_command "*) ;;
+      *) die "실행할 수 없는 명령이 도움말에 있습니다: $expected_command" ;;
+    esac
+  done
+
+  set +e
+  bash "$SELF_PATH" help no-such-command >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "없는 명령에 대한 help가 성공으로 끝났습니다."
+
   rm -rf -- "$test_root"
   trap - EXIT
 
@@ -728,6 +774,7 @@ STUB
   printf 'PASS: 스텝 명령 인자 검증\n'
   printf 'PASS: Agent 호출 없음\n'
   printf 'PASS: 탭 완성 스크립트 문법\n'
+  printf 'PASS: 도움말 정합성 (dispatch↔help 요약·상세↔탭 완성 설명, 없는 명령 거부)\n'
   printf 'PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호 미저장/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키)\n'
   printf 'PASS: Task Lock (동시 획득 거부/release/stale 회수)\n'
   printf 'PASS: quota-retry/auto-step opt-in 게이트\n'
