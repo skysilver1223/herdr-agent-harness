@@ -3,8 +3,8 @@
 
 cmd_dispatch() {
   local path="${1:-}" task_id="${2:-}" role="${3:-}" timeout=120000 print_only=0
-  local extra_prompt=""
-  [[ -n "$path" && -n "$task_id" && -n "$role" ]] || die "사용법: dispatch PATH TASK_ID ROLE(worker|reviewer) [--timeout MS] [--print-only] [--extra-prompt FILE]"
+  local extra_prompt="" agent_cwd=""
+  [[ -n "$path" && -n "$task_id" && -n "$role" ]] || die "사용법: dispatch PATH TASK_ID ROLE(worker|reviewer) [--timeout MS] [--print-only] [--extra-prompt FILE] [--cwd DIR]"
   shift 3
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -17,6 +17,15 @@ cmd_dispatch() {
         [[ $# -ge 2 ]] || die "--extra-prompt에는 파일 경로가 필요합니다."
         [[ -f "$2" ]] || die "--extra-prompt 파일을 찾을 수 없습니다: $2"
         extra_prompt="$2"; shift 2 ;;
+      # Agent를 띄울 디렉터리. Provider의 Sandbox 쓰기 범위가 이 디렉터리
+      # 기준으로 정해진다(codex --sandbox workspace-write 등). 계획·상태
+      # 문서를 담은 Harness 워크스페이스와 수정 대상 코드 저장소가 서로 다른
+      # 디렉터리일 때 필요하다 — 기본값(워크스페이스)으로는 Worker가
+      # write_scope에 적힌 코드를 건드릴 수 없다.
+      --cwd)
+        [[ $# -ge 2 ]] || die "--cwd에는 디렉터리 경로가 필요합니다."
+        [[ -d "$2" ]] || die "--cwd 디렉터리를 찾을 수 없습니다: $2"
+        agent_cwd="$2"; shift 2 ;;
       *) die "알 수 없는 dispatch 옵션: $1" ;;
     esac
   done
@@ -29,6 +38,12 @@ cmd_dispatch() {
   local prompt_resent=0
   local attempt_file evidence_file temporary
   root="$(project_root "$path")"
+  # --cwd를 주지 않으면 지금까지와 같이 워크스페이스에서 띄운다.
+  if [[ -n "$agent_cwd" ]]; then
+    agent_cwd="$(cd "$agent_cwd" && pwd -P)" || die "--cwd 경로를 해석할 수 없습니다."
+  else
+    agent_cwd="$root"
+  fi
   task_file="$root/.harness/tasks/$task_id.yaml"
   [[ -f "$task_file" ]] || die "Task YAML을 찾을 수 없습니다: $task_file"
   # --print-only는 Pane을 만들지도 Agent를 띄우지도 않는다. Context Packet과
@@ -83,14 +98,15 @@ cmd_dispatch() {
     # Attempt·Evidence·meta는 사람이 실제로 Agent를 띄운 뒤 adopt가 만든다.
     # 출력한 줄은 사람이 그대로 복사해 셸에 붙여 넣는다. 경로에 공백이나
     # 세미콜론이 있으면 잘못 분리되거나 명령이 하나 더 실행된다 — %q로 인용한다.
-    local quoted_root quoted_context quoted_path
+    local quoted_root quoted_context quoted_path quoted_cwd
     printf -v quoted_root '%q' "$root"
     printf -v quoted_context '%q' "$context"
     printf -v quoted_path '%q' "$path"
+    printf -v quoted_cwd '%q' "$agent_cwd"
     printf 'Context Packet: %s\n\n' "$context"
     printf '아래를 Herdr Pane 안에서 차례로 실행한 뒤, 마지막 adopt로 Harness에 등록한다.\n'
     printf '(PANE_ID는 첫 명령이 출력하는 pane_id로 바꾼다.)\n\n'
-    printf '  herdr pane split --current --direction right --cwd %s --no-focus\n' "$quoted_root"
+    printf '  herdr pane split --current --direction right --cwd %s --no-focus\n' "$quoted_cwd"
     if [[ -n "$agent_args_raw" ]]; then
       printf '  herdr agent start %s --kind %s --pane PANE_ID --timeout %s -- %s\n' \
         "$agent_name" "$provider" "$timeout" "$agent_args_raw"
@@ -102,12 +118,13 @@ cmd_dispatch() {
     printf '  %s adopt %s %s %s --pane PANE_ID --agent %s\n\n' \
       "$SCRIPT_NAME" "$quoted_path" "$task_id" "$role" "$agent_name"
     printf '승인 모드: %s / Provider 인수: %s\n' "$approval_mode" "${agent_args_raw:-(없음)}"
+    printf 'Agent 작업 디렉터리: %s%s\n' "$agent_cwd" "$( [[ "$agent_cwd" == "$root" ]] && printf ' (워크스페이스 기본값)' || printf ' (--cwd)')"
     printf 'dispatch_result=print_only\n'
     return 0
   fi
 
   set +e
-  pane_output="$(herdr pane split --current --direction right --cwd "$root" --no-focus 2>&1)"
+  pane_output="$(herdr pane split --current --direction right --cwd "$agent_cwd" --no-focus 2>&1)"
   pane_status=$?
   set -e
   if (( pane_status != 0 )); then
@@ -124,7 +141,11 @@ cmd_dispatch() {
   temporary="$(mktemp "$root/.harness/attempts/.attempt.XXXXXX")"
   {
     printf '# Attempt %s: %s\n\n' "$attempt" "$task_id"
-    printf -- '- Started: %s\n- Role: %s\n- Provider: %s\n- Pane ID: %s\n- Agent name: %s\n- Baseline commit: %s\n- Approval mode: %s\n- Provider args: %s\n' "$started_at" "$role" "$provider" "$pane_id" "$agent_name" "$baseline" "$approval_mode" "${agent_args_raw:-(없음)}"
+    printf -- '- Started: %s\n- Role: %s\n- Provider: %s\n- Pane ID: %s\n- Agent name: %s\n- Baseline commit: %s\n- Approval mode: %s\n- Provider args: %s\n- Agent cwd: %s\n' "$started_at" "$role" "$provider" "$pane_id" "$agent_name" "$baseline" "$approval_mode" "${agent_args_raw:-(없음)}" "$agent_cwd"
+    if [[ "$agent_cwd" != "$root" ]] && git -C "$agent_cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      printf -- '- Agent cwd baseline commit: %s\n' \
+        "$(git -C "$agent_cwd" rev-parse HEAD 2>/dev/null || printf 'unborn')"
+    fi
   } >"$temporary"
   _runtime_atomic_copy "$temporary" "$attempt_file"
   rm -f -- "$temporary"
@@ -187,6 +208,12 @@ cmd_dispatch() {
     git -C "$root" status --short 2>&1 || true
     printf '\n## Git diff --stat\n\n'
     git -C "$root" diff --stat 2>&1 || true
+    if [[ "$agent_cwd" != "$root" ]] && git -C "$agent_cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      printf '\n## Git status --short (Agent cwd: %s)\n\n' "$agent_cwd"
+      git -C "$agent_cwd" status --short 2>&1 || true
+      printf '\n## Git diff --stat (Agent cwd: %s)\n\n' "$agent_cwd"
+      git -C "$agent_cwd" diff --stat 2>&1 || true
+    fi
     printf '\n## Agent state\n\n%s\n' "$get_output"
     printf '\n## Dispatch 명령 출력\n\n%s\n' "$prompt_output"
     printf '\n## Agent output\n\n%s\n' "$read_output"
@@ -239,6 +266,12 @@ cmd_adopt() {
 
   local root task_file attempt baseline get_output get_status temporary attempt_file
   root="$(project_root "$path")"
+  # --cwd를 주지 않으면 지금까지와 같이 워크스페이스에서 띄운다.
+  if [[ -n "$agent_cwd" ]]; then
+    agent_cwd="$(cd "$agent_cwd" && pwd -P)" || die "--cwd 경로를 해석할 수 없습니다."
+  else
+    agent_cwd="$root"
+  fi
   task_file="$root/.harness/tasks/$task_id.yaml"
   [[ -f "$task_file" ]] || die "Task YAML을 찾을 수 없습니다: $task_file"
   command -v herdr >/dev/null 2>&1 || die "herdr 명령을 찾을 수 없습니다."

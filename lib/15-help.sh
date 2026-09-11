@@ -202,7 +202,7 @@ EOF
     dispatch) cat <<EOF
 구문:
   $SCRIPT_NAME dispatch PATH TASK_ID ROLE [--timeout MS] [--print-only]
-                        [--extra-prompt FILE]
+                        [--extra-prompt FILE] [--cwd DIR]
 
 무엇을 하나:
   Task 계약·SPEC 발췌·intent를 Context Packet으로 묶어 Herdr Pane에서 Agent를
@@ -232,6 +232,21 @@ EOF
   끝에 붙인다. 그런 지시를 담으려고 Agent를 사람이 직접 띄우면 Attempt·
   Evidence·추적이 통째로 빠지므로, 커스텀 프롬프트도 이 옵션으로 dispatch에
   태운다. 파일 내용도 Secret 검사를 함께 받는다.
+
+--cwd DIR:
+  Agent를 띄울 디렉터리. Provider Sandbox의 쓰기 범위가 이 디렉터리를 기준으로
+  정해진다(codex --sandbox workspace-write 등). 기본값은 Harness 워크스페이스다.
+
+  계획·상태 문서를 담은 워크스페이스와 수정 대상 코드 저장소가 서로 다른
+  디렉터리일 때 필요하다. 기본값으로 띄우면 Worker는 워크스페이스 밖의
+  write_scope에 있는 파일을 쓸 수 없어 아무것도 고치지 못하고 막힌다.
+
+  예: 워크스페이스가 ~/p/harness-dev, 코드가 ~/p/code 인 구성
+    $SCRIPT_NAME dispatch . task-002 worker --cwd ~/p/code
+
+  이 디렉터리가 별도 Git 저장소면 그쪽 baseline commit과 git status·diff도
+  Attempt·Evidence에 함께 남는다 — 리뷰가 대조할 기준이 워크스페이스가 아니라
+  실제 수정 대상 저장소이기 때문이다.
 
 프롬프트 전달 보장:
   Provider REPL이 입력을 받을 수 있을 때까지 기다린 뒤 보낸다(agy는 부팅이

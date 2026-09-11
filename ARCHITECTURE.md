@@ -140,6 +140,8 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 
 `--print-only`는 상태를 전혀 남기지 않고(Context Packet만 씀) 실행할 `herdr` 명령만 출력하는 폴백이며, `adopt`는 `herdr agent get`으로 생존을 확인한 뒤에만 등록합니다. `adopt`로 등록한 Pane은 사람이 만든 것이므로 `close-agent`가 `--force` 없이는 닫지 않습니다.
 
+Agent가 기동되는 디렉터리는 기본값이 Harness 워크스페이스이고, `--cwd DIR`로 바꿉니다. 이 값은 단순한 편의 옵션이 아니라 **Provider Sandbox의 쓰기 경계**입니다 — `codex --sandbox workspace-write`의 쓰기 범위가 기동 디렉터리 아래로 한정되므로, 워크스페이스와 수정 대상 저장소를 분리한 구성에서 기본값으로 띄우면 Worker는 `write_scope`의 파일을 하나도 쓸 수 없습니다. 그 실패는 Agent를 띄우고 Task를 분석한 뒤 쓰기 시점에야 드러납니다. `--cwd`가 별도 Git 저장소를 가리키면 그쪽 baseline commit과 `git status`·`git diff`도 Attempt·Evidence에 함께 기록됩니다(리뷰 기준이 워크스페이스가 아니라 수정 대상 저장소이므로).
+
 `dispatch`는 `.harness/policies/agent-policy.yaml`의 `approval_mode`에 따라 Provider CLI에 승인 우회 인수를 붙입니다.
 
 | 모드 | 의미 |

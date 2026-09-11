@@ -324,6 +324,7 @@ PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충�
 PASS: 이벤트 로그 기록
 PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
 PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)
+PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)
 PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)
 PASS: Agent 호출 없음
 PASS: 탭 완성 스크립트 문법
@@ -527,6 +528,30 @@ herdr-harness observe . task-001 worker
 
 - `--print-only`는 **아무 상태도 남기지 않습니다**(Context Packet만 씁니다). 시작하지 않은 시도를 Attempt로 남기면 전이 게이트가 헐거워지기 때문입니다.
 - `adopt`는 등록 전에 `herdr agent get`으로 그 Agent가 실제로 살아 있는지 확인하고, 없으면 거부합니다.
+
+#### Agent를 어디서 띄우는가 — `--cwd`
+
+`dispatch`는 기본적으로 **Harness 워크스페이스**(`.harness/`가 있는 디렉터리)에서 Agent를 띄웁니다. Provider Sandbox의 쓰기 범위가 그 디렉터리를 기준으로 정해집니다 — `codex --sandbox workspace-write`는 기동 디렉터리 **아래만** 쓸 수 있습니다.
+
+계획·상태 문서를 담은 워크스페이스와 수정 대상 코드 저장소를 **따로 두는 구성**이라면 기본값으로는 아무것도 고칠 수 없습니다.
+
+```text
+projects/slot/
+├── harness-dev/      ← 기본값: Agent가 여기서 기동, 쓰기 가능
+│   └── .harness/
+└── code-repo/        ← write_scope는 여기인데 쓰기 거부됨
+```
+
+Worker는 Task를 분석하고 재현까지 마친 뒤 **쓰기 시점에** 막힙니다. 그때까지 쓴 시간과 토큰은 그대로 버려집니다. `--cwd`로 기동 디렉터리를 옮기면 Sandbox 범위가 그쪽으로 갑니다.
+
+```bash
+herdr-harness dispatch . task-002 worker --cwd ../code-repo
+```
+
+- 그 디렉터리가 별도 Git 저장소면 **baseline commit과 `git status`·`git diff`가 양쪽 모두** Attempt·Evidence에 남습니다. 리뷰가 대조할 기준은 워크스페이스가 아니라 실제 수정 대상 저장소이기 때문입니다.
+- `--print-only` 출력에도 같은 `--cwd`가 반영되고, 경로는 셸 인용됩니다.
+- 없는 디렉터리를 주면 Agent를 띄우기 전에 거부합니다.
+- 워크스페이스를 코드 저장소 안에 두는 구성(`code-repo/.harness/`)이라면 기본값으로 충분하며 `--cwd`는 필요 없습니다.
 - `adopt`로 등록한 Pane은 사람이 만든 것이므로 `close-agent`가 `--force` 없이는 닫지 않습니다.
 
 ### 커스텀 프롬프트도 `dispatch`로 — `--extra-prompt`

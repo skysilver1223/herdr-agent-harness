@@ -489,6 +489,77 @@ AC_PY
   [[ ! -e "$test_root/INJECTED" && ! -e "INJECTED" ]] ||
     die "--print-only 인용 검사 중 인젝션이 실행됐습니다."
 
+  # --- dispatch --cwd: Agent를 띄울 디렉터리와 Sandbox 쓰기 범위 -------------
+  # 계획 문서를 담은 워크스페이스와 수정 대상 코드 저장소가 다른 디렉터리인
+  # 구성에서, 기본값(워크스페이스)으로 띄우면 Worker는 write_scope에 적힌
+  # 코드를 한 줄도 쓸 수 없다 — codex --sandbox workspace-write의 쓰기 범위가
+  # 기동 디렉터리 기준이기 때문이다. 실제로 그렇게 막힌 사례가 있었다.
+  local cwd_default_output cwd_custom_output cwd_target
+  cwd_default_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$test_project" task-001 worker --print-only)"
+  printf '%s' "$cwd_default_output" | grep -q "pane split .* --cwd $test_project " ||
+    die "--cwd를 주지 않았을 때 pane split이 워크스페이스에서 열리지 않습니다."
+
+  cwd_target="$test_root/code-repo"
+  mkdir -p "$cwd_target"
+  cwd_custom_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$test_project" task-001 worker --print-only --cwd "$cwd_target")"
+  printf '%s' "$cwd_custom_output" | grep -q "pane split .* --cwd $cwd_target " ||
+    die "--cwd로 준 디렉터리가 pane split 명령에 반영되지 않았습니다."
+  printf '%s' "$cwd_custom_output" | grep -q "^Agent 작업 디렉터리: $cwd_target (--cwd)$" ||
+    die "--cwd가 print-only 요약에 보고되지 않았습니다."
+  # 워크스페이스 경로가 cwd 자리에 남아 있으면 Sandbox 범위가 안 바뀐다.
+  printf '%s' "$cwd_custom_output" | grep -q "pane split .* --cwd $test_project " &&
+    die "--cwd를 줬는데도 pane split이 워크스페이스를 가리킵니다."
+
+  expect_fail "--cwd에 없는 디렉터리를 줬는데 통과" \
+    env HERDR_ENV= bash "$SELF_PATH" dispatch "$test_project" task-001 worker --print-only --cwd "$test_root/no-such-dir"
+  expect_fail "--cwd에 값을 주지 않았는데 통과" \
+    env HERDR_ENV= bash "$SELF_PATH" dispatch "$test_project" task-001 worker --print-only --cwd
+
+  # 위험한 이름의 디렉터리도 붙여 넣기 안전하게 인용돼야 한다.
+  local cwd_tricky="$test_root/code; touch CWD_INJECTED"
+  mkdir -p "$cwd_tricky"
+  local cwd_tricky_commands
+  cwd_tricky_commands="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$test_project" task-001 worker --print-only --cwd "$cwd_tricky" | grep '^  ' || true)"
+  printf '%s' "$cwd_tricky_commands" | grep -qF 'code\;\ touch\ CWD_INJECTED' ||
+    die "--cwd 경로가 print-only 명령 줄에서 셸 인용되지 않았습니다."
+  [[ ! -e "$test_root/CWD_INJECTED" && ! -e "CWD_INJECTED" ]] ||
+    die "--cwd 인용 검사 중 인젝션이 실행됐습니다."
+
+  # 실제 `herdr pane split` 호출은 Herdr 안에서만 돌아 자체 테스트가 실행할 수
+  # 없다. 그래서 --print-only 출력만 검사하면, 실제 경로를 $root로 되돌려도
+  # 테스트는 녹색으로 남는다(실측 확인함). 두 경로가 같은 변수를 쓰는지 소스에서
+  # 직접 확인해 그 구멍을 막는다.
+  local dispatch_src pane_split_lines
+  dispatch_src="$HARNESS_LIB_DIR/55-dispatch.sh"
+  pane_split_lines="$(grep -n 'pane split' "$dispatch_src" || true)"
+  [[ -n "$pane_split_lines" ]] ||
+    die "dispatch에서 pane split 호출을 찾지 못했습니다(파서 확인 필요)."
+  printf '%s' "$pane_split_lines" | grep -q 'herdr pane split --current --direction right --cwd "\$agent_cwd"' ||
+    die "실제 pane split 호출이 \$agent_cwd를 쓰지 않습니다 — --cwd가 Sandbox 범위에 반영되지 않습니다($dispatch_src)."
+  printf '%s' "$pane_split_lines" | grep -q -- '--cwd "\$root"' &&
+    die "pane split이 아직 \$root를 직접 씁니다 — --cwd가 무시됩니다($dispatch_src)."
+
+  # --- dispatch 옵션 정합: 인수 파싱 ↔ help 상세 ↔ 탭 완성 설명 -------------
+  # 명령 이름은 기존 "도움말 정합성"이 검사하지만 옵션은 아무도 보지 않았다.
+  # 실제로 --extra-prompt가 탭 완성 목록에서 빠진 채(줄바꿈 누락으로) 통과했다.
+  local dispatch_options=() dispatch_help_text dispatch_completion_text option
+  mapfile -t dispatch_options < <(
+    awk '/^cmd_dispatch\(\)/ {inside=1}
+         inside && /^}/ {exit}
+         inside && /^      --[a-z-]+\)/ {
+           label = $1; sub(/\).*$/, "", label); print label
+         }' "$HARNESS_LIB_DIR/55-dispatch.sh" | sort -u)
+  [[ "${#dispatch_options[@]}" -ge 4 ]] ||
+    die "dispatch 옵션 정합 검사가 인수 파싱 목록을 읽지 못했습니다(파서 확인 필요)."
+  dispatch_help_text="$(bash "$SELF_PATH" help dispatch)"
+  dispatch_completion_text="$(bash "$SELF_PATH" completion bash)"
+  for option in "${dispatch_options[@]}"; do
+    printf '%s' "$dispatch_help_text" | grep -qF -- "$option" ||
+      die "help dispatch에 설명이 없는 옵션: $option (lib/15-help.sh)"
+    printf '%s' "$dispatch_completion_text" | grep -qF -- "\"$option::" ||
+      die "탭 완성 설명에 없는 dispatch 옵션: $option (lib/85-completion.sh)"
+  done
+
   # --- close-agent는 adopt로 등록한(사람이 만든) Pane을 --force 없이 닫지 않는다 ---
   mkdir -p "$test_project/.harness/runtime"
   printf 'task_id=task-001\nrole=worker\nagent_name=hh-task-001-w-9\npane_id=pane-9\nprovider=codex\nattempt=9\nadopted=1\n' \
@@ -1199,6 +1270,7 @@ STUB
   printf 'PASS: 이벤트 로그 기록\n'
   printf 'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)\n'
   printf 'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)\n'
+  printf 'PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)\n'
   printf 'PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)\n'
   printf 'PASS: Agent 호출 없음\n'
   printf 'PASS: 탭 완성 스크립트 문법\n'
