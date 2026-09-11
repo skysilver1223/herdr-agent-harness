@@ -1363,6 +1363,55 @@ STUB
   ! _runtime_prompt_needs_retry 0 '{"agent_status":"idle"}' 1 'other failure' ||
     die "원인을 모르는 프롬프트 실패를 재시도 대상으로 판정했습니다."
 
+  # --- Herdr Agent 상태 정규화 ---------------------------------------------
+  # 실제 CLI가 반환하는 다섯 상태와 프롬프트 전후 활동 지표를 JSON 표본으로만
+  # 검사한다. 여기서 herdr를 부르면 자체 테스트가 Agent 쿼터를 소모한다.
+  local activity_before activity_changed idle_unchanged done_unchanged
+  local normalized unknown_warning
+  activity_before='{"agent_status":"idle","revision":1,"state_change_seq":7}'
+  activity_changed='{"agent_status":"idle","revision":2,"state_change_seq":8}'
+  idle_unchanged='{"agent_status":"idle","revision":1,"state_change_seq":7}'
+  done_unchanged='{"agent_status":"done","revision":1,"state_change_seq":7}'
+
+  [[ "$(_runtime_normalize_state 0 '{"agent_status":"working","revision":2,"state_change_seq":8}' 0 '' "$activity_before")" == running ]] ||
+    die "working을 running으로 정규화하지 못했습니다(정상 작업 회귀)."
+  [[ "$(_runtime_normalize_state 0 "$activity_changed" 0 '' "$activity_before")" == settled ]] ||
+    die "활동 지표가 변한 idle을 settled로 정규화하지 못했습니다."
+  [[ "$(_runtime_normalize_state 0 '{"agent_status":"done","revision":2,"state_change_seq":8}' 0 '' "$activity_before")" == settled ]] ||
+    die "활동 지표가 변한 done을 settled로 정규화하지 못했습니다."
+  [[ "$(_runtime_normalize_state 0 '{"agent_status":"done","revision":2,"state_change_seq":8}' 0 'agent_prompt_stalled' "$activity_before")" == settled ]] ||
+    die "재전송 성공 뒤 남은 이전 stalled 문구를 현재 실패로 오판했습니다."
+  [[ "$(_runtime_normalize_state 0 '{"agent_status":"blocked","revision":1,"state_change_seq":7}' 0 '' "$activity_before")" == blocked ]] ||
+    die "blocked 정규화가 기존 결과를 보존하지 못했습니다."
+  [[ "$(_runtime_normalize_state 0 '{"agent_status":"unknown","revision":1,"state_change_seq":7}' 0 '' "$activity_before")" == unknown ]] ||
+    die "unknown을 error와 분리하지 못했습니다."
+
+  normalized="$(_runtime_normalize_state 0 "$idle_unchanged" 0 '' "$activity_before")"
+  [[ "$normalized" == prompt_not_delivered ]] ||
+    die "활동 지표가 불변인 idle을 prompt_not_delivered로 판정하지 못했습니다: $normalized"
+  normalized="$(_runtime_normalize_state 0 "$done_unchanged" 0 '' "$activity_before")"
+  [[ "$normalized" == prompt_not_delivered && "$normalized" != settled ]] ||
+    die "활동 지표가 불변인 done을 거짓 settled로 판정했습니다: $normalized"
+  [[ "$(_runtime_normalize_state 1 '' 0 '' "$activity_before")" == agent_lost ]] ||
+    die "agent get 실패의 agent_lost 결과를 보존하지 못했습니다."
+
+  unknown_warning="$(mktemp)"
+  normalized="$(_runtime_normalize_state 0 '{"agent_status":"rebooting","revision":2,"state_change_seq":8}' 0 '' "$activity_before" 2>"$unknown_warning")"
+  [[ "$normalized" == unknown ]] || {
+    rm -f -- "$unknown_warning"
+    die "미지의 agent_status를 unknown으로 정규화하지 못했습니다: $normalized"
+  }
+  grep -q 'rebooting' "$unknown_warning" || {
+    rm -f -- "$unknown_warning"
+    die "미지의 agent_status 경고에 원래 값이 없습니다."
+  }
+  rm -f -- "$unknown_warning"
+
+  _runtime_prompt_needs_retry 0 "$idle_unchanged" 0 '' "$activity_before" ||
+    die "지표 불변으로 확인된 prompt_not_delivered를 1회 재시도 대상으로 판정하지 못했습니다."
+  ! _runtime_prompt_needs_retry 0 "$activity_changed" 0 '' "$activity_before" ||
+    die "지표가 변한 정상 idle을 재시도 대상으로 판정했습니다."
+
   # --- Secret 스캐너: 낱말 가운데 접두사는 오탐이 아니어야 한다 -------------
   #
   # ta"sk-..." 처럼 평범한 Task ID가 OpenAI 키 패턴에 걸리면 Context Packet
@@ -1423,6 +1472,7 @@ STUB
     'PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)'
     'PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)'
     'PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정'
+    'PASS: Agent 상태 정규화'
     'PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)'
     'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)'
     'PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)'

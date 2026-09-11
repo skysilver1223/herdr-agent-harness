@@ -127,7 +127,7 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 2. `harness-spec`(자산 조사 + 인터뷰)과 `harness-plan` 후 사용자가 SPEC과 Wave를 승인합니다.
 3. Orchestrator가 `validate [PATH] --wave ID`로 실행 전제를 검사합니다.
 4. `transition ... active` 후 `dispatch ... worker`로 Worker 한 턴만 실행합니다. Herdr나 Provider CLI 문제로 이 경로가 막히면 `dispatch ... --print-only`로 실행할 명령만 받아 사람이 직접 띄운 뒤 `adopt`로 등록합니다(§7.1).
-5. `blocked`, `timeout`, `stalled`이면 `observe`로 상태를 재조회하고 Orchestrator가 사용자 질문, 대기 또는 중단을 결정합니다.
+5. `running`, `blocked`, `prompt_not_delivered`, `unknown`, `timeout`, `stalled`이면 `observe`로 상태를 재조회하고 Orchestrator가 사용자 질문, 대기 또는 중단을 결정합니다.
 6. Attempt와 Evidence가 준비되면 `transition ... submitted`를 수행합니다. 이 시점에 Harness가 Acceptance Criteria를 직접 실행하고, 모두 통과해야 전이됩니다(§5.1). 이어서 `transition ... reviewing`을 수행합니다.
 7. `dispatch ... reviewer`로 다른 Provider의 읽기 전용 Review 한 턴을 실행합니다.
 8. Review 판정에 따라 `changes_requested` 또는 `awaiting_approval`로 전이합니다.
@@ -137,6 +137,25 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 ### 7.1 Agent 생성 경로와 승인 정책
 
 기본은 `dispatch`입니다. 취향이 아니라 구조 때문입니다 — `transition` 게이트가 Attempt·Evidence의 존재를 요구하므로, Agent 생성을 사람 손에 넘기면 그 게이트가 헐거워집니다. `dispatch`에서만 `pane_id`·`agent_name`·baseline commit·승인 모드·모델과 출처가 자동 기록되고, `observe`·`close-agent`·`quota-check`·`auto-step`이 그 Agent를 찾을 수 있습니다.
+
+`dispatch`·`observe`가 사용하는 상태 정규화는 Herdr의 실제 `agent_status` 다섯 값을
+기준으로 합니다.
+
+| Herdr `agent_status` | Harness 결과 | 판정 근거 |
+| --- | --- | --- |
+| `working` | `running` | 정상 진행 중이며 장애로 전이하지 않음 |
+| `idle`, `done` | `settled` | dispatch에서 프롬프트 전후 `revision`·`state_change_seq` 중 하나 이상이 변함 |
+| `idle`, `done` | `prompt_not_delivered` | dispatch에서 두 활동 지표가 모두 불변 |
+| `blocked` | `blocked` | 기존 의미 보존 |
+| `unknown` | `unknown` | 관측 실패를 Agent 장애와 분리 |
+| 그 밖의 값 | `unknown` + 원래 값 경고 | Herdr의 새 상태를 조용히 `error`로 뭉개지 않음 |
+| `agent get` 실패 | `agent_lost` | 조회 실패의 기존 의미 보존 |
+
+프롬프트 직전 기준값은 REPL 준비 확인 뒤 `herdr agent get`으로 한 번 더 읽습니다.
+`idle`/`done`인데 두 지표가 그대로면 프롬프트 명령의 종료 코드와 관계없이 유실로
+판정하고 기존 경로에서 최대 1회만 재전송합니다. 두 지표 중 하나라도 바뀌어야
+`settled`가 될 수 있습니다. Provider 출력 문자열은 판정 근거로 쓰지 않습니다.
+프롬프트 자체의 기존 `stalled`·`timeout`, 조회 전 기동 단계의 `error`도 유지합니다.
 
 `--print-only`는 상태를 전혀 남기지 않고(Context Packet만 씀) 실행할 `herdr` 명령만 출력하는 폴백이며, `adopt`는 `herdr agent get`으로 생존을 확인한 뒤에만 등록합니다. `adopt`로 등록한 Pane은 사람이 만든 것이므로 `close-agent`가 `--force` 없이는 닫지 않습니다.
 
@@ -210,7 +229,7 @@ Provider를 바꾸지 않습니다** — 아래 확인된 실패 조건과 별�
 
 ### 8.2 auto-step (opt-in, 유한 루프)
 
-`.harness/policies/loop-policy.yaml`의 `enabled: true`로 켜면 `herdr-harness auto-step PATH TASK_ID [--max-turns N]`을 쓸 수 있습니다. 이것도 §1의 "Bash는 한 스텝" 원칙을 어기지 않습니다 — 호출 1회가 정책 상한(`max_turns_ceiling`, 기본 5) 안에서 반드시 끝나는 유한 배치일 뿐, 상주 루프가 아닙니다. 1턴째만 `dispatch`로 Pane을 하나 만들고 이후 턴은 같은 Agent를 `observe`로만 재조회합니다(반복 dispatch는 Pane을 고아로 만듭니다). `settled`·`blocked`·`agent_lost`·`error` 중 하나에 닿으면 즉시 멈추고 사람에게 넘깁니다 — `reviewing`·`awaiting_approval`·`completed`로 이어지는 호출은 코드에 존재하지 않습니다.
+`.harness/policies/loop-policy.yaml`의 `enabled: true`로 켜면 `herdr-harness auto-step PATH TASK_ID [--max-turns N]`을 쓸 수 있습니다. 이것도 §1의 "Bash는 한 스텝" 원칙을 어기지 않습니다 — 호출 1회가 정책 상한(`max_turns_ceiling`, 기본 5) 안에서 반드시 끝나는 유한 배치일 뿐, 상주 루프가 아닙니다. 1턴째만 `dispatch`로 Pane을 하나 만들고 이후 턴은 같은 Agent를 `observe`로만 재조회합니다(반복 dispatch는 Pane을 고아로 만듭니다). `stalled`·`timeout`만 상한 안에서 다시 관측하며, `settled`·`blocked`·`running`·`prompt_not_delivered`·`unknown`·`agent_lost`·`error` 중 하나에 닿으면 즉시 멈추고 사람에게 넘깁니다 — `reviewing`·`awaiting_approval`·`completed`로 이어지는 호출은 코드에 존재하지 않습니다.
 
 두 명령 모두 실행 전 mkdir 기반 Task Lock(`.harness/runtime/TASK_ID.lock`)을 잡습니다. 이건 quota-retry/auto-step 두 자동화 경로끼리의 충돌만 막는 권고적 잠금이며, SQLite Lease나 Fencing Token(§13)이 아닙니다 — 사람이 같은 Task에 수동으로 `dispatch`/`transition`을 실행하는 것까지 막지는 않으므로, 자동 명령이 도는 동안은 `status --live`로 확인하고 수동 개입을 삼가야 합니다.
 

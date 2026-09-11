@@ -320,6 +320,7 @@ PASS: 비대화형 명시적 실패
 PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)
 PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)
 PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정
+PASS: Agent 상태 정규화
 PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)
 PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)
 PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)
@@ -497,7 +498,24 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness quota-retry PATH TASK_ID worker\|reviewer` | (opt-in) 연속 저쿼터 확인 시 Provider 교체를 `handover_required`까지 자동 처리 |
 | `herdr-harness auto-step PATH TASK_ID [--max-turns N]` | (opt-in) 유한 턴 동안 dispatch 1회 + observe 반복 |
 
-`dispatch`는 재시도, 상태 전이, blocked 응답 또는 Provider failover를 수행하지 않습니다. Orchestrator는 반환된 `dispatch_result`를 확인한 뒤 사용자 승인 경계를 지키며 다음 스텝을 호출합니다.
+`dispatch`는 프롬프트 미전달로 확인된 경우의 1회 재전송 외에는 Task 재시도, 상태 전이, blocked 응답 또는 Provider failover를 수행하지 않습니다. Orchestrator는 반환된 `dispatch_result`를 확인한 뒤 사용자 승인 경계를 지키며 다음 스텝을 호출합니다.
+
+`dispatch`가 `herdr agent get`의 상태를 정규화하는 표는 다음과 같습니다. `idle`과
+`done`은 상태 이름만으로 성공 처리하지 않고, 프롬프트 직전과 이후의 `revision`·
+`state_change_seq`가 하나라도 변했는지를 함께 확인합니다.
+
+| Herdr `agent_status` | Harness 결과 | 의미 |
+| --- | --- | --- |
+| `working` | `running` | 정상 작업 중이며 장애가 아님 |
+| `idle`, `done` + 활동 지표 변화 | `settled` | 프롬프트 처리 뒤 터미널 상태에 도달 |
+| `idle`, `done` + 두 활동 지표 불변 | `prompt_not_delivered` | 프롬프트가 실제 처리되지 않은 것으로 판정 |
+| `blocked` | `blocked` | 사용자 입력·승인 등으로 중단 |
+| `unknown` | `unknown` | Herdr가 상태를 관측하지 못함 |
+| 그 밖의 상태값 | `unknown` + 경고 | 새 값을 장애로 단정하지 않고 원래 값을 경고에 표시 |
+| `agent get` 실패 | `agent_lost` | Agent 조회 자체가 실패 |
+
+프롬프트 명령 자체의 기존 `stalled`·`timeout` 판정도 유지됩니다. Pane 생성이나 Agent
+기동처럼 상태 조회 전 단계에서 실패한 경우에는 `error`가 반환될 수 있습니다.
 
 `approve`는 사용자가 채팅에서 **현재 Task의 완료를 명시적으로 승인한 뒤** Orchestrator가
 호출하는 기록 대행 명령입니다. `--confirm-user-approval`이 없거나 Task가
@@ -576,12 +594,13 @@ herdr-harness dispatch . task-001 reviewer --extra-prompt .harness/runtime/task-
 
 ### 첫 프롬프트가 확인 화면에 먹히는 문제
 
-`herdr agent start`는 Provider가 떴다는 것까지만 보장합니다. 그 뒤에도 agy는 REPL 부팅·폴더 신뢰·로그인 화면을, claude는 `bypassPermissions` 첫 확인 화면을 띄울 수 있고, 그 화면에 Context Packet을 보내면 텍스트가 화면에 먹힌 채 Agent는 아무 일도 하지 않고 `idle`로 남습니다 — `dispatch`는 `settled`를 반환하지만 실제로는 한 턴도 돌지 않은 상태입니다.
+`herdr agent start`는 Provider가 떴다는 것까지만 보장합니다. 그 뒤에도 agy는 REPL 부팅·폴더 신뢰·로그인 화면을, claude는 `bypassPermissions` 첫 확인 화면을 띄울 수 있고, 그 화면에 Context Packet을 보내면 텍스트가 화면에 먹힌 채 Agent는 아무 일도 하지 않고 `idle`로 남을 수 있습니다. `done`도 항상 완료를 뜻하지 않습니다. 실제로 명령 승인 프롬프트를 기다리는 동안 `done`이 관측된 사례가 있습니다.
 
 `dispatch`는 이를 두 단계로 막습니다.
 
-1. 프롬프트 전에 Provider REPL이 안정적으로 입력을 받을 수 있을 때까지 기다립니다(agy는 부팅이 느려 더 기다립니다).
-2. Herdr가 `agent_prompt_stalled`을 반환하고 Agent가 여전히 `idle`/`done`인 경우에만 **1회** 다시 보냅니다. 이는 수명주기 변화가 관측되지 않은 유실 신호이므로 정상 턴을 중복 실행하지 않습니다. 화면 출력에 Packet 헤더가 보이는지는 전달 판정에 쓰지 않습니다.
+1. 프롬프트 전에 Provider REPL이 안정적으로 입력을 받을 수 있을 때까지 기다린 뒤(agy는 부팅이 느려 더 기다립니다), `herdr agent get`으로 `revision`과 `state_change_seq` 기준값을 기록합니다.
+2. 전송 뒤 `idle`/`done`인데 두 지표가 모두 그대로면 `prompt_not_delivered`로 판정해 **1회만** 다시 보냅니다. `herdr agent prompt`가 성공을 반환했더라도 같은 규칙을 적용합니다. 기존 `agent_prompt_stalled` 신호도 같은 1회 재전송 경로에 남습니다.
+3. 두 지표 중 하나라도 변한 `idle`/`done`만 `settled`로 봅니다. 화면 출력에 Packet 헤더나 Provider별 부팅 문구가 보이는지는 전달 판정에 쓰지 않습니다.
 
 재전송 여부는 Evidence의 `Prompt 재전송` 항목에 남습니다.
 
@@ -697,7 +716,7 @@ Evidence는 "Worker가 말한 것과 실제 저장소 상태가 일치하는가"
 두 명령 모두 기본은 꺼져 있고(opt-in), 완전 자율 실행이 아니라 **유한하고 되돌릴 수 있는 범위**만 자동화합니다. 둘 다 실행 전에 같은 Task에 대한 mkdir 기반 Task Lock(`.harness/runtime/TASK_ID.lock`)을 잡아, `quota-retry`/`auto-step` 두 자동화 경로끼리 같은 Task에 동시에 들어가는 것을 막습니다 — SQLite Lease나 Fencing Token 같은 완전한 락은 아니며, 사람이 그 사이에 수동으로 `dispatch`/`transition`을 실행하는 것까지 막지는 않으므로 자동 명령이 도는 동안은 `status --live`로 확인하고 수동 개입을 삼가세요.
 
 - **`quota-retry`**: `.harness/policies/quota-policy.yaml`의 `automatic_failover: true`로 켜야 동작합니다. `quota-check`가 남긴 연속 `low` 판정이 `low_confirm_count`회 이상, 그 간격이 `cooldown_seconds` 이상일 때만 진행하며, Task당 1회만 허용합니다(flapping 방지). 진행 시 기존 `close-agent`/`transition`을 그대로 호출해 Provider를 `fallback_chain`의 다음 값으로 바꾸고, `handover_required` 전이 전에 `.harness/handovers/TASK_ID-handover-N.md` stub(사유·Provider 교체·`git diff --stat`·다음 한 단계)을 자동 생성한 뒤 `handover_required`까지 전이하고 **거기서 멈춥니다**(`transition`이 인계 문서를 요구하므로 자동 경로도 인계 문맥을 남깁니다). `ready`로 재개하려면 사람이 `.harness/decisions/TASK_ID-failover-approval.md`에 `승인: yes`를 쓰고 `transition ... ready`를 직접 실행해야 합니다 — `completed`는 물론 이 재개 단계도 자동화하지 않습니다.
-- **`auto-step`**: `.harness/policies/loop-policy.yaml`의 `enabled: true`로 켜야 동작하고, `--max-turns`는 `max_turns_ceiling`(기본 5)을 넘을 수 없습니다. 상주 루프가 아니라 호출 1회가 반드시 끝납니다: 1턴째만 `dispatch`로 Pane을 새로 만들고, 이후 턴은 같은 Agent를 `observe`로만 재조회합니다(반복 dispatch는 Pane을 고아로 만들기 때문에 하지 않습니다). `settled`/`blocked`/오류에 도달하면 즉시 멈추고 판단을 사람에게 넘깁니다 — `reviewing`·`awaiting_approval`·`completed`로 이어지는 코드 경로 자체가 없습니다.
+- **`auto-step`**: `.harness/policies/loop-policy.yaml`의 `enabled: true`로 켜야 동작하고, `--max-turns`는 `max_turns_ceiling`(기본 5)을 넘을 수 없습니다. 상주 루프가 아니라 호출 1회가 반드시 끝납니다: 1턴째만 `dispatch`로 Pane을 새로 만들고, 이후 턴은 같은 Agent를 `observe`로만 재조회합니다(반복 dispatch는 Pane을 고아로 만들기 때문에 하지 않습니다). `stalled`·`timeout`만 정책 상한 안에서 다시 관측하고, `settled`·`blocked`·`running`·`prompt_not_delivered`·`unknown`·`agent_lost`·`error`에 닿으면 즉시 멈추고 판단을 사람에게 넘깁니다 — `reviewing`·`awaiting_approval`·`completed`로 이어지는 코드 경로 자체가 없습니다.
 
 ## 원격 실행 모드 (opt-in)
 

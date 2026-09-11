@@ -324,28 +324,78 @@ _runtime_evidence_observations() {
   printf '%s' "${value:-0}"
 }
 
+_runtime_activity_field() {
+  local input="$1" field="$2" value
+  value="$(_runtime_json_field "$input" "$field")"
+  if [[ -z "$value" ]]; then
+    # jq는 선택 의존성이다. 기존 문자열 전용 fallback으로 읽지 못하는 숫자
+    # revision/state_change_seq도 POSIX 도구만으로 추출한다.
+    value="$(printf '%s' "$input" | tr -d '\n' \
+      | sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p")"
+  fi
+  printf '%s' "$value"
+}
+
+_runtime_prompt_activity_unchanged() {
+  local before_output="$1" after_output="$2"
+  local before_revision before_seq after_revision after_seq
+  before_revision="$(_runtime_activity_field "$before_output" revision)"
+  before_seq="$(_runtime_activity_field "$before_output" state_change_seq)"
+  after_revision="$(_runtime_activity_field "$after_output" revision)"
+  after_seq="$(_runtime_activity_field "$after_output" state_change_seq)"
+  [[ -n "$before_revision" && -n "$before_seq" &&
+     -n "$after_revision" && -n "$after_seq" ]] || return 1
+  [[ "$before_revision" == "$after_revision" && "$before_seq" == "$after_seq" ]]
+}
+
 _runtime_normalize_state() {
   local get_status="$1" get_output="$2" prompt_status="${3:-0}" prompt_output="${4:-}"
-  local state combined
+  local baseline_output="${5:-}" baseline_available=0
+  local state combined display_state
   combined="$prompt_output $get_output"
-  # Agent가 실제로 사라졌으면 stalled보다 agent_lost가 더 실행 가능한 정보다.
+  # Agent가 실제로 사라졌으면 다른 신호보다 agent_lost가 더 실행 가능한 정보다.
   if (( get_status != 0 )); then
     printf 'agent_lost'
     return
   fi
-  if printf '%s' "$combined" | grep -qi 'agent_prompt_stalled'; then
-    printf 'stalled'
-    return
+
+  # 테스트와 독립 호출은 5번째 인수로 기준 JSON을 넘길 수 있다. dispatch는
+  # _runtime_wait_repl_ready가 프롬프트 직전에 잡아 둔 값을 사용한다.
+  if (( $# >= 5 )); then
+    baseline_available=1
+  elif [[ "${RUNTIME_PROMPT_BASELINE_AVAILABLE:-0}" == 1 ]]; then
+    baseline_output="${RUNTIME_PROMPT_BASELINE_OUTPUT:-}"
+    baseline_available=1
   fi
-  if (( prompt_status != 0 )) && printf '%s' "$combined" | grep -Eqi 'timed?[ -]?out|timeout'; then
-    printf 'timeout'
-    return
-  fi
+
   state="$(_runtime_json_field "$get_output" agent_status)"
   case "$state" in
-    idle|done) printf 'settled' ;;
+    working) printf 'running' ;;
     blocked) printf 'blocked' ;;
-    *) printf 'error' ;;
+    unknown) printf 'unknown' ;;
+    idle|done)
+      if (( baseline_available == 1 )) &&
+         _runtime_prompt_activity_unchanged "$baseline_output" "$get_output"; then
+        printf 'prompt_not_delivered'
+      elif (( baseline_available == 1 && prompt_status == 0 )); then
+        # 재전송 뒤 prompt_output에는 첫 실패 문자열도 남아 있다. 최신 전송이
+        # 성공했고 활동 지표가 변했다면 과거 stalled 문구보다 이 확인이 우선이다.
+        printf 'settled'
+      elif printf '%s' "$combined" | grep -qi 'agent_prompt_stalled'; then
+        printf 'stalled'
+      elif (( prompt_status != 0 )) &&
+           printf '%s' "$combined" | grep -Eqi 'timed?[ -]?out|timeout'; then
+        printf 'timeout'
+      else
+        printf 'settled'
+      fi
+      ;;
+    *)
+      display_state="${state:-(빈 값)}"
+      printf '경고: 알 수 없는 Herdr agent_status=%s — unknown으로 보고합니다.\n' \
+        "$display_state" >&2
+      printf 'unknown'
+      ;;
   esac
 }
 
@@ -491,17 +541,20 @@ _runtime_context_packet() {
 # herdr agent start는 Pane에 Provider가 떴다는 것까지만 보장한다. 그 뒤로도
 # agy는 REPL 부팅(수 초)·폴더 신뢰 확인·로그인 화면을, claude는 bypass 첫
 # 확인 화면을 띄울 수 있다. 그 화면들에 Context Packet을 보내면 텍스트가
-# 화면에 먹히고 Agent는 아무 일도 하지 않은 채 idle로 남는다 — dispatch는
-# settled를 반환하지만 실제로는 한 턴도 돌지 않은 상태다(agy에서 반복 관측).
+# 화면에 먹히고 Agent는 아무 일도 하지 않은 채 idle로 남는다. 기존 구현은
+# 이 상태를 settled로 반환했지만 실제로는 한 턴도 돌지 않았다(agy에서 반복 관측).
 #
-# 그래서 (1) 프롬프트 전에 REPL이 안정적으로 idle인지 확인하고,
-# (2) Herdr가 명시적으로 `agent_prompt_stalled`을 반환하면서 Agent가 계속
-# idle인 경우에만 1회 다시 보낸다. Agent 출력에 Packet 본문이 보이는지는
-# Provider의 화면 렌더링·스크롤백에 좌우되므로 전달 여부의 근거가 될 수 없다.
+# 그래서 (1) 프롬프트 전에 REPL이 안정적으로 idle인지 확인하고 활동 지표를
+# 기록한 뒤, (2) 전송 후에도 revision/state_change_seq가 둘 다 그대로인
+# idle/done을 prompt_not_delivered로 판정해 1회만 다시 보낸다. 기존
+# agent_prompt_stalled도 같은 1회 경로를 유지한다. Agent 출력에 Packet 본문이
+# 보이는지는 Provider 렌더링·스크롤백에 좌우되므로 전달 근거로 쓰지 않는다.
 # ---------------------------------------------------------------------------
 _runtime_wait_repl_ready() {
   local agent_name="$1" minimum_s="${2:-3}" deadline_s="${3:-40}"
   local waited=0 stable=0 status_line
+  RUNTIME_PROMPT_BASELINE_OUTPUT=""
+  RUNTIME_PROMPT_BASELINE_AVAILABLE=0
   sleep "$minimum_s"
   waited="$minimum_s"
   while (( waited < deadline_s )); do
@@ -511,10 +564,24 @@ _runtime_wait_repl_ready() {
       *) stable=0 ;;
     esac
     # 연속 2회 idle이어야 "안정"으로 본다 — 부팅 중 한 번 스치는 idle과 구분한다.
-    (( stable >= 2 )) && return 0
+    if (( stable >= 2 )); then
+      # 프롬프트 직전의 revision/state_change_seq 기준값이다. 준비 확인에 쓴
+      # 직전 응답을 재사용하지 않고 한 번 더 읽어 그 사이의 변화를 놓치지 않는다.
+      if status_line="$(herdr agent get "$agent_name" 2>/dev/null)"; then
+        RUNTIME_PROMPT_BASELINE_OUTPUT="$status_line"
+        RUNTIME_PROMPT_BASELINE_AVAILABLE=1
+      fi
+      return 0
+    fi
     sleep 2
     waited=$((waited + 2))
   done
+  # 준비 상한을 넘겨도 기존처럼 dispatch는 계속한다. 다만 가능한 경우에는
+  # 마지막 순간의 활동 지표를 잡아 거짓 settled 판정을 막는다.
+  if status_line="$(herdr agent get "$agent_name" 2>/dev/null)"; then
+    RUNTIME_PROMPT_BASELINE_OUTPUT="$status_line"
+    RUNTIME_PROMPT_BASELINE_AVAILABLE=1
+  fi
   return 0
 }
 
@@ -529,20 +596,30 @@ _runtime_repl_boot_seconds() {
 
 # 첫 전송을 한 번 더 시도해도 안전한가.
 #
-# `herdr agent prompt`는 전송 뒤 5초 안에 Agent lifecycle 변화가 관측되지
-# 않으면 `agent_prompt_stalled`로 실패한다. 그때도 Agent가 idle/done이면
-# Provider REPL이 아직 입력을 받지 못해 첫 텍스트가 버려진 경우다. 반대로
-# settled 응답은 lifecycle 변화가 실제로 관측된 정상 턴이므로, 출력 화면에
-# Packet 헤더가 없더라도 절대 재전송하지 않는다.
+# 프롬프트 전후 revision/state_change_seq가 둘 다 불변이고 Agent가 idle/done이면
+# Herdr 명령의 성공 여부와 무관하게 첫 텍스트가 처리되지 않은 경우다. 기존의
+# `agent_prompt_stalled` + idle/done 조건도 보조 신호로 유지한다. 반대로 활동
+# 지표가 변한 정상 턴은 화면에 Packet 헤더가 없더라도 절대 재전송하지 않는다.
 #
 # blocked는 신뢰 확인·승인 UI일 수 있다. 그 UI에 Enter를 자동 입력하거나
 # Prompt를 반복하지 않고, 호출자가 Evidence를 보고 사용자에게 묻도록 둔다.
 _runtime_prompt_needs_retry() {
   local get_status="$1" get_output="$2" prompt_status="$3" prompt_output="$4"
-  local state
+  local baseline_output="${5:-}" baseline_available=0 state
+  if (( $# >= 5 )); then
+    baseline_available=1
+  elif [[ "${RUNTIME_PROMPT_BASELINE_AVAILABLE:-0}" == 1 ]]; then
+    baseline_output="${RUNTIME_PROMPT_BASELINE_OUTPUT:-}"
+    baseline_available=1
+  fi
+  state="$(_runtime_json_field "$get_output" agent_status)"
+  if (( get_status == 0 && baseline_available == 1 )) &&
+     [[ "$state" == idle || "$state" == done ]] &&
+     _runtime_prompt_activity_unchanged "$baseline_output" "$get_output"; then
+    return 0
+  fi
   (( prompt_status != 0 && get_status == 0 )) || return 1
   printf '%s' "$prompt_output" | grep -qi 'agent_prompt_stalled' || return 1
-  state="$(_runtime_json_field "$get_output" agent_status)"
   [[ "$state" == idle || "$state" == done ]]
 }
 
