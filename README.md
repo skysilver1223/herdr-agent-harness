@@ -330,6 +330,7 @@ PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
 PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)
 PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)
 PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)
+PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)
 PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존)
 PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)
 PASS: Agent 호출 없음
@@ -467,8 +468,10 @@ dispatch — Task의 역할·모델 정책에 맞는 Agent를 Pane에서 한 턴
 
 모델 선택:
   Task의 worker_model/reviewer_model → agent-policy.yaml의 Provider 기본 모델 →
-  Provider CLI 기본값 순서로 고른다. 정책 허용 목록과 정확히 일치한 값만
-  --model로 전달하고, 실제 모델과 출처는 Attempt·Evidence에 남긴다.
+  Provider CLI 기본값 순서로 고른다. 프리미엄 목록이 있으면 Provider 기본값을
+  쓰지 않고 비프리미엄 모델을 명시하며, 프리미엄 모델은 Task·역할·모델별
+  사용자 승인 파일이 있어야 쓴다. 실제 모델·출처·승인 근거는 Attempt·Evidence에
+  남긴다.
 
 역할(ROLE): worker | reviewer
 
@@ -490,7 +493,7 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness validate [PATH] [--wave ID] [--no-git]` | Git 기준선, Task/Wave, Provider, 의존성, 실행 상한과 write scope를 읽기 전용 검증 |
 | `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제. `submitted`로 갈 때는 Acceptance Criteria의 `verified_by` 명령을 직접 실행하고 하나라도 실패하면 거부 |
 | `herdr-harness approve PATH TASK_ID --confirm-user-approval` | 사용자 명시 승인 확인 후 승인 증거를 원자적으로 기록하고 기존 `transition` 게이트로 `completed` 전이 |
-| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS] [--print-only] [--extra-prompt FILE] [--cwd DIR]` | 역할별 Task 모델→Provider 정책 기본 모델→CLI 기본 모델 순으로 선택해 Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
+| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS] [--print-only] [--extra-prompt FILE] [--cwd DIR]` | 역할별 모델을 선택하고 프리미엄 승인·Provider 기본값 누출 차단을 적용한 뒤 Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
 | `herdr-harness observe PATH TASK_ID [worker\|reviewer]` | 기존 Agent를 재조회하고 Evidence에 추가 |
 | `herdr-harness adopt PATH TASK_ID worker\|reviewer --pane PANE --agent NAME [--provider P]` | 사람이 직접 띄운 Agent를 Harness 추적에 등록(`--print-only` 폴백의 마지막 단계) |
 | `herdr-harness close-agent PATH TASK_ID [worker\|reviewer] [--force]` | Harness runtime에 등록된 Pane만 정리 |
@@ -618,9 +621,9 @@ Agent를 띄울 때마다 "이 명령을 실행할까요? (y/n)"을 반복해서
 
 여기서 사라지는 것은 리눅스 명령 실행 같은 **도구 단위 승인**뿐입니다. 작업 방향성에 대한 결정 — Task 상태 전이, 완료 승인 — 은 그대로 사람 몫으로 남습니다.
 
-승인을 건너뛰게 되면 Agent는 셸 명령을 자유롭게 돌릴 수 있으므로, "직접 전이하지 마라"는 프롬프트 지시만으로는 Agent가 스스로 `approve --confirm-user-approval`을 실행하는 것을 막을 수 없습니다. 그래서 `transition`과 `approve`는 **호출한 Pane이 Harness가 추적 중인 Agent Pane이면 거부합니다**(`dispatch`가 띄운 Pane뿐 아니라 `adopt`로 등록한 Pane도 포함) — `herdr pane current`로 현재 pane을 확인해 `.harness/runtime/*.meta`에 기록된 `pane_id`와 대조합니다(환경변수보다 `herdr pane current`를 우선하므로 `HERDR_PANE_ID`를 `env -u`로 지우는 것만으로는 통하지 않습니다. `herdr` 조회 자체가 실패하면 그 환경변수로 떨어지고, 그것도 비어 있으면 Pane을 특정할 수 없어 통과시킵니다 — 아래 단서대로 가드레일이지 경계가 아닙니다). `.meta`에 기록이 없는 사람 Pane과 Orchestrator Pane은 영향을 받지 않습니다.
+승인을 건너뛰게 되면 Agent는 셸 명령을 자유롭게 돌릴 수 있으므로, "직접 전이하지 마라"는 프롬프트 지시만으로는 Agent가 스스로 `approve --confirm-user-approval`을 실행하거나 프리미엄 모델 승인 파일을 만드는 것을 막을 수 없습니다. 그래서 `transition`과 `approve`는 **호출한 Pane이 Harness가 추적 중인 Agent Pane이면 거부**하고, 같은 Pane에서 실행한 `dispatch`는 프리미엄 승인 파일을 인정하지 않습니다(`dispatch`가 띄운 Pane뿐 아니라 `adopt`로 등록한 Pane도 포함) — `herdr pane current`로 현재 pane을 확인해 `.harness/runtime/*.meta`에 기록된 `pane_id`와 대조합니다(환경변수보다 `herdr pane current`를 우선하므로 `HERDR_PANE_ID`를 `env -u`로 지우는 것만으로는 통하지 않습니다. `herdr` 조회 자체가 실패하면 그 환경변수로 떨어지고, 그것도 비어 있으면 Pane을 특정할 수 없어 통과시킵니다 — 아래 단서대로 가드레일이지 경계가 아닙니다). `.meta`에 기록이 없는 사람 Pane과 Orchestrator Pane은 영향을 받지 않습니다.
 
-> **이것은 가드레일이지 보안 경계가 아닙니다.** Agent는 사용자와 같은 권한으로 돌기 때문에 `.meta`를 고치거나 `lib/40-transition.sh` 자체를 고칠 수 있습니다. 여기서 막는 것은 "지시를 따르다가 흘러가서" 스스로 완료를 선언하는 기본 동작이지, 적대적 Agent가 아닙니다. 진짜 경계를 원하면 OS 수준 분리(별도 계정·컨테이너)가 필요하고 그건 아직 Deferred 항목입니다.
+> **이것은 가드레일이지 보안 경계가 아닙니다.** Agent는 사용자와 같은 권한으로 돌기 때문에 `.meta`, 승인 파일이나 Harness 스크립트 자체를 고칠 수 있습니다. 완료 승인과 프리미엄 모델 승인을 지시를 따라 스스로 통과시키는 기본 동작을 막을 뿐, 적대적 Agent를 막지는 못합니다. 진짜 경계를 원하면 OS 수준 분리(별도 계정·컨테이너)가 필요하고 그건 아직 Deferred 항목입니다.
 
 - 프로젝트를 만들 때 `herdr-harness init PATH --approval-mode ask|auto|bypass`로 정하고, 이후에는 `agent-policy.yaml`을 직접 고칩니다.
 - 표의 값은 공백으로 나뉘어 `herdr agent start ... -- <인수>`로 전달됩니다. **임의의 Provider 옵션을 넣는 통로가 아닙니다** — Provider별로, 그리고 **모드별로** 허용 플래그와 허용 값이 갈립니다. `--add-dir /`, `--model opus` 같은 승인과 무관한 인수는 거부되고, `auto` 칸에 `--permission-mode bypassPermissions`나 `--dangerously-*`를 넣는 것도 거부됩니다(같은 값이 `bypass` 칸에서는 통과). 그러지 않으면 정책 파일 한 줄로 `auto`가 사실상 full-access가 되면서 기록에는 계속 `auto`로 남습니다.
@@ -656,21 +659,29 @@ agent_policy:
 - `*_models`는 공백 구분 허용 목록입니다. Task 값과 `*_default_model`은 목록의
   토큰과 정확히 일치해야 하며, CLI에는 Task 문자열이 아니라 목록에서 찾은 값만
   `--model <MODEL>`로 전달됩니다.
-- Task 값이 목록 밖이거나 목록이 비어 있으면 경고 후 모델 인수를 붙이지 않고
-  Provider 기본값을 씁니다. 오타 때문에 Wave 전체를 중단하지 않습니다.
-- 모델 미지정 Task와 빈 초기 정책은 기존과 똑같이 모델 인수를 붙이지 않습니다.
+- 프리미엄 목록이 비어 있으면 Task 값이 목록 밖이거나 목록이 비어 있을 때 경고 후
+  모델 인수를 붙이지 않는 기존 동작을 유지합니다. 모델 미지정 Task와 빈 초기
+  정책도 기존과 똑같이 Provider CLI 기본값을 씁니다.
 - `*_premium_models`는 프리미엄(최상위) 등급의 선언입니다. `*_models`를 넓히지
-  않으며, 전체 모델 ID가 허용 목록 토큰과 정확히 일치할 때만 `적용`입니다.
-  목록 밖 선언은 `미적용`으로 표시됩니다. 이 명령은 선언·표시만 담당하고 승인
-  게이트 집행은 하지 않습니다.
+  않으며, 전체 모델 ID가 허용 목록 토큰과 정확히 일치해야 합니다. 하나라도
+  일치하지 않으면 런타임은 fail-open 대신 Pane 생성 전 dispatch를 거부합니다.
+- 프리미엄 목록이 있으면 모델 미지정 Task도 Provider CLI의 보이지 않는 기본값에
+  맡기지 않습니다. 비프리미엄 `*_default_model`, 없으면 `*_models`의 첫
+  비프리미엄 token을 `--model`로 명시합니다. 둘 다 없으면 `*_default_model`
+  설정 안내와 함께 dispatch를 거부합니다.
+- 프리미엄 모델은 `.harness/decisions/TASK_ID-model-approval.md`의 `Task`, `역할`,
+  `모델`, `승인: yes`가 현재 dispatch와 모두 일치할 때만 사용합니다. 없거나
+  불일치하면 경고 후 위 규칙의 비프리미엄 모델로 강등합니다. 승인은 Attempt가
+  아니라 Task+역할+모델 범위라 같은 Task의 재시도에서는 유지됩니다.
 - 목록 조회와 갱신은 `herdr-harness models PATH`를 사용합니다. `agy`는 실제
   `agy models` 결과와 정책의 추가·삭제·유지를 보여 주지만, 비대화형 조회 경로가
   없는 `codex`·`claude`는 `조회 경로 없음 — 수동 관리`로 표시하고 값을 추측하지
   않습니다.
 - 승인용 `*_auto`/`*_bypass` 표는 모델 통로가 아닙니다. 그 표의 `--model opus`는
   계속 거부되며, 모델 선택은 별도의 허용 목록 검사를 거칩니다.
-- `dispatch`는 Attempt와 Evidence에 모델 및 출처를 `Task 지정`, `정책 기본값`,
-  `Provider 기본값(미지정 또는 지정 거부)`으로 구분해 기록합니다.
+- `dispatch`는 Attempt와 Evidence에 모델·출처와 프리미엄 승인 근거 또는 구체적인
+  거부 사유를 기록합니다. 승인 파일의 모델 값은 비교에만 쓰고 argv에는 허용
+  목록에서 꺼낸 token만 전달합니다.
 
 모델 정책 명령은 `sync-templates`와 같은 안전 규약을 사용합니다.
 

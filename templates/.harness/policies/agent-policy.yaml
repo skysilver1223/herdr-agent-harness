@@ -41,7 +41,9 @@ agent_policy:
 
   # 프리미엄은 비용·승인 등급의 선언일 뿐 허용 목록을 넓히지 않는다.
   # 전체 모델 ID를 공백으로 구분하며 *_models와 정확히 일치할 때만 적용 상태다.
-  # 실제 승인 게이트는 별도 단계에서 집행한다.
+  # 목록이 비어 있지 않으면 dispatch가 Provider 기본 모델도 비프리미엄으로
+  # 명시 고정하며, 프리미엄 모델은 TASK_ID-model-approval.md의 Task·역할·모델·
+  # 승인(yes)이 모두 현재 dispatch와 일치할 때만 사용한다.
   claude_premium_models: ''
   codex_premium_models: ''
   agy_premium_models: ''

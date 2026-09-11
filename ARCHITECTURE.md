@@ -171,14 +171,28 @@ Agent가 기동되는 디렉터리는 기본값이 Harness 워크스페이스이
 
 사라지는 것은 **도구 단위 승인**뿐이며 상태 전이와 완료 승인은 그대로 사람 몫입니다. 정책 파일은 임의의 Provider 옵션을 넣는 통로가 아니라, Provider별·모드별로 허용 플래그와 값이 고정된 표입니다. 실제로 쓰인 모드와 인수는 Attempt·Evidence에 기록되고, 이 파일이 없는 예전 프로젝트에서는 인수를 붙이지 않습니다(= `ask`).
 
-모델 선택은 승인 인수와 분리된 타입 있는 경로다. Task YAML의 역할별
+모델 선택은 도구 승인 인수와 분리된 타입 있는 경로다. Task YAML의 역할별
 `worker_model`/`reviewer_model` → `agent-policy.yaml`의
 `<provider>_default_model` → Provider CLI 기본값 순으로 선택한다. 앞의 두 값은
 Provider별 공백 구분 `<provider>_models` 목록의 토큰과 정확히 일치해야 한다.
 Task 문자열은 비교에만 쓰고, 실제 argv에는 목록에서 꺼낸 토큰만
-`--model <MODEL>`로 넣는다. 목록 밖 값·빈 목록·선행 `-` 같은 플래그 주입은
-경고 후 Provider 기본값으로 정규화하며 dispatch/Wave를 중단하지 않는다.
-미지정 Task는 모델 argv를 전혀 추가하지 않아 기존 기동 인수가 유지된다.
+`--model <MODEL>`로 넣는다.
+
+`<provider>_premium_models`가 비어 있으면 목록 밖 값·빈 목록·선행 `-` 같은
+플래그 주입은 경고 후 Provider 기본값으로 정규화하고, 미지정 Task는 모델 argv를
+추가하지 않는다. 즉 기존 기동 인수가 유지된다. 프리미엄 목록이 하나라도 있으면
+보이지 않는 Provider CLI 기본값을 쓰지 않는다. 미지정·거부된 후보에는
+비프리미엄 `<provider>_default_model`, 없으면 `<provider>_models`의 첫 비프리미엄
+token을 명시한다. 둘 다 없으면 설정 안내와 함께 Pane 생성 전에 거부한다.
+
+선택 후보가 프리미엄이면 `.harness/decisions/TASK_ID-model-approval.md`의 `Task`,
+`역할`, `모델`, `승인: yes`가 현재 dispatch와 모두 일치해야 한다. 승인은
+Task+역할+모델 범위이며 Attempt마다 다시 받지 않는다. 승인 없음·필드 불일치·
+Agent Pane 호출은 해당 모델을 argv에 싣지 않고 위 비프리미엄 규칙으로 강등한다.
+승인 파일의 모델 문자열은 비교에만 쓰며 argv는 여전히 허용 목록 token에서 만든다.
+선택·출처·승인 근거나 거부 사유는 Attempt·Evidence와 runtime meta에 기록한다.
+프리미엄 선언 중 하나라도 허용 목록과 정확히 일치하지 않으면 설정 오류로 dispatch를
+거부한다. 이는 승인 없음에 따른 강등과 구별되는 fail-open 차단이다.
 
 Worker와 Reviewer 필드를 나눈 것은 역할마다 다른 모델을 고를 수 있게 해 같은
 결함을 같은 방식으로 놓치는 상관관계를 줄이기 위해서다. 난이도와 비용 판단은
@@ -201,8 +215,9 @@ Task 기안자의 몫이며 Bash는 추측하지 않는다. 실제 선택과 출
 `<provider>_premium_models`는 공백 구분 프리미엄 선언이다. 한 호출에 같은
 Provider를 여러 번 지정하면 누적되고, 빈 값은 비우며, 언급하지 않은 Provider는
 보존한다. 이 선언은 `<provider>_models`를 넓히지 않고 정확히 같은 전체 모델 ID가
-있을 때만 적용 상태다. 그 외에는 `미적용`으로 명시한다. 이 단계는 선언·표시만
-하며 런타임 승인 게이트는 넣지 않는다.
+있을 때만 적용 상태다. 그 외에는 `미적용`으로 명시하며, 런타임 dispatch는 그
+상태를 fail-open하지 않고 거부한다. `models` 명령은 선언·표시를 담당하고 실제
+승인 집행과 누출 차단은 `_runtime_select_model`이 담당한다.
 
 `agent-policy.yaml` 정본은 `templates/`에 있고 `sync-templates`는 기존 정책 값을
 템플릿에 재주입한 뒤 새 모델·프리미엄 키를 전파하므로, 사용자가 조정한 승인·모델
@@ -311,7 +326,7 @@ Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않�
 ## 12. 보안과 신뢰 경계
 
 - `write_scope`와 Skill은 운영 지침이지 Sandbox가 아닙니다.
-- 승인 우회 모드에서는 Agent가 셸을 자유롭게 쓸 수 있으므로, 프롬프트 지시만으로는 Agent가 스스로 `approve`를 실행하는 것을 막을 수 없습니다. 그래서 `transition`과 `approve`는 호출한 Pane이 Harness가 추적 중인 Agent Pane(`dispatch`가 띄운 것과 `adopt`로 등록한 것 모두)이면 거부합니다 — 현재 Pane은 환경변수가 아니라 `herdr pane current`(터미널을 직접 보고 답함)를 우선 사용해 `.harness/runtime/*.meta`의 `pane_id`와 대조하므로, `HERDR_PANE_ID`를 `env -u`로 지우는 것만으로는 우회되지 않습니다. `herdr` 조회 자체가 실패하면 그 환경변수로 떨어지고, 그것도 비어 있으면 Pane을 특정할 수 없어 통과시킵니다 — 아래 단서 그대로 가드레일이지 경계가 아닙니다. `.meta`에 기록이 없는 사람·Orchestrator Pane은 영향받지 않습니다. 이것은 가드레일이지 보안 경계가 아닙니다(Agent는 사용자와 같은 권한이라 `.meta`나 스크립트 자체를 고칠 수 있습니다).
+- 승인 우회 모드에서는 Agent가 셸을 자유롭게 쓸 수 있으므로, 프롬프트 지시만으로는 Agent가 스스로 `approve`를 실행하거나 프리미엄 모델 승인 파일을 만드는 것을 막을 수 없습니다. 그래서 `transition`과 `approve`는 호출한 Pane이 Harness가 추적 중인 Agent Pane(`dispatch`가 띄운 것과 `adopt`로 등록한 것 모두)이면 거부하고, 같은 Pane에서 실행된 `dispatch`는 프리미엄 승인을 인정하지 않습니다. 현재 Pane은 환경변수가 아니라 `herdr pane current`(터미널을 직접 보고 답함)를 우선 사용해 `.harness/runtime/*.meta`의 `pane_id`와 대조하므로, `HERDR_PANE_ID`를 `env -u`로 지우는 것만으로는 우회되지 않습니다. `herdr` 조회 자체가 실패하면 그 환경변수로 떨어지고, 그것도 비어 있으면 Pane을 특정할 수 없어 통과시킵니다 — 아래 단서 그대로 가드레일이지 경계가 아닙니다. `.meta`에 기록이 없는 사람·Orchestrator Pane은 영향받지 않습니다. 이것은 비용 통제를 위한 운영 가드레일이지 보안 경계가 아닙니다(Agent는 사용자와 같은 권한이라 `.meta`, 승인 파일이나 스크립트 자체를 고칠 수 있습니다).
 - Secret을 Prompt, Evidence, Pane 기록에 넣지 않습니다.
 - 배포, 삭제, 외부 쓰기는 사용자 승인을 받습니다.
 - Worker의 자체 테스트만으로 완료하지 않습니다.

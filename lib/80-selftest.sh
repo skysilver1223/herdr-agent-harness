@@ -665,6 +665,186 @@ AC_PY
   grep -q "printf -- '- Captured:.*- Model:.*- Model source:" "$dispatch_src" ||
     die "dispatch Evidence에 Model과 Model source 기록이 없습니다."
 
+  # --- 프리미엄 모델 승인: 좁은 승인 범위 + Provider 기본값 누출 차단 ------
+  local premium_project="$test_root/premium-model-project" premium_policy premium_task
+  local premium_output premium_error premium_start_line approval_file other_approval
+  local pane_stub_dir="$test_root/premium-pane-stub"
+  cp -a "$model_project" "$premium_project"
+  premium_policy="$premium_project/.harness/policies/agent-policy.yaml"
+  sed -i \
+    -e "s|^  codex_models:.*|  codex_models: 'gpt-5.6-sol gpt-6-astra gpt-5.6-terra'|" \
+    -e "s|^  codex_default_model:.*|  codex_default_model: 'gpt-5.6-sol'|" \
+    -e "s|^  codex_premium_models:.*|  codex_premium_models: 'gpt-6-astra'|" \
+    "$premium_policy"
+  premium_task="$premium_project/.harness/tasks/task-premium.yaml"
+  sed -e 's/^task_id:.*/task_id: task-premium/' \
+      -e "s/^worker_model:.*/worker_model: 'gpt-6-astra'/" \
+    "$model_task" >"$premium_task"
+  approval_file="$premium_project/.harness/decisions/task-premium-model-approval.md"
+
+  # 승인 없음: 프리미엄 token은 argv에 없고 비프리미엄 정책 기본값으로 한 번
+  # 강등한다. 경고와 승인 거부 근거도 print-only 결과에 함께 드러난다.
+  premium_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-premium worker --print-only 2>&1)"
+  premium_start_line="$(printf '%s\n' "$premium_output" | grep '^  herdr agent start ')"
+  [[ "$premium_start_line" == *'--model gpt-5.6-sol'* && "$premium_start_line" != *'gpt-6-astra'* ]] ||
+    die "승인 없는 프리미엄 모델이 안전한 비프리미엄 모델로 강등되지 않았습니다: $premium_start_line"
+  printf '%s' "$premium_output" | grep -q '프리미엄 모델 승인이 없어 요청을 강등' ||
+    die "승인 없는 프리미엄 모델 강등 경고가 없습니다."
+  printf '%s' "$premium_output" | grep -q '프리미엄 모델 승인: 거부 — 승인 기록 없음' ||
+    die "승인 없는 프리미엄 모델의 거부 근거가 기록되지 않았습니다."
+
+  # 정확한 Task+역할+모델+yes만 승인한다. 파일의 모델 값은 비교에만 쓰고,
+  # argv에는 계속 허용 목록에서 찾은 token이 들어간다.
+  printf '%s\n' \
+    '- Task: task-premium' '- 역할: worker' '- 모델: gpt-6-astra' '- 승인: yes' \
+    >"$approval_file"
+  premium_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-premium worker --print-only 2>&1)"
+  printf '%s' "$premium_output" | grep -q 'herdr agent start .* --model gpt-6-astra' ||
+    die "정확히 승인된 프리미엄 모델이 argv에 전달되지 않았습니다."
+  printf '%s' "$premium_output" | grep -q '프리미엄 모델 승인: 승인됨 (.harness/decisions/task-premium-model-approval.md)' ||
+    die "프리미엄 모델 승인 근거 경로가 기록되지 않았습니다."
+
+  printf '%s\n' \
+    '- Task: task-premium' '- 역할: reviewer' '- 모델: gpt-6-astra' '- 승인: yes' \
+    >"$approval_file"
+  premium_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-premium worker --print-only 2>&1)"
+  printf '%s' "$premium_output" | grep -q '역할 불일치' ||
+    die "승인 파일 역할 불일치 사유가 경고에 없습니다."
+  printf '%s' "$premium_output" | grep -q 'herdr agent start .* --model gpt-6-astra' &&
+    die "다른 역할의 승인으로 프리미엄 모델이 전달됐습니다."
+
+  printf '%s\n' \
+    '- Task: task-other' '- 역할: worker' '- 모델: gpt-6-astra' '- 승인: yes' \
+    >"$approval_file"
+  premium_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-premium worker --print-only 2>&1)"
+  printf '%s' "$premium_output" | grep -q 'Task 불일치' ||
+    die "승인 파일 Task 불일치 사유가 경고에 없습니다."
+  printf '%s' "$premium_output" | grep -q 'herdr agent start .* --model gpt-6-astra' &&
+    die "다른 Task 값의 승인으로 프리미엄 모델이 전달됐습니다."
+
+  printf '%s\n' \
+    '- Task: task-premium' '- 역할: worker' '- 모델: gpt-5.6-terra' '- 승인: yes' \
+    >"$approval_file"
+  premium_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-premium worker --print-only 2>&1)"
+  printf '%s' "$premium_output" | grep -q '모델 불일치' ||
+    die "승인 파일 모델 불일치 사유가 경고에 없습니다."
+  printf '%s' "$premium_output" | grep -q 'herdr agent start .* --model gpt-6-astra' &&
+    die "다른 모델의 승인으로 프리미엄 모델이 전달됐습니다."
+
+  rm -f "$approval_file"
+  other_approval="$premium_project/.harness/decisions/task-other-model-approval.md"
+  printf '%s\n' \
+    '- Task: task-other' '- 역할: worker' '- 모델: gpt-6-astra' '- 승인: yes' \
+    >"$other_approval"
+  premium_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-premium worker --print-only 2>&1)"
+  printf '%s' "$premium_output" | grep -q '승인이 없어 요청을 강등' ||
+    die "다른 Task 전용 승인 파일이 현재 Task의 승인 없음으로 처리되지 않았습니다."
+  printf '%s' "$premium_output" | grep -q 'herdr agent start .* --model gpt-6-astra' &&
+    die "다른 Task 전용 승인으로 프리미엄 모델이 전달됐습니다."
+
+  printf '%s\n' \
+    '- Task: task-premium' '- 역할: worker' '- 모델: gpt-6-astra' '- 승인: no' \
+    >"$approval_file"
+  premium_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-premium worker --print-only 2>&1)"
+  printf '%s' "$premium_output" | grep -q '승인 값이 yes가 아님' ||
+    die "yes가 아닌 승인 값의 거부 사유가 경고에 없습니다."
+  printf '%s' "$premium_output" | grep -q 'herdr agent start .* --model gpt-6-astra' &&
+    die "yes가 아닌 승인으로 프리미엄 모델이 전달됐습니다."
+
+  # 프리미엄 목록이 비면 같은 모델은 일반 허용 모델로서 종전과 동일하게
+  # 승인 파일 없이 전달된다(게이트 opt-in 및 task-006 하위 호환).
+  sed -i "s|^  codex_premium_models:.*|  codex_premium_models: ''|" "$premium_policy"
+  rm -f "$approval_file"
+  premium_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-premium worker --print-only 2>&1)"
+  printf '%s' "$premium_output" | grep -q 'herdr agent start .* --model gpt-6-astra' ||
+    die "빈 프리미엄 목록이 기존 모델 선택 argv를 바꿨습니다."
+
+  # 게이트가 켜진 모델 미지정 Task는 Provider CLI 기본값을 쓰지 않는다.
+  sed -i "s|^  codex_premium_models:.*|  codex_premium_models: 'gpt-6-astra'|" "$premium_policy"
+  premium_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-model-default worker --print-only 2>&1)"
+  premium_start_line="$(printf '%s\n' "$premium_output" | grep '^  herdr agent start ')"
+  [[ "$premium_start_line" == *'--model gpt-5.6-sol'* ]] ||
+    die "프리미엄 정책이 있는데 모델 미지정 dispatch가 비프리미엄 모델을 명시하지 않았습니다."
+
+  # 정책 기본값 자체가 프리미엄이면 미승인 고정값으로 쓰지 않고 목록의 첫
+  # 비프리미엄 token을 사용하며, 사용자가 고른 값이 아님을 출처에 남긴다.
+  sed -i "s|^  codex_default_model:.*|  codex_default_model: 'gpt-6-astra'|" "$premium_policy"
+  premium_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-model-default worker --print-only 2>&1)"
+  premium_start_line="$(printf '%s\n' "$premium_output" | grep '^  herdr agent start ')"
+  [[ "$premium_start_line" == *'--model gpt-5.6-sol'* && "$premium_start_line" != *'gpt-6-astra'* ]] ||
+    die "프리미엄 정책 기본값이 승인 없이 고정값으로 사용됐습니다."
+  printf '%s' "$premium_output" | grep -q '출처: 정책 목록 첫 비프리미엄 (누출 차단)' ||
+    die "목록에서 고른 누출 차단 모델의 출처가 기록되지 않았습니다."
+
+  # 고정할 비프리미엄 모델이 없으면 Provider 기본값으로 fail-open하지 않는다.
+  sed -i \
+    -e "s|^  codex_models:.*|  codex_models: 'gpt-6-astra'|" \
+    -e "s|^  codex_default_model:.*|  codex_default_model: 'gpt-6-astra'|" \
+    "$premium_policy"
+  set +e
+  premium_error="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-premium worker --print-only 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "전부 프리미엄인 정책이 dispatch를 거부하지 않았습니다."
+  printf '%s' "$premium_error" | grep -q '고정할 비프리미엄 모델이 없습니다.*codex_default_model' ||
+    die "비프리미엄 고정 불가 오류에 default_model 설정 안내가 없습니다."
+
+  # 프리미엄 선언 하나라도 허용 목록과 정확히 맞지 않으면 강등이 아니라
+  # 설정 오류로 Pane 생성 전에 거부한다.
+  sed -i \
+    -e "s|^  codex_models:.*|  codex_models: 'gpt-5.6-sol gpt-6-astra'|" \
+    -e "s|^  codex_default_model:.*|  codex_default_model: 'gpt-5.6-sol'|" \
+    -e "s|^  codex_premium_models:.*|  codex_premium_models: 'gpt-6-astra gpt-unknown-premium'|" \
+    "$premium_policy"
+  set +e
+  premium_error="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-premium worker --print-only 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "허용 목록과 불일치하는 프리미엄 선언이 fail-open했습니다."
+  printf '%s' "$premium_error" | grep -q '정책 오류(fail-open 차단).*허용 목록과 정확히 일치하지 않습니다' ||
+    die "프리미엄 선언 불일치가 승인 없음 강등과 구분된 오류를 내지 않았습니다."
+  [[ "$premium_error" != *'승인이 없어 요청을 강등'* ]] ||
+    die "프리미엄 선언 설정 오류가 승인 없음 강등으로 잘못 보고됐습니다."
+
+  # Agent Pane에서 실행된 dispatch는 내용이 정확한 승인 파일도 인정하지 않는다.
+  sed -i "s|^  codex_premium_models:.*|  codex_premium_models: 'gpt-6-astra'|" "$premium_policy"
+  printf '%s\n' \
+    '- Task: task-premium' '- 역할: worker' '- 모델: gpt-6-astra' '- 승인: yes' \
+    >"$approval_file"
+  printf '%s\n' 'pane_id=wPREMIUM:p9' \
+    >"$premium_project/.harness/runtime/task-existing-worker.meta"
+  mkdir -p "$pane_stub_dir"
+  cat >"$pane_stub_dir/herdr" <<'PREMIUM_HERDR_STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == pane && "${2:-}" == current ]]; then
+  printf '{"pane_id":"wPREMIUM:p9"}\n'
+  exit 0
+fi
+exit 125
+PREMIUM_HERDR_STUB
+  chmod +x "$pane_stub_dir/herdr"
+  premium_output="$(PATH="$pane_stub_dir:$PATH" HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-premium worker --print-only 2>&1)"
+  printf '%s' "$premium_output" | grep -q 'Agent Pane에서 실행된 dispatch' ||
+    die "Agent Pane dispatch가 프리미엄 승인을 인정하지 않는다는 경고가 없습니다."
+  printf '%s' "$premium_output" | grep -q 'herdr agent start .* --model gpt-6-astra' &&
+    die "Agent Pane에서 자기 승인한 프리미엄 모델이 argv에 전달됐습니다."
+
+  # 승인 파일의 모델 값은 비교 전용이다. 플래그·셸 메타문자와 중복 필드가
+  # 있어도 어느 조각도 argv에 닿지 않고 승인 자체가 거부되어야 한다.
+  printf '%s\n' \
+    '- Task: task-premium' '- 역할: worker' '- 모델: --add-dir /;touch APPROVAL_INJECTED' \
+    '- 모델: gpt-6-astra' '- 승인: yes' >"$approval_file"
+  premium_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$premium_project" task-premium worker --print-only 2>&1)"
+  printf '%s' "$premium_output" | grep -q '모델 필드 누락 또는 중복' ||
+    die "중복·오염된 승인 모델 필드가 거부되지 않았습니다."
+  printf '%s' "$premium_output" | grep -q -- '--add-dir\|APPROVAL_INJECTED' &&
+    die "승인 파일의 모델 문자열이 dispatch argv 또는 출력에 닿았습니다."
+
+  grep -q "printf -- '- Started:.*- Model approval:" "$dispatch_src" ||
+    die "dispatch Attempt에 프리미엄 모델 승인 근거 기록이 없습니다."
+  grep -q "printf -- '- Captured:.*- Model approval:" "$dispatch_src" ||
+    die "dispatch Evidence에 프리미엄 모델 승인 근거 기록이 없습니다."
+
   # --- models: 실제 Provider 호출 없이 목록 diff·정책 갱신·보존 검증 ------
   local models_project="$test_root/models-command-project" models_policy models_out
   local models_before="$test_root/models-before.yaml" models_once="$test_root/models-once.yaml"
@@ -1635,6 +1815,7 @@ STUB
     'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)'
     'PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)'
     'PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)'
+    'PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)'
     'PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존)'
     'PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)'
     'PASS: Agent 호출 없음'

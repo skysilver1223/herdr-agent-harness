@@ -255,12 +255,28 @@ EOF
   역할별 Task 필드 → agent-policy.yaml의 <provider>_default_model → Provider
   CLI 기본값이다. Task 필드나 정책 기본값은 같은 정책 파일의
   <provider>_models 공백 구분 허용 목록에 정확히 있어야만 --model로 전달된다.
-  목록 밖 값과 플래그처럼 보이는 값은 경고 후 무시하며 Provider 기본값을 쓴다.
+  단, <provider>_premium_models가 비어 있지 않으면 Provider CLI 기본값으로
+  넘기지 않고 비프리미엄 정책 기본값 또는 허용 목록의 첫 비프리미엄 모델을
+  명시한다. 고정할 모델이 없거나 프리미엄 선언이 허용 목록과 맞지 않으면
+  fail-open을 막기 위해 Pane을 만들기 전에 dispatch를 거부한다.
+
+프리미엄 모델 승인:
+  프리미엄 모델은 .harness/decisions/TASK_ID-model-approval.md에 아래 네 값이
+  현재 dispatch와 정확히 일치할 때만 사용한다.
+
+    - Task: task-001
+    - 역할: worker
+    - 모델: gpt-6-astra
+    - 승인: yes
+
+  승인이 없거나 불일치하면 비프리미엄 모델로 강등하고 경고한다. Harness가
+  추적 중인 Agent Pane에서 실행한 dispatch는 승인 파일이 정확해도 인정하지
+  않는다. 선택 모델·출처·승인 또는 거부 근거는 Attempt·Evidence에 남는다.
+  프리미엄 목록이 비어 있으면 이 게이트와 명시 고정은 발동하지 않는다.
 
   허용 모델은 \`$SCRIPT_NAME models PATH\`로 확인한다. agy는 실제 목록을
   조회하고, 조회 경로가 없는 claude·codex는 수동 관리로 안내한다. 모델명은
-  코드가 아니라 agent-policy.yaml의 목록에서 관리한다. 실제 선택된 모델
-  (또는 Harness 미지정)과 출처는 Attempt·Evidence에 남는다.
+  코드가 아니라 agent-policy.yaml의 목록에서 관리한다.
 
 역할(ROLE): worker | reviewer
 

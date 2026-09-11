@@ -125,7 +125,7 @@ _runtime_write_result() {
 _runtime_write_meta() {
   local root="$1" task_id="$2" role="$3" agent_name="$4" pane_id="$5" provider="$6" attempt="$7"
   local adopted="${8:-0}"
-  local model="${9:-}" model_source="${10:-}"
+  local model="${9:-}" model_source="${10:-}" model_approval="${11:-}"
   local destination temporary
   destination="$root/.harness/runtime/$task_id-$role.meta"
   temporary="$(mktemp "$root/.harness/runtime/.meta.XXXXXX")"
@@ -139,6 +139,7 @@ _runtime_write_meta() {
     printf 'adopted=%s\n' "$adopted"
     printf 'model=%s\n' "$model"
     printf 'model_source=%s\n' "$model_source"
+    printf 'model_approval=%s\n' "$model_approval"
   } >"$temporary"
   chmod 0644 "$temporary"
   mv -f -- "$temporary" "$destination"
@@ -821,8 +822,8 @@ _runtime_agent_args() {
 #
 # Task YAML의 문자열을 argv에 직접 싣지 않는다. Provider별 *_models 정책을
 # 안전한 토큰으로 먼저 해석한 뒤, Task/정책 기본값과 정확히 일치한 "목록 쪽
-# 토큰"만 RUNTIME_MODEL에 담는다. 잘못된 지정은 Wave를 멈추지 않고 경고 후
-# Provider CLI 기본값으로 내린다.
+# 토큰"만 RUNTIME_MODEL에 담는다. 프리미엄 정책이 꺼져 있으면 잘못된 지정은
+# 종전처럼 Provider 기본값으로 내리고, 켜져 있으면 비프리미엄 모델을 명시한다.
 # ---------------------------------------------------------------------------
 _runtime_model_id_valid() {
   local value="$1"
@@ -832,24 +833,109 @@ _runtime_model_id_valid() {
   [[ ! "$value" =~ ^(AKIA[0-9A-Z]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.) ]]
 }
 
+_runtime_model_list_contains() {
+  local needle="$1" item
+  shift
+  for item in "$@"; do
+    [[ "$needle" == "$item" ]] && return 0
+  done
+  return 1
+}
+
+# 승인 문서는 YAML이 아니라 Markdown 목록이다. 한 필드가 중복되면 어느 값을
+# 사람이 승인한 것인지 모호하므로 유효한 승인으로 보지 않는다.
+_runtime_model_approval_field() {
+  local file="$1" key="$2"
+  awk -v key="$key" '
+    $0 ~ "^[[:space:]]*-[[:space:]]*" key ":[[:space:]]*" {
+      count++
+      value = $0
+      sub("^[[:space:]]*-[[:space:]]*" key ":[[:space:]]*", "", value)
+      sub(/[[:space:]]*$/, "", value)
+    }
+    END { if (count == 1) print value }
+  ' "$file"
+}
+
+_runtime_model_approval_field_count() {
+  local file="$1" key="$2"
+  awk -v key="$key" '$0 ~ "^[[:space:]]*-[[:space:]]*" key ":[[:space:]]*" { count++ } END { print count + 0 }' "$file"
+}
+
+# 반환: 0=현재 Task+역할+모델에 대한 사람 승인, 1=승인 없음/불일치.
+# 승인 문서의 모델 문자열은 비교에만 쓰고 RUNTIME_MODEL에는 절대 넣지 않는다.
+_runtime_premium_model_approved() {
+  local root="$1" task_id="$2" role="$3" model="$4"
+  local relative=".harness/decisions/$task_id-model-approval.md"
+  local approval="$root/$relative" field value reasons="" managed_meta=""
+
+  if [[ ! -f "$approval" ]]; then
+    RUNTIME_MODEL_APPROVAL="거부 — 승인 기록 없음 ($relative)"
+    printf '경고: 프리미엄 모델 승인이 없어 요청을 강등합니다: %s\n' "$relative" >&2
+    return 1
+  fi
+
+  for field in Task 역할 모델 승인; do
+    if [[ "$(_runtime_model_approval_field_count "$approval" "$field")" != 1 ]]; then
+      reasons+="${reasons:+, }${field} 필드 누락 또는 중복"
+      continue
+    fi
+    value="$(_runtime_model_approval_field "$approval" "$field")"
+    case "$field" in
+      Task) [[ "$value" == "$task_id" ]] || reasons+="${reasons:+, }Task 불일치" ;;
+      역할) [[ "$value" == "$role" ]] || reasons+="${reasons:+, }역할 불일치" ;;
+      모델) [[ "$value" == "$model" ]] || reasons+="${reasons:+, }모델 불일치" ;;
+      승인) [[ "$value" == yes ]] || reasons+="${reasons:+, }승인 값이 yes가 아님" ;;
+    esac
+  done
+
+  if [[ -n "$reasons" ]]; then
+    RUNTIME_MODEL_APPROVAL="거부 — $reasons ($relative)"
+    printf '경고: 프리미엄 모델 승인 기록을 인정하지 않아 요청을 강등합니다: %s (%s)\n' \
+      "$relative" "$reasons" >&2
+    return 1
+  fi
+
+  if managed_meta="$(_runtime_caller_is_managed_agent "$root")"; then
+    RUNTIME_MODEL_APPROVAL="거부 — Agent Pane 호출 ($relative, 기록=$managed_meta)"
+    printf '경고: Harness가 추적 중인 Agent Pane에서 실행된 dispatch이므로 프리미엄 모델 승인을 인정하지 않고 강등합니다 (기록=%s).\n' \
+      "$managed_meta" >&2
+    return 1
+  fi
+
+  RUNTIME_MODEL_APPROVAL="승인됨 ($relative)"
+  return 0
+}
+
 _runtime_select_model() {
-  local root="$1" task_file="$2" role="$3" provider="$4"
-  local policy requested candidate candidate_source models token matched=""
+  local root="$1" task_file="$2" role="$3" provider="$4" task_id="$5"
+  local policy requested candidate="" candidate_source="모델 미지정" models premiums token matched=""
+  local fallback="" fallback_source="" default_candidate=""
   local task_key="${role}_model" default_key="${provider}_default_model"
-  local -a allowed_models=()
+  local -a allowed_models=() premium_models=()
 
   RUNTIME_MODEL=""
   RUNTIME_MODEL_SOURCE="Provider 기본값 (미지정)"
+  RUNTIME_MODEL_APPROVAL="해당 없음 (프리미엄 정책 꺼짐)"
   requested="$(_runtime_yaml_scalar "$task_file" "$task_key")"
   policy="$root/.harness/policies/agent-policy.yaml"
+
+  if [[ -f "$policy" ]]; then
+    premiums="$(_runtime_yaml_scalar "$policy" "${provider}_premium_models")"
+  else
+    premiums=""
+  fi
 
   if [[ -n "$requested" ]]; then
     candidate="$requested"
     candidate_source="Task 지정 ($task_key)"
   elif [[ -f "$policy" ]]; then
     candidate="$(_runtime_yaml_scalar "$policy" "$default_key")"
-    [[ -n "$candidate" ]] || return 0
-    candidate_source="정책 기본값 ($default_key)"
+    if [[ -n "$candidate" ]]; then
+      candidate_source="정책 기본값 ($default_key)"
+    elif [[ -z "$premiums" ]]; then
+      return 0
+    fi
   else
     return 0
   fi
@@ -863,6 +949,11 @@ _runtime_select_model() {
 
   models="$(_runtime_yaml_scalar "$policy" "${provider}_models")"
   if [[ -z "$models" ]]; then
+    if [[ -n "$premiums" ]]; then
+      printf '프리미엄 모델 누출 차단: %s_models가 비어 있어 선언을 검증하거나 비프리미엄 모델을 고정할 수 없습니다. %s_models와 %s_default_model을 설정한 뒤 다시 dispatch하세요.\n' \
+        "$provider" "$provider" "$provider" >&2
+      return 1
+    fi
     printf '경고: %s을(를) 지정했지만 %s_models 허용 목록이 비어 있어 Provider 기본값을 사용합니다.\n' \
       "$([[ -n "$requested" ]] && printf '%s' "$task_key" || printf '%s' "$default_key")" \
       "$provider" >&2
@@ -874,6 +965,11 @@ _runtime_select_model() {
   # 공백과 선행 '-'를 허용하지 않아 `--model --add-dir` 형태의 플래그 주입도
   # 목록 자체에서 차단한다.
   if [[ ! "$models" =~ ^[-A-Za-z0-9=_./\ ]+$ ]]; then
+    if [[ -n "$premiums" ]]; then
+      printf '프리미엄 모델 정책 오류(fail-open 차단): %s_models 값이 안전한 모델 목록 형식이 아닙니다. `models`로 정책을 확인하세요.\n' \
+        "$provider" >&2
+      return 1
+    fi
     printf '경고: agent-policy.yaml의 %s_models 값에 허용되지 않는 문자가 있어 Provider 기본값을 사용합니다.\n' \
       "$provider" >&2
     RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 허용 목록 오류)"
@@ -882,6 +978,11 @@ _runtime_select_model() {
   read -r -a allowed_models <<<"$models"
   for token in "${allowed_models[@]}"; do
     if ! _runtime_model_id_valid "$token"; then
+      if [[ -n "$premiums" ]]; then
+        printf '프리미엄 모델 정책 오류(fail-open 차단): %s_models에 안전하지 않은 모델 토큰이 있습니다. `models`로 정책을 확인하세요.\n' \
+          "$provider" >&2
+        return 1
+      fi
       printf '경고: agent-policy.yaml의 %s_models에 모델 ID가 아닌 토큰이 있어 Provider 기본값을 사용합니다.\n' \
         "$provider" >&2
       RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 허용 목록 오류)"
@@ -889,30 +990,117 @@ _runtime_select_model() {
     fi
   done
 
-  if ! _runtime_model_id_valid "$candidate"; then
-    printf '경고: %s의 모델 값이 안전한 모델 ID 형식이 아니어서 Provider 기본값을 사용합니다.\n' \
-      "$candidate_source" >&2
-    RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 잘못된 형식)"
+  # 프리미엄 목록이 비어 있으면 여기서부터 task-006의 선택/경고/argv 동작을
+  # 그대로 유지한다. 아래 누출 차단은 이 분기에서는 한 글자도 발동하지 않는다.
+  if [[ -z "$premiums" ]]; then
+    if ! _runtime_model_id_valid "$candidate"; then
+      printf '경고: %s의 모델 값이 안전한 모델 ID 형식이 아니어서 Provider 기본값을 사용합니다.\n' \
+        "$candidate_source" >&2
+      RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 잘못된 형식)"
+      return 0
+    fi
+
+    for token in "${allowed_models[@]}"; do
+      if [[ "$candidate" == "$token" ]]; then
+        matched="$token"
+        break
+      fi
+    done
+    if [[ -z "$matched" ]]; then
+      printf '경고: %s의 모델이 %s_models 허용 목록에 없어 Provider 기본값을 사용합니다.\n' \
+        "$candidate_source" "$provider" >&2
+      RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 허용 목록 불일치)"
+      return 0
+    fi
+
+    RUNTIME_MODEL="$matched"
+    RUNTIME_MODEL_SOURCE="$candidate_source"
     return 0
   fi
 
-  # 반드시 허용 목록에서 꺼낸 token을 채택한다. candidate는 비교에만 쓰며 CLI에
-  # 전달하지 않는다.
-  for token in "${allowed_models[@]}"; do
-    if [[ "$candidate" == "$token" ]]; then
-      matched="$token"
-      break
+  # 게이트를 켠 정책은 잘못된 선언을 fail-open으로 처리하지 않는다. 모든
+  # 프리미엄 토큰이 허용 목록의 실제 토큰과 정확히 맞아야 한다.
+  if [[ ! "$premiums" =~ ^[-A-Za-z0-9=_./\ ]+$ ]]; then
+    printf '프리미엄 모델 정책 오류(fail-open 차단): %s_premium_models 값이 안전한 모델 목록 형식이 아닙니다. `models`로 정책을 확인하세요.\n' \
+      "$provider" >&2
+    return 1
+  fi
+  read -r -a premium_models <<<"$premiums"
+  for token in "${premium_models[@]}"; do
+    if ! _runtime_model_id_valid "$token" || ! _runtime_model_list_contains "$token" "${allowed_models[@]}"; then
+      printf '프리미엄 모델 정책 오류(fail-open 차단): %s_premium_models 선언이 %s_models 허용 목록과 정확히 일치하지 않습니다. `models`로 정책을 확인하세요.\n' \
+        "$provider" "$provider" >&2
+      return 1
     fi
   done
-  if [[ -z "$matched" ]]; then
-    printf '경고: %s의 모델이 %s_models 허용 목록에 없어 Provider 기본값을 사용합니다.\n' \
+
+  RUNTIME_MODEL_APPROVAL="해당 없음 (비프리미엄)"
+
+  # 후보가 안전하고 허용 목록에 있을 때만 목록 쪽 token을 matched에 담는다.
+  # Task/default 원문은 이후에도 비교에만 쓰인다.
+  if [[ -n "$candidate" ]] && _runtime_model_id_valid "$candidate"; then
+    for token in "${allowed_models[@]}"; do
+      if [[ "$candidate" == "$token" ]]; then
+        matched="$token"
+        break
+      fi
+    done
+  elif [[ -n "$candidate" ]]; then
+    printf '경고: %s의 모델 값이 안전한 모델 ID 형식이 아니어서 누출 차단용 비프리미엄 모델로 강등합니다.\n' \
+      "$candidate_source" >&2
+  fi
+
+  if [[ -z "$matched" && -n "$candidate" ]] && _runtime_model_id_valid "$candidate"; then
+    printf '경고: %s의 모델이 %s_models 허용 목록에 없어 누출 차단용 비프리미엄 모델로 강등합니다.\n' \
       "$candidate_source" "$provider" >&2
-    RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 허용 목록 불일치)"
+  fi
+
+  if [[ -n "$matched" ]] && _runtime_model_list_contains "$matched" "${premium_models[@]}"; then
+    if _runtime_premium_model_approved "$root" "$task_id" "$role" "$matched"; then
+      RUNTIME_MODEL="$matched"
+      RUNTIME_MODEL_SOURCE="$candidate_source"
+      return 0
+    fi
+    # 승인 거부 사유는 RUNTIME_MODEL_APPROVAL에 남고, 아래 결정적 규칙으로
+    # 한 번만 강등한다. Provider를 기동한 뒤 재시도하는 자동 복구가 아니다.
+    matched=""
+  elif [[ -n "$matched" ]]; then
+    RUNTIME_MODEL="$matched"
+    RUNTIME_MODEL_SOURCE="$candidate_source"
     return 0
   fi
 
-  RUNTIME_MODEL="$matched"
-  RUNTIME_MODEL_SOURCE="$candidate_source"
+  # Provider CLI의 보이지 않는 기본값으로 내려가지 않도록 비프리미엄 모델을
+  # 명시 고정한다: 정책 기본값(비프리미엄) → 허용 목록 첫 비프리미엄.
+  default_candidate="$(_runtime_yaml_scalar "$policy" "$default_key")"
+  if [[ -n "$default_candidate" ]] && _runtime_model_id_valid "$default_candidate" \
+      && _runtime_model_list_contains "$default_candidate" "${allowed_models[@]}" \
+      && ! _runtime_model_list_contains "$default_candidate" "${premium_models[@]}"; then
+    for token in "${allowed_models[@]}"; do
+      [[ "$token" == "$default_candidate" ]] || continue
+      fallback="$token"
+      fallback_source="정책 기본값 ($default_key, 누출 차단)"
+      break
+    done
+  fi
+  if [[ -z "$fallback" ]]; then
+    for token in "${allowed_models[@]}"; do
+      if ! _runtime_model_list_contains "$token" "${premium_models[@]}"; then
+        fallback="$token"
+        fallback_source="정책 목록 첫 비프리미엄 (누출 차단)"
+        break
+      fi
+    done
+  fi
+  if [[ -z "$fallback" ]]; then
+    printf '프리미엄 모델 누출 차단: %s_models에 고정할 비프리미엄 모델이 없습니다. %s_default_model을 허용 목록의 비프리미엄 모델로 설정한 뒤 다시 dispatch하세요.\n' \
+      "$provider" "$provider" >&2
+    return 1
+  fi
+
+  RUNTIME_MODEL="$fallback"
+  RUNTIME_MODEL_SOURCE="$fallback_source"
+  return 0
 }
 
 _runtime_approval_mode() {
