@@ -227,6 +227,22 @@ _models_print_premium_status() {
   done
 }
 
+_models_print_tier_status() {
+  local provider="$1" tier="$2" value="$3" allowed="$4"
+  local -a allowed_items=()
+  [[ -n "$allowed" ]] && read -r -a allowed_items <<<"$allowed"
+  if [[ -z "$value" ]]; then
+    printf '  현재 %s_tier_%s: (미설정)\n' "$provider" "$tier"
+  elif ! _runtime_model_id_valid "$value"; then
+    printf '  현재 %s_tier_%s: (해석 불가 — 안전한 단일 모델 ID가 아님)\n' "$provider" "$tier"
+  elif _models_list_contains "$value" "${allowed_items[@]}"; then
+    printf '  현재 %s_tier_%s: %s (해석: %s)\n' "$provider" "$tier" "$value" "$value"
+  else
+    printf '  현재 %s_tier_%s: %s (해석 불가 — %s_models 허용 목록에 없음)\n' \
+      "$provider" "$tier" "$value" "$provider"
+  fi
+}
+
 _models_print_diff() {
   local current="$1" actual_name="$2" premium="$3" item suffix
   local -n actual_ref="$actual_name"
@@ -262,6 +278,7 @@ cmd_models() {
   local -a providers=(claude codex agy) actual_agy=() parsed=()
   local -A premium_seen=() premium_requested=()
   local -A current_models=() current_premium=() invalid_models=() invalid_premium=()
+  local -A current_tier=() current_default=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -303,11 +320,23 @@ cmd_models() {
   policy="$root/.harness/policies/agent-policy.yaml"
   [[ -f "$policy" ]] || die "agent-policy.yaml이 없습니다: $policy"
 
-  local key count
-  for provider in "${providers[@]}"; do
-    for key in "${provider}_models" "${provider}_premium_models"; do
+  local key count tier role role_tier role_effort
+  for role in worker reviewer; do
+    for key in "${role}_default_tier" "${role}_default_effort"; do
       count="$(grep -Ec "^[[:space:]]*$key:" "$policy" 2>/dev/null || true)"
       (( count <= 1 )) || die "agent-policy.yaml에 키가 중복되었습니다: $key"
+    done
+  done
+  for provider in "${providers[@]}"; do
+    for key in "${provider}_models" "${provider}_default_model" \
+      "${provider}_tier_light" "${provider}_tier_standard" "${provider}_tier_premium" \
+      "${provider}_premium_models"; do
+      count="$(grep -Ec "^[[:space:]]*$key:" "$policy" 2>/dev/null || true)"
+      (( count <= 1 )) || die "agent-policy.yaml에 키가 중복되었습니다: $key"
+    done
+    current_default[$provider]="$(_models_policy_scalar "$policy" "${provider}_default_model")"
+    for tier in light standard premium; do
+      current_tier["$provider:$tier"]="$(_models_policy_scalar "$policy" "${provider}_tier_${tier}")"
     done
     parsed=()
     if _models_read_policy_list "$policy" "${provider}_models" parsed; then
@@ -341,6 +370,22 @@ cmd_models() {
     query_status=$?
   fi
 
+  printf '\n역할 기본 선언\n'
+  for role in worker reviewer; do
+    role_tier="$(_models_policy_scalar "$policy" "${role}_default_tier")"
+    role_effort="$(_models_policy_scalar "$policy" "${role}_default_effort")"
+    if [[ -n "$role_tier" ]] && ! _runtime_model_tier_valid "$role_tier"; then
+      printf '  %s_default_tier: (해석 불가 — light|standard|premium 중 하나가 아님)\n' "$role"
+    else
+      printf '  %s_default_tier: %s\n' "$role" "${role_tier:-(미설정)}"
+    fi
+    if [[ -n "$role_effort" ]] && ! _runtime_effort_valid "$role_effort"; then
+      printf '  %s_default_effort: (해석 불가 — low|medium|high 중 하나가 아님)\n' "$role"
+    else
+      printf '  %s_default_effort: %s\n' "$role" "${role_effort:-(미설정)}"
+    fi
+  done
+
   if [[ "$refresh" -eq 1 || ${#premium_seen[@]} -gt 0 ]]; then
     if [[ "$apply" -eq 1 ]]; then
       info "적용 모드 — 아래 모델 정책 변경을 agent-policy.yaml에 반영합니다."
@@ -365,6 +410,11 @@ cmd_models() {
     else
       _models_print_values "현재 ${provider}_models" "${current_models[$provider]}"
     fi
+    _models_print_values "현재 ${provider}_default_model" "${current_default[$provider]}"
+    for tier in light standard premium; do
+      _models_print_tier_status "$provider" "$tier" \
+        "${current_tier["$provider:$tier"]}" "${current_models[$provider]}"
+    done
     if [[ "${invalid_premium[$provider]}" -eq 1 ]]; then
       printf '  현재 %s_premium_models: (정책 값 오류 — 안전한 모델 ID 목록이 아님)\n' "$provider"
     else

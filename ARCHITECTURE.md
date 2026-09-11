@@ -174,13 +174,30 @@ Agent가 기동되는 디렉터리는 기본값이 Harness 워크스페이스이
 사라지는 것은 **도구 단위 승인**뿐이며 상태 전이와 완료 승인은 그대로 사람 몫입니다. 정책 파일은 임의의 Provider 옵션을 넣는 통로가 아니라, Provider별·모드별로 허용 플래그와 값이 고정된 표입니다. 실제로 쓰인 모드와 인수는 Attempt·Evidence에 기록되고, 이 파일이 없는 예전 프로젝트에서는 인수를 붙이지 않습니다(= `ask`).
 
 모델 선택은 도구 승인 인수와 분리된 타입 있는 경로다. Task YAML의 역할별
-`worker_model`/`reviewer_model` → `agent-policy.yaml`의
-`<provider>_default_model` → Provider CLI 기본값 순으로 선택한다. 앞의 두 값은
+`worker_model`/`reviewer_model` → Task의 `worker_tier`/`reviewer_tier` →
+`agent-policy.yaml`의 `worker_default_tier`/`reviewer_default_tier` →
+`<provider>_default_model` → Provider CLI 기본값 순으로 선택한다. 등급 이름은
+코드에 고정한 `light|standard|premium`뿐이며, Provider별
+`<provider>_tier_<등급>`을 모델로 해석한다. 직접 모델과 등급 해석 결과 모두
 Provider별 공백 구분 `<provider>_models` 목록의 토큰과 정확히 일치해야 한다.
-Task 문자열은 비교에만 쓰고, 실제 argv에는 목록에서 꺼낸 토큰만
-`--model <MODEL>`로 넣는다.
+Task·정책 문자열은 비교에만 쓰고, 실제 argv에는 목록에서 꺼낸 토큰만
+`--model <MODEL>`로 넣는다. 등급 선언이 없으면 기존 모델 경로는 그대로다.
 
-`<provider>_premium_models`가 비어 있으면 목록 밖 값·빈 목록·선행 `-` 같은
+등급 판단 기준은 `light`=문자열 치환·문서 재배치·정해진 패턴 같은 기계적 변경,
+`standard`=설계가 정해진 일반 구현, `premium`=설계 판단 또는 보안 경계·상태
+전이·정책 해석 변경이다. 속도는 별도 축으로 `high`=설계 판단·우회 검토·원인
+추적, `medium`=일반 구현, `low`=기계적 변경·정형 출력이다. premium Worker의
+Reviewer 상향은 권고일 뿐 `Reviewer >= Worker`를 강제하지 않는다. Bash는 이
+기준으로 난이도를 판정하지 않고 사람과 Agent가 확정한 선언만 해석한다.
+
+선택한 등급 이름이 고정 집합 밖이거나 Provider 매핑 키가 비었거나 매핑 모델이
+허용 목록에 없으면, dispatch는 Provider와 문제 키를 명시하고 Pane 생성 전에
+거부한다. 목록 순서는 등급 해석에 관여하지 않는다. 등급 선언·정의가 전혀 없는
+프로젝트만 레거시 경로로 들어가므로 기존 기동 인수를 보존한다.
+
+프리미엄 판정은 `<provider>_tier_premium`과 레거시
+`<provider>_premium_models`의 합집합이다. 한쪽에만 선언된 모델도 기존 승인
+게이트를 거치며, 양쪽 모두 비어 있으면 목록 밖 값·빈 목록·선행 `-` 같은
 플래그 주입은 경고 후 Provider 기본값으로 정규화하고, 미지정 Task는 모델 argv를
 추가하지 않는다. 즉 기존 기동 인수가 유지된다. 프리미엄 목록이 하나라도 있으면
 보이지 않는 Provider CLI 기본값을 쓰지 않는다. 미지정·거부된 후보에는
@@ -205,6 +222,16 @@ Task 기안자의 몫이며 Bash는 추측하지 않는다. 실제 선택과 출
 조회·추측하지 않고 수동 관리로 표시한다. Provider 변화는 코드가 아니라 정책
 표에 반영한다. 승인 표의 `_runtime_agent_arg_allowlist`는 그대로 닫혀 있어 승인
 인수 칸의 `--model opus`는 계속 거부된다.
+
+속도도 역할별 `worker_effort`/`reviewer_effort` → 정책의
+`worker_default_effort`/`reviewer_default_effort` 순으로 선택하며 값은 코드에
+고정한 `low|medium|high`만 허용한다. claude는 `--effort <level>`을, codex는
+고정 키 하나인 `-c model_reasoning_effort="<level>"`을 Harness가 직접 조립한다.
+범용 `-c`는 `_runtime_agent_arg_allowlist`에 추가하지 않으므로 정책의
+`*_auto`/`*_bypass`에서 sandbox나 환경 상속 config를 넣는 경로는 계속 닫혀 있다.
+agy는 속도가 등급별 모델 ID에 포함되므로 별도 effort 인수를 붙이지 않는다.
+속도 미지정이면 세 Provider 모두 관련 인수를 추가하지 않는다. 선택 속도와 출처는
+Attempt·Evidence·runtime meta에 남는다.
 
 `models PATH [--refresh] [--premium PROVIDER=MODEL]... [--apply]`는 모델 정책의
 별도 관리 표면이다. 기본 실행과 `--refresh`는 diff 미리보기이며 `--apply`가 있을

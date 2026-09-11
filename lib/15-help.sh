@@ -15,7 +15,7 @@
 HARNESS_COMMAND_SUMMARIES=(
   "init:새 프로젝트에 Harness 문서·정책·역할 파일을 생성한다"
   "sync-templates:기존 프로젝트의 Skill·역할·정책 템플릿을 지금 버전으로 재동기화한다"
-  "models:Provider별 적용 가능 모델과 허용·프리미엄 정책을 조회하고 갱신한다"
+  "models:Provider별 모델 허용 목록·등급 해석·프리미엄 정책을 조회하고 갱신한다"
   "start:프로젝트 디렉터리에서 Herdr Session을 연다"
   "status:STATE.md를 출력한다 (--live로 문서·Herdr·Git 대조)"
   "validate:상태를 바꾸지 않고 문서·정책·Git 정합성만 검사한다"
@@ -129,8 +129,10 @@ EOF
   $SCRIPT_NAME models PATH [--refresh] [--premium PROVIDER=MODEL]... [--apply]
 
 무엇을 하나:
-  Provider별 현재 <provider>_models 허용 목록, 프리미엄 선언과 적용 여부를
-  표시한다. agy는 \`agy models\`의 실제 목록과 정책 diff를 함께 보여 주며,
+  Provider별 현재 <provider>_models 허용 목록, light|standard|premium 등급의
+  모델 해석 결과, 역할 기본 등급·속도, 프리미엄 선언과 적용 여부를 표시한다.
+  미설정과 허용 목록 밖 매핑은 각각 (미설정), (해석 불가)로 드러낸다.
+  agy는 \`agy models\`의 실제 목록과 정책 diff를 함께 보여 주며,
   codex·claude는 비대화형 목록 조회 경로가 없어 추측하지 않고 수동 관리로
   표시한다. 이 명령은 Agent를 띄우지 않는다.
 
@@ -251,11 +253,22 @@ EOF
   ask와 같게 동작하므로, 필요하면 파일을 직접 만들어 넣는다.
 
 모델 선택:
-  Task YAML의 worker_model/reviewer_model은 선택 항목이다. 선택 우선순위는
-  역할별 Task 필드 → agent-policy.yaml의 <provider>_default_model → Provider
-  CLI 기본값이다. Task 필드나 정책 기본값은 같은 정책 파일의
-  <provider>_models 공백 구분 허용 목록에 정확히 있어야만 --model로 전달된다.
-  단, <provider>_premium_models가 비어 있지 않으면 Provider CLI 기본값으로
+  Task YAML은 역할별 *_model, *_tier, *_effort를 선택적으로 선언한다. 모델
+  우선순위는 Task *_model → Task *_tier → 정책의 *_default_tier →
+  <provider>_default_model → Provider CLI 기본값이다. 등급 이름은
+  light|standard|premium으로 고정되며, <provider>_tier_<등급>이 가리키는 모델도
+  같은 정책 파일의 <provider>_models 허용 목록에 정확히 있어야 전달된다.
+  선언한 등급의 키가 비었거나 목록 밖이면 Pane을 만들기 전에 거부한다. 등급
+  선언과 정의가 모두 없으면 아래 레거시 모델 경로가 그대로 동작한다.
+
+속도 선택:
+  *_effort와 정책의 *_default_effort는 low|medium|high만 허용한다. claude는
+  --effort, codex는 고정 키 -c model_reasoning_effort="<값>"로 전달한다. -c는
+  승인 정책 *_auto/*_bypass에서 계속 거부된다. agy는 속도가 등급별 모델 ID에
+  포함되므로 별도 인수를 붙이지 않는다. 속도 미지정은 관련 인수를 붙이지 않는다.
+
+  <provider>_tier_premium과 <provider>_premium_models의 합집합이 프리미엄이다.
+  합집합이 비어 있지 않으면 Provider CLI 기본값으로
   넘기지 않고 비프리미엄 정책 기본값 또는 허용 목록의 첫 비프리미엄 모델을
   명시한다. 고정할 모델이 없거나 프리미엄 선언이 허용 목록과 맞지 않으면
   fail-open을 막기 위해 Pane을 만들기 전에 dispatch를 거부한다.

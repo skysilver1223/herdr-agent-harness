@@ -172,6 +172,19 @@ emit_doc() {
       -v codex_default_model="${DOC_CODEX_DEFAULT_MODEL:-}" \
       -v agy_models="${DOC_AGY_MODELS:-}" \
       -v agy_default_model="${DOC_AGY_DEFAULT_MODEL:-}" \
+      -v worker_default_tier="${DOC_WORKER_DEFAULT_TIER:-}" \
+      -v reviewer_default_tier="${DOC_REVIEWER_DEFAULT_TIER:-}" \
+      -v worker_default_effort="${DOC_WORKER_DEFAULT_EFFORT:-}" \
+      -v reviewer_default_effort="${DOC_REVIEWER_DEFAULT_EFFORT:-}" \
+      -v claude_tier_light="${DOC_CLAUDE_TIER_LIGHT:-}" \
+      -v claude_tier_standard="${DOC_CLAUDE_TIER_STANDARD:-}" \
+      -v claude_tier_premium="${DOC_CLAUDE_TIER_PREMIUM:-}" \
+      -v codex_tier_light="${DOC_CODEX_TIER_LIGHT:-}" \
+      -v codex_tier_standard="${DOC_CODEX_TIER_STANDARD:-}" \
+      -v codex_tier_premium="${DOC_CODEX_TIER_PREMIUM:-}" \
+      -v agy_tier_light="${DOC_AGY_TIER_LIGHT:-}" \
+      -v agy_tier_standard="${DOC_AGY_TIER_STANDARD:-}" \
+      -v agy_tier_premium="${DOC_AGY_TIER_PREMIUM:-}" \
       -v claude_premium_models="${DOC_CLAUDE_PREMIUM_MODELS:-}" \
       -v codex_premium_models="${DOC_CODEX_PREMIUM_MODELS:-}" \
       -v agy_premium_models="${DOC_AGY_PREMIUM_MODELS:-}" '
@@ -181,6 +194,19 @@ emit_doc() {
         /^  codex_default_model:/ { print "  codex_default_model: \047" codex_default_model "\047"; next }
         /^  agy_models:/ { print "  agy_models: \047" agy_models "\047"; next }
         /^  agy_default_model:/ { print "  agy_default_model: \047" agy_default_model "\047"; next }
+        /^  worker_default_tier:/ { print "  worker_default_tier: \047" worker_default_tier "\047"; next }
+        /^  reviewer_default_tier:/ { print "  reviewer_default_tier: \047" reviewer_default_tier "\047"; next }
+        /^  worker_default_effort:/ { print "  worker_default_effort: \047" worker_default_effort "\047"; next }
+        /^  reviewer_default_effort:/ { print "  reviewer_default_effort: \047" reviewer_default_effort "\047"; next }
+        /^  claude_tier_light:/ { print "  claude_tier_light: \047" claude_tier_light "\047"; next }
+        /^  claude_tier_standard:/ { print "  claude_tier_standard: \047" claude_tier_standard "\047"; next }
+        /^  claude_tier_premium:/ { print "  claude_tier_premium: \047" claude_tier_premium "\047"; next }
+        /^  codex_tier_light:/ { print "  codex_tier_light: \047" codex_tier_light "\047"; next }
+        /^  codex_tier_standard:/ { print "  codex_tier_standard: \047" codex_tier_standard "\047"; next }
+        /^  codex_tier_premium:/ { print "  codex_tier_premium: \047" codex_tier_premium "\047"; next }
+        /^  agy_tier_light:/ { print "  agy_tier_light: \047" agy_tier_light "\047"; next }
+        /^  agy_tier_standard:/ { print "  agy_tier_standard: \047" agy_tier_standard "\047"; next }
+        /^  agy_tier_premium:/ { print "  agy_tier_premium: \047" agy_tier_premium "\047"; next }
         /^  claude_premium_models:/ { print "  claude_premium_models: \047" claude_premium_models "\047"; next }
         /^  codex_premium_models:/ { print "  codex_premium_models: \047" codex_premium_models "\047"; next }
         /^  agy_premium_models:/ { print "  agy_premium_models: \047" agy_premium_models "\047"; next }

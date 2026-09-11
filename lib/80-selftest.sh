@@ -665,6 +665,208 @@ AC_PY
   grep -q "printf -- '- Captured:.*- Model:.*- Model source:" "$dispatch_src" ||
     die "dispatch Evidence에 Model과 Model source 기록이 없습니다."
 
+  # --- 모델 등급·속도: 결정적 해석, 엄격 실패, Provider별 타입 경로 ------
+  local tier_project="$test_root/model-tier-project" tier_policy tier_task tier_base
+  local tier_output tier_error tier_start_line models_tier_output
+  bash "$SELF_PATH" init "$tier_project" --name model-tier-project --goal "모델 등급 검사" \
+    --worker codex --reviewer agy >/dev/null
+  tier_policy="$tier_project/.harness/policies/agent-policy.yaml"
+  tier_base="$test_project/.harness/tasks/task-001.yaml"
+  sed -i \
+    -e "s|^  codex_models:.*|  codex_models: 'gpt-light gpt-standard gpt-premium gpt-legacy'|" \
+    -e "s|^  codex_default_model:.*|  codex_default_model: 'gpt-legacy'|" \
+    -e "s|^  codex_tier_light:.*|  codex_tier_light: 'gpt-light'|" \
+    -e "s|^  codex_tier_standard:.*|  codex_tier_standard: 'gpt-standard'|" \
+    -e "s|^  codex_tier_premium:.*|  codex_tier_premium: 'gpt-premium'|" \
+    -e "s|^  agy_models:.*|  agy_models: 'gemini-flash-low gemini-pro-high'|" \
+    -e "s|^  agy_default_model:.*|  agy_default_model: 'gemini-flash-low'|" \
+    -e "s|^  agy_tier_light:.*|  agy_tier_light: 'gemini-flash-low'|" \
+    -e "s|^  agy_tier_standard:.*|  agy_tier_standard: 'gemini-pro-high'|" \
+    -e "s|^  worker_default_tier:.*|  worker_default_tier: 'light'|" \
+    -e "s|^  reviewer_default_tier:.*|  reviewer_default_tier: 'light'|" \
+    "$tier_policy"
+
+  tier_task="$tier_project/.harness/tasks/task-tier.yaml"
+  awk '
+    /^task_id:/ { print "task_id: task-tier"; next }
+    { print }
+    /^reviewer:/ {
+      print "worker_tier: \047standard\047"
+      print "reviewer_tier: \047standard\047"
+      print "worker_effort: \047high\047"
+      print "reviewer_effort: \047high\047"
+    }
+  ' "$tier_base" >"$tier_task"
+
+  # Task 등급이 역할 기본 등급·레거시 기본 모델보다 우선하고, 허용 목록에서
+  # 찾은 정확한 token과 codex의 고정 effort config만 argv에 들어간다.
+  tier_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier worker --print-only)"
+  tier_start_line="$(printf '%s\n' "$tier_output" | grep '^  herdr agent start ')"
+  [[ "$tier_start_line" == *'--model gpt-standard'* ]] ||
+    die "Task 모델 등급이 Provider 모델로 해석되지 않았습니다: $tier_start_line"
+  [[ "$tier_start_line" == *'-c model_reasoning_effort="high"'* ]] ||
+    die "codex 속도가 고정 config 키로 조립되지 않았습니다: $tier_start_line"
+  printf '%s' "$tier_output" | grep -q 'Task 지정 (worker_tier) → codex_tier_standard' ||
+    die "Task 등급의 해석 출처가 기록되지 않았습니다."
+
+  # 목록 순서는 허용 검사의 자료일 뿐 등급 선택 규칙이 아니다.
+  sed -i "s|^  codex_models:.*|  codex_models: 'gpt-legacy gpt-premium gpt-light gpt-standard'|" "$tier_policy"
+  tier_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier worker --print-only)"
+  printf '%s' "$tier_output" | grep -q 'herdr agent start .* --model gpt-standard' ||
+    die "모델 허용 목록 순서를 바꾸자 등급 해석 결과가 달라졌습니다."
+
+  # 직접 모델 > Task 등급 > 역할 기본 등급 > 레거시 기본 모델 > CLI 기본값.
+  awk '
+    /^task_id:/ { print "task_id: task-tier-model-wins"; next }
+    { print }
+    /^reviewer:/ { print "worker_model: \047gpt-standard\047"; print "worker_tier: \047light\047" }
+  ' "$tier_base" >"$tier_project/.harness/tasks/task-tier-model-wins.yaml"
+  tier_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier-model-wins worker --print-only)"
+  printf '%s' "$tier_output" | grep -q 'herdr agent start .* --model gpt-standard' ||
+    die "직접 모델이 Task 등급보다 우선하지 않았습니다."
+  printf '%s' "$tier_output" | grep -q '출처: Task 지정 (worker_model)' ||
+    die "직접 모델 우선순위 출처가 잘못됐습니다."
+
+  awk '
+    /^task_id:/ { print "task_id: task-tier-default"; next }
+    { print }
+  ' "$tier_base" >"$tier_project/.harness/tasks/task-tier-default.yaml"
+  tier_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier-default worker --print-only)"
+  printf '%s' "$tier_output" | grep -q 'herdr agent start .* --model gpt-light' ||
+    die "역할 기본 등급이 레거시 기본 모델보다 우선하지 않았습니다."
+  printf '%s' "$tier_output" | grep -q '역할 기본값 (worker_default_tier) → codex_tier_light' ||
+    die "역할 기본 등급의 해석 출처가 기록되지 않았습니다."
+
+  sed -i "s|^  worker_default_tier:.*|  worker_default_tier: ''|" "$tier_policy"
+  tier_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier-default worker --print-only)"
+  printf '%s' "$tier_output" | grep -q 'herdr agent start .* --model gpt-legacy' ||
+    die "등급 미지정 시 레거시 Provider 기본 모델이 적용되지 않았습니다."
+  sed -i \
+    -e "s|^  codex_default_model:.*|  codex_default_model: ''|" \
+    -e "s|^  codex_tier_light:.*|  codex_tier_light: ''|" \
+    -e "s|^  codex_tier_standard:.*|  codex_tier_standard: ''|" \
+    -e "s|^  codex_tier_premium:.*|  codex_tier_premium: ''|" \
+    "$tier_policy"
+  tier_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier-default worker --print-only)"
+  tier_start_line="$(printf '%s\n' "$tier_output" | grep '^  herdr agent start ')"
+  [[ "$tier_start_line" != *'--model'* && "$tier_start_line" != *' --effort '* && "$tier_start_line" != *' -c '* ]] ||
+    die "등급·속도 미지정의 레거시 Provider CLI 기본 인수가 바뀌었습니다: $tier_start_line"
+
+  # 이후 엄격 실패·프리미엄·격리 검사를 위해 명시 등급 정책을 복원한다.
+  sed -i \
+    -e "s|^  codex_default_model:.*|  codex_default_model: 'gpt-legacy'|" \
+    -e "s|^  codex_tier_light:.*|  codex_tier_light: 'gpt-light'|" \
+    -e "s|^  codex_tier_standard:.*|  codex_tier_standard: 'gpt-standard'|" \
+    -e "s|^  codex_tier_premium:.*|  codex_tier_premium: 'gpt-premium'|" \
+    "$tier_policy"
+
+  # 선언 등급 미정의·허용 목록 불일치·고정 집합 밖 오타는 모두 Pane 전에
+  # 거부하고, 메시지에는 Provider와 채워야 할 정책 키가 나온다.
+  sed -i "s|^  codex_tier_standard:.*|  codex_tier_standard: ''|" "$tier_policy"
+  set +e
+  tier_error="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier worker --print-only 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 && "$tier_error" == *'Provider codex'* && "$tier_error" == *'codex_tier_standard'* ]] ||
+    die "미정의 등급이 Provider·키를 밝히며 거부되지 않았습니다: $tier_error"
+  sed -i "s|^  codex_tier_standard:.*|  codex_tier_standard: 'gpt-not-allowed'|" "$tier_policy"
+  set +e
+  tier_error="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier worker --print-only 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 && "$tier_error" == *'codex_tier_standard'* && "$tier_error" == *'codex_models'* ]] ||
+    die "허용 목록 밖 등급 매핑이 해당 키를 밝히며 거부되지 않았습니다: $tier_error"
+  sed -i "s|^  codex_tier_standard:.*|  codex_tier_standard: 'gpt-standard'|" "$tier_policy"
+  sed "s/worker_tier: 'standard'/worker_tier: 'premuim'/" "$tier_task" \
+    >"$tier_project/.harness/tasks/task-tier-typo.yaml"
+  sed -i 's/^task_id:.*/task_id: task-tier-typo/' "$tier_project/.harness/tasks/task-tier-typo.yaml"
+  set +e
+  tier_error="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier-typo worker --print-only 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 && "$tier_error" == *'light|standard|premium'* ]] ||
+    die "고정 집합 밖 등급 오타가 거부되지 않았습니다: $tier_error"
+
+  # premium 등급은 레거시 목록이 비어 있어도 승인 합집합에 들어간다.
+  sed "s/worker_tier: 'standard'/worker_tier: 'premium'/" "$tier_task" \
+    >"$tier_project/.harness/tasks/task-tier-premium.yaml"
+  sed -i 's/^task_id:.*/task_id: task-tier-premium/' "$tier_project/.harness/tasks/task-tier-premium.yaml"
+  tier_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier-premium worker --print-only 2>&1)"
+  tier_start_line="$(printf '%s\n' "$tier_output" | grep '^  herdr agent start ')"
+  [[ "$tier_start_line" == *'--model gpt-legacy'* && "$tier_start_line" != *'gpt-premium'* ]] ||
+    die "*_tier_premium 단독 모델이 승인 게이트를 우회했습니다: $tier_start_line"
+  printf '%s' "$tier_output" | grep -q '프리미엄 모델 승인이 없어 요청을 강등' ||
+    die "premium 등급 승인 없음이 기록되지 않았습니다."
+
+  # 등급으로 고른 격리 모델도 되살리지 않고 기존 강등+경고 경로를 유지한다.
+  _runtime_quarantine_model "$tier_project" codex gpt-standard \
+    'codex 400 invalid_request_error: 지정 모델 미지원' task-tier 1
+  tier_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier worker --print-only 2>&1)"
+  tier_start_line="$(printf '%s\n' "$tier_output" | grep '^  herdr agent start ')"
+  [[ "$tier_start_line" == *'--model gpt-legacy'* && "$tier_start_line" != *'gpt-standard'* ]] ||
+    die "격리된 모델이 등급 해석으로 되살아났습니다: $tier_start_line"
+  printf '%s' "$tier_output" | grep -q '모델 강등: 격리된 모델 gpt-standard' ||
+    die "등급 해석 모델의 격리 강등이 기록되지 않았습니다."
+  rm -f "$tier_project/.harness/runtime/codex-models.quarantine"
+
+  # 역할 기본 effort와 Task effort의 우선순위, 값 한정, Provider별 표현.
+  sed -i "s|^  worker_default_effort:.*|  worker_default_effort: 'medium'|" "$tier_policy"
+  tier_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier-default worker --print-only)"
+  printf '%s' "$tier_output" | grep -q -- '-c model_reasoning_effort="medium"' ||
+    die "역할 기본 codex 속도가 적용되지 않았습니다."
+  local bad_effort
+  for bad_effort in HIGH 'high;touch_EFFORT_INJECTED' 'high"-c-sandbox_permissions=x'; do
+    sed "s/worker_effort: 'high'/worker_effort: '$bad_effort'/" "$tier_task" \
+      >"$tier_project/.harness/tasks/task-tier-bad-effort.yaml"
+    sed -i 's/^task_id:.*/task_id: task-tier-bad-effort/' "$tier_project/.harness/tasks/task-tier-bad-effort.yaml"
+    set +e
+    tier_error="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier-bad-effort worker --print-only 2>&1)"
+    failure_status=$?
+    set -e
+    [[ "$failure_status" -ne 0 && "$tier_error" != *'herdr agent start '* ]] ||
+      die "허용되지 않은 codex effort가 Pane 전 거부되지 않았습니다."
+  done
+
+  # 승인 인수 정책에 -c를 넣는 통로는 effort 구현 뒤에도 계속 닫혀 있다.
+  sed -i "s|^  codex_auto:.*|  codex_auto: '-c model_reasoning_effort=high'|" "$tier_policy"
+  set +e
+  tier_error="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier worker --print-only 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 && "$tier_error" == *'승인 정책에 쓸 수 없는 인수'* ]] ||
+    die "승인 정책 *_auto의 범용 -c가 거부되지 않았습니다: $tier_error"
+  sed -i "s|^  codex_auto:.*|  codex_auto: '--ask-for-approval never --sandbox workspace-write'|" "$tier_policy"
+
+  sed -e 's/^task_id:.*/task_id: task-tier-claude/' \
+      -e "s/^primary_worker:.*/primary_worker: 'claude'/" \
+    "$tier_task" >"$tier_project/.harness/tasks/task-tier-claude.yaml"
+  sed -i \
+    -e "s|^  claude_models:.*|  claude_models: 'claude-standard'|" \
+    -e "s|^  claude_tier_standard:.*|  claude_tier_standard: 'claude-standard'|" \
+    "$tier_policy"
+  sed -i "s/worker_effort: 'high'/worker_effort: 'low'/" "$tier_project/.harness/tasks/task-tier-claude.yaml"
+  tier_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier-claude worker --print-only)"
+  tier_start_line="$(printf '%s\n' "$tier_output" | grep '^  herdr agent start ')"
+  [[ "$tier_start_line" == *'--model claude-standard'* && "$tier_start_line" == *'--effort low'* ]] ||
+    die "claude 등급 또는 --effort 값 한정 조립이 잘못됐습니다: $tier_start_line"
+
+  tier_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$tier_project" task-tier reviewer --print-only)"
+  tier_start_line="$(printf '%s\n' "$tier_output" | grep '^  herdr agent start ')"
+  [[ "$tier_start_line" == *'--model gemini-pro-high'* && "$tier_start_line" != *'--effort'* && "$tier_start_line" != *' -c '* ]] ||
+    die "agy 속도가 등급 모델 ID 외 별도 인수로 전달됐습니다: $tier_start_line"
+  printf '%s' "$tier_output" | grep -q 'agy 모델 ID에 흡수되어 별도 인수 없음' ||
+    die "agy 속도 표현 방식이 dispatch 기록에 드러나지 않았습니다."
+
+  models_tier_output="$(cmd_models "$tier_project")"
+  printf '%s' "$models_tier_output" | grep -q '현재 codex_tier_standard: gpt-standard (해석: gpt-standard)' ||
+    die "models 명령이 등급 해석 결과를 보여 주지 않았습니다."
+  printf '%s' "$models_tier_output" | grep -q '현재 claude_tier_light: (미설정)' ||
+    die "models 명령이 미설정 등급을 드러내지 않았습니다."
+  sed -i "s|^  claude_tier_standard:.*|  claude_tier_standard: 'claude-not-allowed'|" "$tier_policy"
+  models_tier_output="$(cmd_models "$tier_project")"
+  printf '%s' "$models_tier_output" | grep -q 'claude_tier_standard: claude-not-allowed (해석 불가 — claude_models 허용 목록에 없음)' ||
+    die "models 명령이 해석 불가 등급과 원인을 드러내지 않았습니다."
+
   # --- 프리미엄 모델 승인: 좁은 승인 범위 + Provider 기본값 누출 차단 ------
   local premium_project="$test_root/premium-model-project" premium_policy premium_task
   local premium_output premium_error premium_start_line approval_file other_approval
@@ -1959,6 +2161,7 @@ STUB
     'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)'
     'PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)'
     'PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)'
+    'PASS: 모델 등급 (Task·역할 기본 등급 해석/우선순위 5단계/목록순서 무관/미정의·허용목록불일치·오타 거부·키 명시/프리미엄 합집합/격리 유지/codex 고정키·claude --effort·agy 흡수 속도/-c 승인통로 차단/models 표시)'
     'PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)'
     'PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존)'
     'PASS: 모델 격리 (codex·claude 식별/agy·무관 실패·미지정 비격리/정책 보존/재선택 경고·수동 해제/강등 기록·누출 차단/조회 사전 경고)'

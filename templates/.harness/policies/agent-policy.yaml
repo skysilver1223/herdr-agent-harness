@@ -28,17 +28,31 @@ agent_policy:
   agy_auto: '@@AGY_AUTO@@'
   agy_bypass: '@@AGY_BYPASS@@'
 
-  # Task별 모델 선택은 위 승인 인수와 분리된 타입 있는 경로다. *_models는
-  # 공백 구분 허용 목록, *_default_model은 해당 Provider의 프로젝트 기본값이다.
-  # 목록과 기본값을 비우면 Provider CLI 기본값을 써서 기존 동작을 유지한다.
-  # Task의 worker_model/reviewer_model도 해당 Provider 목록의 값만 선택할 수 있다.
+  # 모델·등급·속도는 위 승인 인수와 분리된 타입 있는 경로다. *_models는
+  # 공백 구분 허용 목록이자 보안 경계다. 등급 매핑도 목록에 정확히 있어야 한다.
+  # 역할 기본 등급/속도를 비우면 레거시 기본 모델 또는 Provider 기본값을 쓴다.
+  worker_default_tier: ''
+  reviewer_default_tier: ''
+  worker_default_effort: ''
+  reviewer_default_effort: ''
   claude_models: ''
   claude_default_model: ''
+  claude_tier_light: ''
+  claude_tier_standard: ''
+  claude_tier_premium: ''
   codex_models: ''
   codex_default_model: ''
+  codex_tier_light: ''
+  codex_tier_standard: ''
+  codex_tier_premium: ''
   agy_models: ''
   agy_default_model: ''
+  # agy의 속도는 모델 ID에 포함되므로 별도 effort 인수가 없다.
+  agy_tier_light: ''
+  agy_tier_standard: ''
+  agy_tier_premium: ''
 
+  # 프리미엄 판정은 *_tier_premium과 *_premium_models의 합집합이다.
   # 프리미엄은 비용·승인 등급의 선언일 뿐 허용 목록을 넓히지 않는다.
   # 전체 모델 ID를 공백으로 구분하며 *_models와 정확히 일치할 때만 적용 상태다.
   # 목록이 비어 있지 않으면 dispatch가 Provider 기본 모델도 비프리미엄으로

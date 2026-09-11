@@ -330,6 +330,7 @@ PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
 PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)
 PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)
 PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)
+PASS: 모델 등급 (Task·역할 기본 등급 해석/우선순위 5단계/목록순서 무관/미정의·허용목록불일치·오타 거부·키 명시/프리미엄 합집합/격리 유지/codex 고정키·claude --effort·agy 흡수 속도/-c 승인통로 차단/models 표시)
 PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)
 PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존)
 PASS: 모델 격리 (codex·claude 식별/agy·무관 실패·미지정 비격리/정책 보존/재선택 경고·수동 해제/강등 기록·누출 차단/조회 사전 경고)
@@ -636,38 +637,71 @@ Agent를 띄울 때마다 "이 명령을 실행할까요? (y/n)"을 반복해서
 - 실제로 쓰인 모드와 인수는 Attempt·Evidence 문서에 기록됩니다.
 - 이 파일이 없는 예전 프로젝트에서는 인수를 붙이지 않습니다(= `ask`와 같음).
 
-### Task별 모델 선택 — 승인 인수와 분리된 정책 경로
+### Task별 모델 등급·속도 — 승인 인수와 분리된 정책 경로
 
-모델은 Task를 기안하는 사람이 난이도와 역할에 맞춰 선택합니다. Harness가 난이도를
-추측하지 않습니다. Task YAML의 선택 필드는 역할별로 나뉩니다.
+모델은 Task를 기안하는 사람이 난이도와 역할에 맞춰 등급과 속도를 선언합니다.
+Harness는 난이도를 추측하지 않고, 고정된 선언을 Provider별 모델과 인수로만
+해석합니다.
+
+| 등급 | 쓰는 경우 |
+| --- | --- |
+| `light` | 기계적 변경 — 문자열 치환, 문서 재배치, 정해진 패턴 적용 |
+| `standard` | 일반 구현 — 설계는 정해졌고 코드로 옮기는 작업 |
+| `premium` | 설계 판단 포함, 또는 보안 경계·상태 전이·정책 해석 변경 |
+
+속도는 등급과 별개의 축입니다. `high`는 설계 판단·우회 검토·원인 추적,
+`medium`은 일반 구현, `low`는 기계적 변경·정형 출력에 씁니다. premium Worker라면
+Reviewer도 한 단계 올리는 것을 고려할 수 있지만, **Reviewer 등급이 Worker 이상이어야
+한다는 강제 규칙은 아닙니다.** Review 품질은 구체적인 검토 기준에도 크게 좌우됩니다.
 
 ```yaml
 primary_worker: 'codex'
 reviewer: 'agy'
 worker_model: 'gpt-5.6-sol'
 reviewer_model: 'gemini-3.1-pro-high'
+worker_tier: 'standard'
+reviewer_tier: 'standard'
+worker_effort: 'medium'
+reviewer_effort: 'high'
 ```
 
-선택 우선순위는 `worker_model`/`reviewer_model` → 선택된 Provider의 정책 기본값 →
-Provider CLI 기본값입니다. 정책은 `.harness/policies/agent-policy.yaml`에서 관리합니다.
+직접 모델과 등급을 함께 적으면 직접 모델이 이깁니다. 전체 우선순위는 역할별 Task
+`*_model` → Task `*_tier` → 정책의 `worker_default_tier`/`reviewer_default_tier` →
+선택 Provider의 `*_default_model`(레거시) → Provider CLI 기본값입니다. 정책은
+`.harness/policies/agent-policy.yaml`에서 관리합니다.
 
 ```yaml
 agent_policy:
-  codex_models: 'gpt-5.6-sol gpt-5.6-terra'
-  codex_default_model: 'gpt-5.6-terra'
-  codex_premium_models: 'gpt-5.6-terra'
+  worker_default_tier: 'standard'
+  reviewer_default_tier: 'standard'
+  worker_default_effort: 'medium'
+  reviewer_default_effort: 'high'
+  codex_models: 'gpt-5.5 gpt-5.6-sol gpt-6-astra'
+  codex_default_model: 'gpt-5.6-sol'
+  codex_tier_light: 'gpt-5.5'
+  codex_tier_standard: 'gpt-5.6-sol'
+  codex_tier_premium: 'gpt-6-astra'
+  codex_premium_models: ''
   agy_models: 'gemini-3.8-flash-high gemini-3.1-pro-high'
   agy_default_model: 'gemini-3.8-flash-high'
+  agy_tier_standard: 'gemini-3.1-pro-high'
   agy_premium_models: ''
 ```
 
 - `*_models`는 공백 구분 허용 목록입니다. Task 값과 `*_default_model`은 목록의
   토큰과 정확히 일치해야 하며, CLI에는 Task 문자열이 아니라 목록에서 찾은 값만
   `--model <MODEL>`로 전달됩니다.
+- 등급 이름은 코드에 고정된 `light|standard|premium`뿐입니다. 선언한 등급의
+  `<provider>_tier_<등급>`이 비었거나, 매핑 모델이 `*_models`에 없으면 Pane을 만들기
+  전에 어느 Provider의 어느 키가 문제인지 알리고 거부합니다. 따라서 모델 목록
+  순서는 등급 해석 결과를 바꾸지 않습니다.
+- 초기 템플릿의 등급·역할 기본값은 비어 있습니다. 등급을 전혀 선언·정의하지 않은
+  기존 프로젝트는 아래 레거시 기본 모델 경로와 기동 인수가 그대로 유지됩니다.
 - 프리미엄 목록이 비어 있으면 Task 값이 목록 밖이거나 목록이 비어 있을 때 경고 후
   모델 인수를 붙이지 않는 기존 동작을 유지합니다. 모델 미지정 Task와 빈 초기
   정책도 기존과 똑같이 Provider CLI 기본값을 씁니다.
-- `*_premium_models`는 프리미엄(최상위) 등급의 선언입니다. `*_models`를 넓히지
+- 프리미엄 판정은 `*_tier_premium`과 `*_premium_models`의 **합집합**입니다.
+  레거시 `*_premium_models`도 계속 유효합니다. 둘 다 `*_models`를 넓히지
   않으며, 전체 모델 ID가 허용 목록 토큰과 정확히 일치해야 합니다. 하나라도
   일치하지 않으면 런타임은 fail-open 대신 Pane 생성 전 dispatch를 거부합니다.
 - 프리미엄 목록이 있으면 모델 미지정 Task도 Provider CLI의 보이지 않는 기본값에
@@ -683,8 +717,11 @@ agent_policy:
   없는 `codex`·`claude`는 `조회 경로 없음 — 수동 관리`로 표시하고 값을 추측하지
   않습니다.
 - 승인용 `*_auto`/`*_bypass` 표는 모델 통로가 아닙니다. 그 표의 `--model opus`는
-  계속 거부되며, 모델 선택은 별도의 허용 목록 검사를 거칩니다.
-- `dispatch`는 Attempt와 Evidence에 모델·출처와 프리미엄 승인 근거 또는 구체적인
+  계속 거부되며, `-c ...`도 계속 거부됩니다. codex 속도는 별도 고정 경로가 오직
+  `-c model_reasoning_effort="low|medium|high"`만 조립합니다. claude는
+  `--effort low|medium|high`, agy는 속도가 등급의 모델 ID에 흡수되어 별도 인수가
+  없습니다. 속도를 지정하지 않으면 관련 인수가 전혀 추가되지 않습니다.
+- `dispatch`는 Attempt와 Evidence에 모델·출처·속도와 프리미엄 승인 근거 또는 구체적인
   거부 사유를 기록합니다. 승인 파일의 모델 값은 비교에만 쓰고 argv에는 허용
   목록에서 꺼낸 token만 전달합니다.
 

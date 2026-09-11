@@ -206,6 +206,7 @@ _runtime_write_meta() {
   local adopted="${8:-0}"
   local model="${9:-}" model_source="${10:-}" model_approval="${11:-}"
   local model_degradation="${12:-}"
+  local effort="${13:-}" effort_source="${14:-}"
   local destination temporary
   destination="$root/.harness/runtime/$task_id-$role.meta"
   temporary="$(mktemp "$root/.harness/runtime/.meta.XXXXXX")"
@@ -221,6 +222,8 @@ _runtime_write_meta() {
     printf 'model_source=%s\n' "$model_source"
     printf 'model_approval=%s\n' "$model_approval"
     printf 'model_degradation=%s\n' "$model_degradation"
+    printf 'effort=%s\n' "$effort"
+    printf 'effort_source=%s\n' "$effort_source"
   } >"$temporary"
   chmod 0644 "$temporary"
   mv -f -- "$temporary" "$destination"
@@ -923,6 +926,48 @@ _runtime_model_list_contains() {
   return 1
 }
 
+# 등급과 속도 이름은 정책에서 확장하는 값이 아니다. 고정 집합으로 두어
+# premuim 같은 오타가 새 등급이나 임의 CLI 값으로 조용히 통과하지 않게 한다.
+_runtime_model_tier_valid() {
+  case "$1" in light|standard|premium) return 0 ;; *) return 1 ;; esac
+}
+
+_runtime_effort_valid() {
+  case "$1" in low|medium|high) return 0 ;; *) return 1 ;; esac
+}
+
+# 속도는 승인 정책의 *_auto/*_bypass argv 표를 통하지 않는다. 특히 codex의
+# -c는 범용 config 통로이므로 키를 정책에서 받지 않고 여기서 하나만 조립한다.
+# 반환: 0=정상(미지정 포함), 1=고정 집합 밖 값.
+_runtime_select_effort() {
+  local root="$1" task_file="$2" role="$3" provider="$4"
+  local policy task_key="${role}_effort" default_key="${role}_default_effort"
+  local requested="" source="속도 미지정"
+
+  RUNTIME_EFFORT=""
+  RUNTIME_EFFORT_SOURCE="미지정 (Provider 기본값)"
+  requested="$(_runtime_yaml_scalar "$task_file" "$task_key")"
+  policy="$root/.harness/policies/agent-policy.yaml"
+  if [[ -n "$requested" ]]; then
+    source="Task 지정 ($task_key)"
+  elif [[ -f "$policy" ]]; then
+    requested="$(_runtime_yaml_scalar "$policy" "$default_key")"
+    [[ -z "$requested" ]] || source="역할 기본값 ($default_key)"
+  fi
+  [[ -n "$requested" ]] || return 0
+  if ! _runtime_effort_valid "$requested"; then
+    printf '속도 해석 오류: %s 값은 low|medium|high 중 하나여야 합니다. dispatch를 중단합니다.\n' \
+      "$source" >&2
+    return 1
+  fi
+  RUNTIME_EFFORT="$requested"
+  if [[ "$provider" == agy ]]; then
+    RUNTIME_EFFORT_SOURCE="$source; agy 모델 ID에 흡수되어 별도 인수 없음"
+  else
+    RUNTIME_EFFORT_SOURCE="$source"
+  fi
+}
+
 # 조회 경로가 정의된 Provider만 dispatch 직전에 실제 목록과 정책 목록을
 # 비교한다. 조회 실패는 "모델이 없다"로 해석하지 않으며 정책을 수정하지 않는다.
 _runtime_warn_model_policy_mismatch() {
@@ -1018,10 +1063,14 @@ _runtime_premium_model_approved() {
 
 _runtime_select_model() {
   local root="$1" task_file="$2" role="$3" provider="$4" task_id="$5"
-  local policy requested candidate="" candidate_source="모델 미지정" models premiums token matched=""
+  local policy requested candidate="" candidate_source="모델 미지정" models premiums="" token matched=""
+  local legacy_premiums="" tier_premium="" tier_value="" tier_name="" tier_key=""
+  local requested_tier="" default_tier="" selected_tier="" selected_tier_source=""
   local fallback="" fallback_source="" default_candidate="" quarantine_path=""
   local quarantined_candidate=0
-  local task_key="${role}_model" default_key="${provider}_default_model"
+  local tier_selected=0
+  local task_key="${role}_model" task_tier_key="${role}_tier"
+  local role_tier_key="${role}_default_tier" default_key="${provider}_default_model"
   local -a allowed_models=() premium_models=()
 
   RUNTIME_MODEL=""
@@ -1029,17 +1078,27 @@ _runtime_select_model() {
   RUNTIME_MODEL_APPROVAL="해당 없음 (프리미엄 정책 꺼짐)"
   RUNTIME_MODEL_DEGRADATION=""
   requested="$(_runtime_yaml_scalar "$task_file" "$task_key")"
+  requested_tier="$(_runtime_yaml_scalar "$task_file" "$task_tier_key")"
   policy="$root/.harness/policies/agent-policy.yaml"
 
   if [[ -f "$policy" ]]; then
-    premiums="$(_runtime_yaml_scalar "$policy" "${provider}_premium_models")"
-  else
-    premiums=""
+    legacy_premiums="$(_runtime_yaml_scalar "$policy" "${provider}_premium_models")"
+    tier_premium="$(_runtime_yaml_scalar "$policy" "${provider}_tier_premium")"
+    default_tier="$(_runtime_yaml_scalar "$policy" "$role_tier_key")"
   fi
+  premiums="${legacy_premiums}${legacy_premiums:+${tier_premium:+ }}${tier_premium}"
 
   if [[ -n "$requested" ]]; then
     candidate="$requested"
     candidate_source="Task 지정 ($task_key)"
+  elif [[ -n "$requested_tier" ]]; then
+    selected_tier="$requested_tier"
+    selected_tier_source="Task 지정 ($task_tier_key)"
+    tier_selected=1
+  elif [[ -n "$default_tier" ]]; then
+    selected_tier="$default_tier"
+    selected_tier_source="역할 기본값 ($role_tier_key)"
+    tier_selected=1
   elif [[ -f "$policy" ]]; then
     candidate="$(_runtime_yaml_scalar "$policy" "$default_key")"
     if [[ -n "$candidate" ]]; then
@@ -1051,7 +1110,18 @@ _runtime_select_model() {
     return 0
   fi
 
+  if (( tier_selected == 1 )) && ! _runtime_model_tier_valid "$selected_tier"; then
+    printf '모델 등급 해석 오류: %s 값은 light|standard|premium 중 하나여야 합니다. Provider=%s. `models`로 정책을 확인하세요.\n' \
+      "$selected_tier_source" "$provider" >&2
+    return 1
+  fi
+
   if [[ ! -f "$policy" ]]; then
+    if (( tier_selected == 1 )); then
+      printf '모델 등급 해석 오류: Provider %s의 %s 키를 읽을 agent-policy.yaml이 없습니다. `models`로 정책을 확인하세요.\n' \
+        "$provider" "${provider}_tier_${selected_tier}" >&2
+      return 1
+    fi
     printf '경고: %s을(를) 지정했지만 agent-policy.yaml이 없어 Provider 기본값을 사용합니다.\n' \
       "$task_key" >&2
     RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 정책 파일 없음)"
@@ -1060,6 +1130,11 @@ _runtime_select_model() {
 
   models="$(_runtime_yaml_scalar "$policy" "${provider}_models")"
   if [[ -z "$models" ]]; then
+    if (( tier_selected == 1 )); then
+      printf '모델 등급 해석 오류: Provider %s의 %s_models 키가 비어 있어 %s을(를) 허용 목록에서 검증할 수 없습니다. `models`로 정책을 확인하세요.\n' \
+        "$provider" "$provider" "${provider}_tier_${selected_tier}" >&2
+      return 1
+    fi
     if [[ -n "$premiums" ]]; then
       printf '프리미엄 모델 누출 차단: %s_models가 비어 있어 선언을 검증하거나 비프리미엄 모델을 고정할 수 없습니다. %s_models와 %s_default_model을 설정한 뒤 다시 dispatch하세요.\n' \
         "$provider" "$provider" "$provider" >&2
@@ -1101,9 +1176,56 @@ _runtime_select_model() {
     fi
   done
 
+  # 정의된 모든 등급 매핑은 모델 허용 목록을 통과해야 한다. 매핑 원문은
+  # 비교에만 쓰고, 선택 후보에는 허용 목록에서 찾은 token만 담는다.
+  for tier_name in light standard premium; do
+    tier_key="${provider}_tier_${tier_name}"
+    tier_value="$(_runtime_yaml_scalar "$policy" "$tier_key")"
+    [[ -n "$tier_value" ]] || continue
+    if ! _runtime_model_id_valid "$tier_value" \
+        || ! _runtime_model_list_contains "$tier_value" "${allowed_models[@]}"; then
+      printf '모델 등급 해석 오류: Provider %s의 %s 값이 %s_models 허용 목록에 정확히 없습니다. `models`로 정책을 확인하세요.\n' \
+        "$provider" "$tier_key" "$provider" >&2
+      return 1
+    fi
+    if (( tier_selected == 1 )) && [[ "$tier_name" == "$selected_tier" ]]; then
+      for token in "${allowed_models[@]}"; do
+        [[ "$token" == "$tier_value" ]] || continue
+        candidate="$token"
+        candidate_source="$selected_tier_source → $tier_key"
+        break
+      done
+    fi
+  done
+  if (( tier_selected == 1 )) && [[ -z "$candidate" ]]; then
+    printf '모델 등급 해석 오류: Provider %s의 %s 키가 비어 있습니다. `models`로 정책을 확인하세요.\n' \
+      "$provider" "${provider}_tier_${selected_tier}" >&2
+    return 1
+  fi
+
+  # 레거시 프리미엄 목록과 premium 등급 매핑의 합집합이 승인 대상이다.
+  if [[ -n "$legacy_premiums" ]]; then
+    if [[ ! "$legacy_premiums" =~ ^[-A-Za-z0-9=_./\ ]+$ ]]; then
+      printf '프리미엄 모델 정책 오류(fail-open 차단): %s_premium_models 값이 안전한 모델 목록 형식이 아닙니다. `models`로 정책을 확인하세요.\n' \
+        "$provider" >&2
+      return 1
+    fi
+    read -r -a premium_models <<<"$legacy_premiums"
+    for token in "${premium_models[@]}"; do
+      if ! _runtime_model_id_valid "$token" || ! _runtime_model_list_contains "$token" "${allowed_models[@]}"; then
+        printf '프리미엄 모델 정책 오류(fail-open 차단): %s_premium_models 선언이 %s_models 허용 목록과 정확히 일치하지 않습니다. `models`로 정책을 확인하세요.\n' \
+          "$provider" "$provider" >&2
+        return 1
+      fi
+    done
+  fi
+  if [[ -n "$tier_premium" ]] && ! _runtime_model_list_contains "$tier_premium" "${premium_models[@]}"; then
+    premium_models+=("$tier_premium")
+  fi
+
   # 프리미엄 목록이 비어 있으면 여기서부터 task-006의 선택/경고/argv 동작을
   # 그대로 유지한다. 아래 누출 차단은 이 분기에서는 한 글자도 발동하지 않는다.
-  if [[ -z "$premiums" ]]; then
+  if (( ${#premium_models[@]} == 0 )); then
     if ! _runtime_model_id_valid "$candidate"; then
       printf '경고: %s의 모델 값이 안전한 모델 ID 형식이 아니어서 Provider 기본값을 사용합니다.\n' \
         "$candidate_source" >&2
@@ -1137,22 +1259,6 @@ _runtime_select_model() {
     RUNTIME_MODEL_SOURCE="$candidate_source"
     return 0
   fi
-
-  # 게이트를 켠 정책은 잘못된 선언을 fail-open으로 처리하지 않는다. 모든
-  # 프리미엄 토큰이 허용 목록의 실제 토큰과 정확히 맞아야 한다.
-  if [[ ! "$premiums" =~ ^[-A-Za-z0-9=_./\ ]+$ ]]; then
-    printf '프리미엄 모델 정책 오류(fail-open 차단): %s_premium_models 값이 안전한 모델 목록 형식이 아닙니다. `models`로 정책을 확인하세요.\n' \
-      "$provider" >&2
-    return 1
-  fi
-  read -r -a premium_models <<<"$premiums"
-  for token in "${premium_models[@]}"; do
-    if ! _runtime_model_id_valid "$token" || ! _runtime_model_list_contains "$token" "${allowed_models[@]}"; then
-      printf '프리미엄 모델 정책 오류(fail-open 차단): %s_premium_models 선언이 %s_models 허용 목록과 정확히 일치하지 않습니다. `models`로 정책을 확인하세요.\n' \
-        "$provider" "$provider" >&2
-      return 1
-    fi
-  done
 
   RUNTIME_MODEL_APPROVAL="해당 없음 (비프리미엄)"
 

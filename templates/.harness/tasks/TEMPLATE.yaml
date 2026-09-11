@@ -9,11 +9,16 @@ intent: .harness/intents/task-000-intent.md
 status: draft
 primary_worker: '@@WORKER@@'
 reviewer: '@@REVIEWER@@'
-# 선택: 역할별 모델. 비우면 agent-policy.yaml의 해당 Provider 기본값을 쓰고,
-# 그 기본값도 비어 있으면 Provider CLI 기본값을 그대로 쓴다. 정책의
-# <provider>_models 허용 목록에 정확히 있는 값만 전달된다.
+# 선택: 역할별 모델/등급/속도. 모델 이름이 가장 우선하며, 등급은
+# light|standard|premium, 속도는 low|medium|high 중 하나다. 역할 기본값은
+# agent-policy.yaml의 worker_default_*/reviewer_default_*에 둔다.
+# 등급 해석 결과도 <provider>_models 허용 목록에 정확히 있어야 전달된다.
 # worker_model: ''
 # reviewer_model: ''
+# worker_tier: ''
+# reviewer_tier: ''
+# worker_effort: ''
+# reviewer_effort: ''
 fallback_chain: [@@FALLBACK@@]
 dependencies: []
 target_files: []
