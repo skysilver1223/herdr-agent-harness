@@ -319,6 +319,8 @@ PASS: 신규 프로젝트 보호
 PASS: 비대화형 명시적 실패
 PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)
 PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)
+PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정
+PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)
 PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)
 PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)
 PASS: 이벤트 로그 기록
@@ -335,6 +337,7 @@ PASS: Task Lock (동시 획득 거부/release/stale 회수)
 PASS: quota-retry/auto-step opt-in 게이트
 PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)
 PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범, .gitignore 누락 줄 보충·멱등)
+PASS: README 기대 출력 ↔ 실제 test 출력 정합
 PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)
 ```
 

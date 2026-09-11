@@ -1250,36 +1250,6 @@ STUB
   done
   rm -f -- "$secret_probe"
 
-  rm -rf -- "$test_root"
-  trap - EXIT
-
-  printf 'PASS: Bash 문법\n'
-  printf 'PASS: Harness 파일 생성 (21종 템플릿, templates/ 파일 정본)\n'
-  printf 'PASS: 템플릿 배열 ↔ templates/ 파일 정합\n'
-  printf 'PASS: 공통 Skill과 Claude 연결\n'
-  printf 'PASS: 플레이스홀더 치환\n'
-  printf 'PASS: Git 기준선 생성\n'
-  printf 'PASS: 신규 프로젝트 보호\n'
-  printf 'PASS: 비대화형 명시적 실패\n'
-  printf 'PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)\n'
-  printf 'PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)\n'
-  printf 'PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정\n'
-  printf 'PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)\n'
-  printf 'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)\n'
-  printf 'PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)\n'
-  printf 'PASS: 이벤트 로그 기록\n'
-  printf 'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)\n'
-  printf 'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)\n'
-  printf 'PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)\n'
-  printf 'PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)\n'
-  printf 'PASS: Agent 호출 없음\n'
-  printf 'PASS: 탭 완성 스크립트 문법\n'
-  printf 'PASS: Agent 승인 정책 (기본 auto/인수표/ask 무인수/문자·플래그·값·모드별 권한상승 거부/반환값 실패/정책 없음/init 값)\n'
-  printf 'PASS: 도움말 정합성 (dispatch↔help 요약·상세↔탭 완성 설명, 없는 명령 거부)\n'
-  printf 'PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호 미저장/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키)\n'
-  printf 'PASS: Task Lock (동시 획득 거부/release/stale 회수)\n'
-  printf 'PASS: quota-retry/auto-step opt-in 게이트\n'
-  printf 'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)\n'
   # 나중에 생긴 .gitignore 줄(evidence/raw/)이 기존 프로젝트에도 반영돼야 한다 —
   # 안 그러면 Agent 출력 덤프가 untracked로 노출된다.
   local gi_project="$test_root/gitignore-project"
@@ -1296,6 +1266,72 @@ STUB
   [[ "$(grep -cxF '.harness/evidence/raw/' "$gi_project/.gitignore")" -eq 1 ]] ||
     die "sync-templates --apply가 .gitignore 줄을 중복 추가했습니다."
 
-  printf 'PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범, .gitignore 누락 줄 보충·멱등)\n'
-  printf 'PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)\n'
+  # 출력 목록 자체를 한 곳에서 정의하고 README의 기대 출력 블록과 비교한다.
+  # cmd_test를 다시 실행하지 않으므로 Agent 호출·네트워크 접근·재귀 실행이 없다.
+  local pass_lines=(
+    'PASS: Bash 문법'
+    'PASS: Harness 파일 생성 (21종 템플릿, templates/ 파일 정본)'
+    'PASS: 템플릿 배열 ↔ templates/ 파일 정합'
+    'PASS: 공통 Skill과 Claude 연결'
+    'PASS: 플레이스홀더 치환'
+    'PASS: Git 기준선 생성'
+    'PASS: 신규 프로젝트 보호'
+    'PASS: 비대화형 명시적 실패'
+    'PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)'
+    'PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)'
+    'PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정'
+    'PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)'
+    'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)'
+    'PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)'
+    'PASS: 이벤트 로그 기록'
+    'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)'
+    'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)'
+    'PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)'
+    'PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)'
+    'PASS: Agent 호출 없음'
+    'PASS: 탭 완성 스크립트 문법'
+    'PASS: Agent 승인 정책 (기본 auto/인수표/ask 무인수/문자·플래그·값·모드별 권한상승 거부/반환값 실패/정책 없음/init 값)'
+    'PASS: 도움말 정합성 (dispatch↔help 요약·상세↔탭 완성 설명, 없는 명령 거부)'
+    'PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호 미저장/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키)'
+    'PASS: Task Lock (동시 획득 거부/release/stale 회수)'
+    'PASS: quota-retry/auto-step opt-in 게이트'
+    'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)'
+    'PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범, .gitignore 누락 줄 보충·멱등)'
+    'PASS: README 기대 출력 ↔ 실제 test 출력 정합'
+    'PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)'
+  )
+  local harness_root readme_path readme_passes readme_check_ran pass_line
+  harness_root="$(dirname "$(readlink -f "$SELF_PATH")")"
+  readme_path="$harness_root/README.md"
+  readme_passes="$test_root/readme-expected-output.txt"
+  readme_check_ran=0
+  if [[ -r "$readme_path" ]]; then
+    if ! awk '
+      $0 == "### 10. 쿼터 없는 자체 테스트" { in_section = 1; next }
+      in_section && /^### / { exit }
+      in_section && $0 == "기대 결과:" { expect_block = 1; next }
+      expect_block && $0 == "```text" { in_block = 1; expect_block = 0; next }
+      in_block && $0 == "```" { found = 1; exit }
+      in_block { print }
+      END { if (!found) exit 1 }
+    ' "$readme_path" >"$readme_passes"; then
+      die "README 기대 출력 블록을 읽을 수 없습니다: $readme_path"
+    fi
+    if ! diff -u <(printf '%s\n' "${pass_lines[@]}") "$readme_passes" >/dev/null; then
+      die "README 기대 출력 블록이 실제 test PASS 목록과 다릅니다: $readme_path"
+    fi
+    readme_check_ran=1
+  else
+    info "README.md가 없어(설치본) 기대 출력 정합성 검사는 건너뜁니다."
+  fi
+
+  rm -rf -- "$test_root"
+  trap - EXIT
+
+  for pass_line in "${pass_lines[@]}"; do
+    if (( ! readme_check_ran )) && [[ "$pass_line" == 'PASS: README 기대 출력 ↔ 실제 test 출력 정합' ]]; then
+      continue
+    fi
+    printf '%s\n' "$pass_line"
+  done
 }
