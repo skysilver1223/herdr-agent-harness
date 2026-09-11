@@ -683,14 +683,16 @@ AC_PY
       -e 's/^status: .*/status: active/' \
       "$test_project/.harness/tasks/TEMPLATE.yaml" >"$task2"
 
-  local lock_token1 lock_token2 lock_status
+  local lock_token1 lock_token2 lock_status lock_error
   lock_token1="$(_runtime_lock_acquire "$test_project" task-002 test-a 600)" ||
     die "Task Lock 최초 획득 실패"
   set +e
-  lock_token2="$(_runtime_lock_acquire "$test_project" task-002 test-b 600)"
+  lock_error="$(_runtime_lock_acquire "$test_project" task-002 test-b 600 2>&1)"
   lock_status=$?
   set -e
   [[ "$lock_status" -ne 0 ]] || die "Task Lock이 동시 획득을 막지 못했습니다."
+  printf '%s' "$lock_error" | grep -qF 'Task가 다른 프로세스에 의해 잠겨 있습니다' ||
+    die "Task Lock 동시 획득 거부 사유가 없습니다: $lock_error"
   _runtime_lock_release "$test_project" task-002 "$lock_token1"
   [[ ! -d "$(_runtime_lock_dir "$test_project" task-002)" ]] ||
     die "Task Lock이 release 후에도 남아 있습니다."
