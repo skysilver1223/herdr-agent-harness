@@ -243,6 +243,17 @@ _models_print_tier_status() {
   fi
 }
 
+_models_print_selection_guide() {
+  printf '%s\n' \
+    '' \
+    '등급·속도 선택 기준' \
+    '  light: 기계적 변경 — 문자열 치환, 문서 재배치, 정해진 패턴 적용' \
+    '  standard: 일반 구현 — 설계는 정해졌고 코드로 옮기는 작업' \
+    '  premium: 설계 판단 포함, 또는 보안 경계·상태 전이·정책 해석 변경' \
+    '  속도: high — 설계 판단·우회 검토·원인 추적 / medium — 일반 구현 / low — 기계적 변경·정형 출력' \
+    '  Reviewer: premium Worker라면 한 단계 상향을 고려할 수 있으나 권고일 뿐 강제 규칙은 아님'
+}
+
 _models_print_diff() {
   local current="$1" actual_name="$2" premium="$3" item suffix
   local -n actual_ref="$actual_name"
@@ -385,6 +396,8 @@ cmd_models() {
       printf '  %s_default_effort: %s\n' "$role" "${role_effort:-(미설정)}"
     fi
   done
+
+  _models_print_selection_guide
 
   if [[ "$refresh" -eq 1 || ${#premium_seen[@]} -gt 0 ]]; then
     if [[ "$apply" -eq 1 ]]; then

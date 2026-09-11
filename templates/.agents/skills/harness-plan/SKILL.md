@@ -17,6 +17,8 @@ compatibility: Herdr pane, Git repository, project-local .harness directory
 2. 각 Milestone 아래 독립적으로 수행 가능한 Task를 도출한다 — 한 Task는 하나의 기능·분석·리팩터링 목적만 가지며, 현재 활성 Task는 최대 5개.
 3. Task마다 `.harness/tasks/task-XXX.yaml`(`tasks/TEMPLATE.yaml` 기반)과 짝이 되는 `.harness/intents/task-XXX-intent.md`(`intents/TEMPLATE.md` 기반)를 작성한다.
    - `primary_worker: @@WORKER@@`, `reviewer: @@REVIEWER@@` (반드시 Worker와 다른 Provider).
+   - Task 기안 시 `models` 명령 또는 README의 기준표에 비추어 `worker_tier`·`reviewer_tier`와, 필요하면 속도(`worker_effort`·`reviewer_effort`)를 제안한다. 어느 기준 항목에 해당하는지는 intent나 사용자와의 대화에 근거로 적는다.
+   - 등급·속도는 제안일 뿐 결정이 아니다. 사용자가 확정하며, Harness나 Agent가 제안값을 Task YAML에 자동으로 써 넣지 않는다.
    - `write_scope`: 수정이 허용된 파일·디렉터리만 엄격히 한정. `acceptance_criteria`: 구체적인 실행 검증 명령(`verified_by`) 명시.
    - 착수 게이트(선행 결정·조건)는 Task YAML이 아니라 intent.md의 `Open Questions / Decision Gates`에만 적는다. 그 목록이 미해소면 Task를 `ready`로 올리지 않는다.
 4. 병렬 실행 가능성을 점검한다 — `write_scope`가 겹치지 않고 의존성이 없는 Task끼리 같은 `parallel_group`으로 묶는다. 병렬 Worker는 최대 2개.

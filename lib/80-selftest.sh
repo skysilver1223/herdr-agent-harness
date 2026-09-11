@@ -59,6 +59,17 @@ PROVIDER_STUB
   for item in "${required[@]}"; do
     [[ -f "$test_project/$item" ]] || die "자체 테스트 누락 파일: $item"
   done
+  local generated_plan_skill="$test_project/.agents/skills/harness-plan/SKILL.md" plan_field
+  for plan_field in worker_tier reviewer_tier worker_effort reviewer_effort; do
+    grep -q "$plan_field" "$generated_plan_skill" ||
+      die "생성 Planner Skill에 역할별 등급·속도 제안 필드가 없습니다: $plan_field"
+  done
+  grep -q 'intent나 사용자와의 대화에 근거로 적는다' "$generated_plan_skill" ||
+    die "생성 Planner Skill에 등급·속도 제안 근거 기록 절차가 없습니다."
+  grep -q '사용자가 확정' "$generated_plan_skill" ||
+    die "생성 Planner Skill에서 등급·속도 확정 주체가 사용자가 아닙니다."
+  grep -q '자동으로 써 넣지 않는다' "$generated_plan_skill" ||
+    die "생성 Planner Skill이 제안값의 Task YAML 자동 기입을 금지하지 않습니다."
 
   # 템플릿 정본이 templates/ 에 파일로 존재하고, 배열과 파일이 서로 어긋나지
   # 않는지 확인한다(heredoc → 파일 추출 후 회귀 방지).
@@ -1075,6 +1086,19 @@ PREMIUM_HERDR_STUB
   models_out="$(cmd_models "$models_project")"
   cmp -s "$models_policy" "$models_before" ||
     die "models 기본 표시가 정책 파일을 변경했습니다."
+  printf '%s' "$models_out" | grep -q 'light: 기계적 변경 — 문자열 치환, 문서 재배치, 정해진 패턴 적용' ||
+    die "models 등급 기준표에 light 기준이 없습니다."
+  printf '%s' "$models_out" | grep -q 'standard: 일반 구현 — 설계는 정해졌고 코드로 옮기는 작업' ||
+    die "models 등급 기준표에 standard 기준이 없습니다."
+  printf '%s' "$models_out" | grep -q 'premium: 설계 판단 포함, 또는 보안 경계·상태 전이·정책 해석 변경' ||
+    die "models 등급 기준표에 premium 기준이 없습니다."
+  printf '%s' "$models_out" | grep -q '속도: high — 설계 판단·우회 검토·원인 추적 / medium — 일반 구현 / low — 기계적 변경·정형 출력' ||
+    die "models 속도 기준에 high/medium/low 세 단계가 없습니다."
+  printf '%s' "$models_out" | grep -q 'Reviewer: premium Worker라면 한 단계 상향을 고려할 수 있으나 권고일 뿐 강제 규칙은 아님' ||
+    die "models가 Reviewer 상향을 강제 규칙이 아닌 권고로 설명하지 않습니다."
+  if printf '%s' "$models_out" | grep -q 'Reviewer 등급은 Worker 이상'; then
+    die "models가 Reviewer 등급 상향을 규칙처럼 설명합니다."
+  fi
   printf '%s' "$models_out" | grep -q 'claude.*조회 경로 없음 — 수동 관리' ||
     die "models가 조회 불가 Provider를 수동 관리로 안내하지 않았습니다."
   printf '%s' "$models_out" | grep -q 'agy-new (추가)' ||
