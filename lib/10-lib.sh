@@ -7,7 +7,7 @@ Herdr Agent/Skills Harness
 사용법:
   $SCRIPT_NAME help | -h | --help  이 도움말 출력(인자 없이 실행해도 같다)
   $SCRIPT_NAME init PATH [옵션]   새 프로젝트 Harness 생성
-  $SCRIPT_NAME sync-templates PATH [--apply]  기존 프로젝트의 skill·role 파일을 지금 버전 템플릿으로 재동기화(기본은 diff 미리보기)
+  $SCRIPT_NAME sync-templates PATH [--apply]  기존 프로젝트의 skill·role·정책 템플릿을 재동기화(기본은 diff 미리보기)
   $SCRIPT_NAME start [PATH]       Herdr Session 시작
   $SCRIPT_NAME status [PATH]      현재 STATE.md 출력
   $SCRIPT_NAME status --live      문서·Herdr·Git 상태 대조 (DRIFT 표시)
@@ -28,7 +28,7 @@ Herdr Agent/Skills Harness
 Agent Loop 스텝 명령 (호출 1회 = 1스텝, 상주 루프 없음):
   $SCRIPT_NAME validate [PATH] [--wave ID]        읽기 전용 사전 검증
   $SCRIPT_NAME transition PATH TASK_ID TO_STATE   상태 전이 강제
-  $SCRIPT_NAME dispatch PATH TASK_ID ROLE         Agent 한 턴 실행
+  $SCRIPT_NAME dispatch PATH TASK_ID ROLE         Task 역할·모델 정책으로 Agent 한 턴 실행
   $SCRIPT_NAME dispatch PATH TASK_ID ROLE --print-only  Pane을 만들지 않고 실행할 명령만 출력(폴백)
   $SCRIPT_NAME observe PATH TASK_ID [ROLE]        기존 Agent 재조회
   $SCRIPT_NAME adopt PATH TASK_ID ROLE --pane ID --agent NAME  사람이 띄운 Agent를 Harness에 등록
@@ -155,7 +155,31 @@ emit_doc() {
       -e "s|@@REVIEWER@@|${DOC_REVIEWER}|g" \
       -e "s|@@ORCHESTRATOR@@|${DOC_ORCHESTRATOR}|g" \
       -e "s|@@FALLBACK@@|${DOC_FALLBACK}|g" \
+      -e "s|@@APPROVAL_MODE@@|${DOC_APPROVAL_MODE:-auto}|g" \
+      -e "s|@@CLAUDE_AUTO@@|${DOC_CLAUDE_AUTO:---permission-mode acceptEdits}|g" \
+      -e "s|@@CLAUDE_BYPASS@@|${DOC_CLAUDE_BYPASS:---permission-mode bypassPermissions}|g" \
+      -e "s|@@CODEX_AUTO@@|${DOC_CODEX_AUTO:---ask-for-approval never --sandbox workspace-write}|g" \
+      -e "s|@@CODEX_BYPASS@@|${DOC_CODEX_BYPASS:---dangerously-bypass-approvals-and-sandbox}|g" \
+      -e "s|@@AGY_AUTO@@|${DOC_AGY_AUTO:---mode accept-edits}|g" \
+      -e "s|@@AGY_BYPASS@@|${DOC_AGY_BYPASS:---dangerously-skip-permissions}|g" \
       -e "s|@@NAME@@|${DOC_NAME}|g" "$source_file")"
+  if [[ "$relative" == ".harness/policies/agent-policy.yaml" ]]; then
+    rendered="$(printf '%s\n' "$rendered" | awk \
+      -v claude_models="${DOC_CLAUDE_MODELS:-}" \
+      -v claude_default_model="${DOC_CLAUDE_DEFAULT_MODEL:-}" \
+      -v codex_models="${DOC_CODEX_MODELS:-}" \
+      -v codex_default_model="${DOC_CODEX_DEFAULT_MODEL:-}" \
+      -v agy_models="${DOC_AGY_MODELS:-}" \
+      -v agy_default_model="${DOC_AGY_DEFAULT_MODEL:-}" '
+        /^  claude_models:/ { print "  claude_models: \047" claude_models "\047"; next }
+        /^  claude_default_model:/ { print "  claude_default_model: \047" claude_default_model "\047"; next }
+        /^  codex_models:/ { print "  codex_models: \047" codex_models "\047"; next }
+        /^  codex_default_model:/ { print "  codex_default_model: \047" codex_default_model "\047"; next }
+        /^  agy_models:/ { print "  agy_models: \047" agy_models "\047"; next }
+        /^  agy_default_model:/ { print "  agy_default_model: \047" agy_default_model "\047"; next }
+        { print }
+      ')"
+  fi
   write_file "$root" "$relative" <<<"$rendered"
 }
 
@@ -186,5 +210,6 @@ HARNESS_DOC_TEMPLATES=(
 
 HARNESS_POLICY_TEMPLATES=(
   ".harness/policies/review-policy.yaml"
+  ".harness/policies/agent-policy.yaml"
   ".harness/tasks/TEMPLATE.yaml"
 )

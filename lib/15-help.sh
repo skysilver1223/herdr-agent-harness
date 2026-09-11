@@ -14,13 +14,13 @@
 
 HARNESS_COMMAND_SUMMARIES=(
   "init:새 프로젝트에 Harness 문서·정책·역할 파일을 생성한다"
-  "sync-templates:기존 프로젝트의 Skill·역할 파일을 지금 버전 템플릿으로 재동기화한다"
+  "sync-templates:기존 프로젝트의 Skill·역할·정책 템플릿을 지금 버전으로 재동기화한다"
   "start:프로젝트 디렉터리에서 Herdr Session을 연다"
   "status:STATE.md를 출력한다 (--live로 문서·Herdr·Git 대조)"
   "validate:상태를 바꾸지 않고 문서·정책·Git 정합성만 검사한다"
   "transition:Task 상태를 전이표와 게이트에 따라 강제 전이한다"
   "approve:사용자 승인을 기록하고 awaiting_approval을 completed로 만든다"
-  "dispatch:Task와 역할에 맞는 Agent를 Pane에서 한 턴 실행한다"
+  "dispatch:Task의 역할·모델 정책에 맞는 Agent를 Pane에서 한 턴 실행한다"
   "observe:이미 실행 중인 Agent의 출력을 다시 읽어 Evidence를 갱신한다"
   "adopt:사람이 직접 띄운 Agent를 Harness 추적에 등록한다"
   "close-agent:Harness가 만든 Agent Pane을 정리한다"
@@ -108,10 +108,12 @@ EOF
   $SCRIPT_NAME sync-templates [PATH] [--apply|--dry-run]
 
 무엇을 하나:
-  Harness가 소유한 Skill·역할·템플릿 파일만 지금 버전으로 맞춘다. 기본은
+  Harness가 소유한 Skill·역할·정책 템플릿 파일만 지금 버전으로 맞춘다. 기본은
   diff 미리보기(--dry-run과 같다)이며 --apply를 줘야 실제로 쓴다. PATH를 생략하면
   현재 디렉터리를 쓴다. SPEC.md·STATE.md·Task 파일
   같은 프로젝트 산출물은 건드리지 않는다.
+  agent-policy.yaml은 사용자가 고친 기존 값을 보존하면서 새 정책 키만 받을 수
+  있게 렌더링한다.
   예외로 .gitignore에는 Harness가 요구하는 줄(.harness/runtime/,
   .harness/evidence/raw/ 등)이 빠져 있으면 --apply가 그 줄만 덧붙인다 —
   없으면 원문 덤프가 untracked로 노출된다. 기존 줄은 지우지 않는다.
@@ -215,6 +217,18 @@ EOF
   쓰인 모드와 인수는 Attempt·Evidence 문서에 남는다.
   이 파일이 없는 기존 프로젝트(init 이전 버전)에서는 인수를 붙이지 않는다 —
   ask와 같게 동작하므로, 필요하면 파일을 직접 만들어 넣는다.
+
+모델 선택:
+  Task YAML의 worker_model/reviewer_model은 선택 항목이다. 선택 우선순위는
+  역할별 Task 필드 → agent-policy.yaml의 <provider>_default_model → Provider
+  CLI 기본값이다. Task 필드나 정책 기본값은 같은 정책 파일의
+  <provider>_models 공백 구분 허용 목록에 정확히 있어야만 --model로 전달된다.
+  목록 밖 값과 플래그처럼 보이는 값은 경고 후 무시하며 Provider 기본값을 쓴다.
+
+  허용 모델은 Provider CLI에서 확인한다: agy는 \`agy models\`, claude는
+  \`claude --help\`, codex는 \`~/.codex/config.toml\`과 \`codex --help\`를 본다.
+  모델명은 코드가 아니라 agent-policy.yaml의 목록에서 관리한다. 실제 선택된
+  모델(또는 Harness 미지정)과 출처는 Attempt·Evidence에 남는다.
 
 역할(ROLE): worker | reviewer
 

@@ -539,6 +539,114 @@ AC_PY
   printf '%s' "$pane_split_lines" | grep -q -- '--cwd "\$root"' &&
     die "pane split이 아직 \$root를 직접 씁니다 — --cwd가 무시됩니다($dispatch_src)."
 
+  # --- 모델 선택: Task 역할별 지정 → 정책 기본값 → Provider 기본값 ---------
+  # 승인 인수 allowlist에는 --model을 절대 열지 않는다. 모델은 별도 정책 목록의
+  # 토큰과 정확히 일치할 때만 같은 agent_args 배열에 들어가며, print-only와
+  # 실제 start 경로가 그 배열을 공유해야 한다.
+  local model_project="$test_root/model-project" model_policy model_task
+  local model_output model_error model_default_task model_invalid_task model_start_line secret_model
+  bash "$SELF_PATH" init "$model_project" --name model-project --goal "모델 선택 검사" \
+    --worker codex --reviewer agy >/dev/null
+  cp "$test_project/.harness/tasks/task-001.yaml" "$model_project/.harness/tasks/task-001.yaml"
+  model_policy="$model_project/.harness/policies/agent-policy.yaml"
+
+  # 미지정 Task와 빈 정책 기본값은 종전처럼 모델 인수가 전혀 없어야 한다.
+  model_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$model_project" task-001 worker --print-only)"
+  model_start_line="$(printf '%s\n' "$model_output" | grep '^  herdr agent start ')"
+  [[ "${model_start_line#* --timeout 120000}" == ' -- --ask-for-approval never --sandbox workspace-write' ]] ||
+    die "모델 미지정 Task의 기존 Provider 기동 인수가 바뀌었습니다: $model_start_line"
+  printf '%s' "$model_output" | grep -q '출처: Provider 기본값 (미지정)' ||
+    die "모델 미지정 출처가 Provider 기본값으로 기록되지 않았습니다."
+
+  sed -i "s|^  codex_models:.*|  codex_models: 'gpt-5.6-sol gpt-5.6-terra'|" "$model_policy"
+  sed -i "s|^  codex_default_model:.*|  codex_default_model: 'gpt-5.6-terra'|" "$model_policy"
+  sed -i "s|^  agy_models:.*|  agy_models: 'gemini-3.8-flash-high gemini-3.1-pro-high'|" "$model_policy"
+  sed -i "s|^  agy_default_model:.*|  agy_default_model: 'gemini-3.8-flash-high'|" "$model_policy"
+
+  model_task="$model_project/.harness/tasks/task-model.yaml"
+  awk '
+    /^task_id:/ { print "task_id: task-model"; next }
+    { print }
+    /^reviewer:/ {
+      print "worker_model: '\''gpt-5.6-sol'\''"
+      print "reviewer_model: '\''gemini-3.1-pro-high'\''"
+    }
+  ' "$test_project/.harness/tasks/task-001.yaml" >"$model_task"
+
+  # Task 지정이 정책 기본값보다 우선하며, worker/reviewer가 각자 자기 필드를 쓴다.
+  model_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$model_project" task-model worker --print-only)"
+  printf '%s' "$model_output" | grep -q 'herdr agent start .* --model gpt-5.6-sol' ||
+    die "worker_model이 Agent 기동 인수에 전달되지 않았습니다."
+  printf '%s' "$model_output" | grep -q '출처: Task 지정 (worker_model)' ||
+    die "worker_model의 Task 지정 출처가 기록되지 않았습니다."
+  printf '%s' "$model_output" | grep -q -- '--model gpt-5.6-terra' &&
+    die "Task 지정이 있는데 codex 정책 기본 모델이 이겼습니다."
+
+  model_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$model_project" task-model reviewer --print-only)"
+  printf '%s' "$model_output" | grep -q 'herdr agent start .* --model gemini-3.1-pro-high' ||
+    die "reviewer_model이 Agent 기동 인수에 전달되지 않았습니다."
+  printf '%s' "$model_output" | grep -q '출처: Task 지정 (reviewer_model)' ||
+    die "reviewer_model의 Task 지정 출처가 기록되지 않았습니다."
+
+  # 역할 필드가 비어 있으면 Provider별 정책 기본값을 쓴다.
+  model_default_task="$model_project/.harness/tasks/task-model-default.yaml"
+  sed 's/^task_id:.*/task_id: task-model-default/' \
+    "$test_project/.harness/tasks/task-001.yaml" >"$model_default_task"
+  model_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$model_project" task-model-default worker --print-only)"
+  printf '%s' "$model_output" | grep -q 'herdr agent start .* --model gpt-5.6-terra' ||
+    die "Task 모델 미지정 시 Provider 정책 기본 모델이 적용되지 않았습니다."
+  printf '%s' "$model_output" | grep -q '출처: 정책 기본값 (codex_default_model)' ||
+    die "정책 기본 모델의 출처가 기록되지 않았습니다."
+
+  # 허용 목록 밖의 Task 값은 정책 기본값으로 재해석하지 않고 Provider 기본값으로
+  # 내리며 경고한다. 오타 하나로 Wave 전체를 멈추지는 않는다.
+  model_invalid_task="$model_project/.harness/tasks/task-model-invalid.yaml"
+  sed -e 's/^task_id:.*/task_id: task-model-invalid/' \
+      -e "s/^worker_model:.*/worker_model: 'gpt-not-allowed'/" \
+    "$model_task" >"$model_invalid_task"
+  model_error="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$model_project" task-model-invalid worker --print-only 2>&1)"
+  printf '%s' "$model_error" | grep -q '허용 목록에 없어 Provider 기본값' ||
+    die "허용 목록 밖 모델에 경고가 나오지 않았습니다."
+  printf '%s' "$model_error" | grep -q 'herdr agent start .* --model ' &&
+    die "허용 목록 밖 모델이 Agent 기동 인수에 전달됐습니다."
+
+  # Task 문자열과 정책 목록 양쪽에서 플래그 주입을 시도해도 --model argv가
+  # 생기지 않아야 한다. 특히 목록 값에서 꺼내더라도 선행 '-' 토큰은 모델 ID가
+  # 아니므로 목록 전체를 거부한다.
+  sed -e 's/^task_id:.*/task_id: task-model-inject/' \
+      -e "s/^worker_model:.*/worker_model: '--add-dir \/'/" \
+    "$model_task" >"$model_project/.harness/tasks/task-model-inject.yaml"
+  model_error="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$model_project" task-model-inject worker --print-only 2>&1)"
+  printf '%s' "$model_error" | grep -q '안전한 모델 ID 형식이 아니어서' ||
+    die "Task 모델 플래그 주입 시도가 경고와 함께 거부되지 않았습니다."
+  printf '%s' "$model_error" | grep -q 'herdr agent start .* --model ' &&
+    die "Task 모델 플래그 주입 값이 Agent 기동 인수에 전달됐습니다."
+
+  sed -i "s|^  codex_models:.*|  codex_models: 'gpt-5.6-sol --add-dir /'|" "$model_policy"
+  model_error="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$model_project" task-model worker --print-only 2>&1)"
+  printf '%s' "$model_error" | grep -q '모델 ID가 아닌 토큰' ||
+    die "정책 모델 목록의 플래그 주입 토큰이 거부되지 않았습니다."
+  printf '%s' "$model_error" | grep -q 'herdr agent start .* --model ' &&
+    die "오염된 정책 모델 목록이 Agent 기동 인수에 전달됐습니다."
+
+  # 모델 정책에 Secret을 잘못 붙여 넣어도 argv나 경고에 원문이 나타나면 안 된다.
+  secret_model='sk-abcdefghijklmnopqrstuvwx'
+  sed -i "s|^  codex_models:.*|  codex_models: '$secret_model'|" "$model_policy"
+  model_error="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$model_project" task-model worker --print-only 2>&1)"
+  printf '%s' "$model_error" | grep -qF "$secret_model" &&
+    die "Secret 형태의 모델 정책 값이 dispatch 출력에 노출됐습니다."
+  printf '%s' "$model_error" | grep -q 'herdr agent start .* --model ' &&
+    die "Secret 형태의 모델 정책 값이 Agent 기동 인수에 전달됐습니다."
+
+  # 실제 start와 print-only가 같은 agent_args 조립 결과를 사용하고, 정상
+  # dispatch가 Attempt·Evidence에 모델과 출처를 기록하는지 소스에서도 고정한다.
+  grep -q '_runtime_start_agent_when_ready .*"\${agent_args\[@\]}"' "$dispatch_src" ||
+    die "실제 agent start 경로가 검증된 agent_args 배열을 쓰지 않습니다."
+  grep -q "printf -- '- Started:.*- Model:.*- Model source:" "$dispatch_src" ||
+    die "dispatch Attempt에 Model과 Model source 기록이 없습니다."
+  grep -q "printf -- '- Captured:.*- Model:.*- Model source:" "$dispatch_src" ||
+    die "dispatch Evidence에 Model과 Model source 기록이 없습니다."
+
   # --- dispatch 옵션 정합: 인수 파싱 ↔ help 상세 ↔ 탭 완성 설명 -------------
   # 명령 이름은 기존 "도움말 정합성"이 검사하지만 옵션은 아무도 보지 않았다.
   # 실제로 --extra-prompt가 탭 완성 목록에서 빠진 채(줄바꿈 누락으로) 통과했다.
@@ -677,6 +785,39 @@ AC_PY
   sync_out="$(bash "$SELF_PATH" sync-templates "$test_project")"
   printf '%s' "$sync_out" | grep -q '요약: 변경 0' ||
     die "sync-templates: 방금 init한 프로젝트인데 dry-run이 변경 0이 아닙니다."
+
+  # agent-policy는 사용자가 직접 편집하는 정책이라 통째로 초기화하면 안 된다.
+  # 구버전 파일에 모델 키만 보충하면서 기존 승인 인수는 보존해야 한다.
+  sed -i '/^  \(claude\|codex\|agy\)_\(models\|default_model\):/d' \
+    "$test_project/.harness/policies/agent-policy.yaml"
+  sed -i "s|^  codex_auto:.*|  codex_auto: '--ask-for-approval on-request --sandbox workspace-write'|" \
+    "$test_project/.harness/policies/agent-policy.yaml"
+  sync_out="$(bash "$SELF_PATH" sync-templates "$test_project")"
+  printf '%s' "$sync_out" | grep -q '요약: 변경 1' ||
+    die "sync-templates: 구버전 agent-policy의 모델 키 누락을 감지하지 못했습니다."
+  grep -q '^  codex_models:' "$test_project/.harness/policies/agent-policy.yaml" &&
+    die "sync-templates dry-run이 agent-policy 모델 키를 실제로 추가했습니다."
+  sync_out="$(bash "$SELF_PATH" sync-templates "$test_project" --apply)"
+  printf '%s' "$sync_out" | grep -q '요약: 변경 1' ||
+    die "sync-templates --apply: agent-policy 모델 키 전파 건수가 예상과 다릅니다."
+  grep -q "^  codex_models: ''$" "$test_project/.harness/policies/agent-policy.yaml" ||
+    die "sync-templates --apply가 빈 초기 모델 허용 목록을 전파하지 않았습니다."
+  grep -q "^  codex_auto: '--ask-for-approval on-request --sandbox workspace-write'$" \
+    "$test_project/.harness/policies/agent-policy.yaml" ||
+    die "sync-templates가 사용자가 고친 승인 정책 값을 초기화했습니다."
+  sed -i "s|^  codex_models:.*|  codex_models: 'gpt-project-model gpt-review-model'|" \
+    "$test_project/.harness/policies/agent-policy.yaml"
+  sed -i "s|^  codex_default_model:.*|  codex_default_model: 'gpt-project-model'|" \
+    "$test_project/.harness/policies/agent-policy.yaml"
+  sync_out="$(bash "$SELF_PATH" sync-templates "$test_project" --apply)"
+  printf '%s' "$sync_out" | grep -q '요약: 변경 0' ||
+    die "sync-templates: agent-policy 모델 키 전파가 멱등이 아닙니다."
+  grep -q "^  codex_models: 'gpt-project-model gpt-review-model'$" \
+    "$test_project/.harness/policies/agent-policy.yaml" ||
+    die "sync-templates가 사용자가 고친 모델 허용 목록을 초기화했습니다."
+  grep -q "^  codex_default_model: 'gpt-project-model'$" \
+    "$test_project/.harness/policies/agent-policy.yaml" ||
+    die "sync-templates가 사용자가 고친 정책 기본 모델을 초기화했습니다."
 
   cat >"$test_project/.agents/skills/harness-orchestrate/SKILL.md" <<'EOF'
 ---
@@ -1270,7 +1411,7 @@ STUB
   # cmd_test를 다시 실행하지 않으므로 Agent 호출·네트워크 접근·재귀 실행이 없다.
   local pass_lines=(
     'PASS: Bash 문법'
-    'PASS: Harness 파일 생성 (21종 템플릿, templates/ 파일 정본)'
+    'PASS: Harness 파일 생성 (22종 템플릿, templates/ 파일 정본)'
     'PASS: 템플릿 배열 ↔ templates/ 파일 정합'
     'PASS: 공통 Skill과 Claude 연결'
     'PASS: 플레이스홀더 치환'
@@ -1287,6 +1428,7 @@ STUB
     'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)'
     'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)'
     'PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)'
+    'PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)'
     'PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)'
     'PASS: Agent 호출 없음'
     'PASS: 탭 완성 스크립트 문법'
@@ -1296,7 +1438,7 @@ STUB
     'PASS: Task Lock (동시 획득 거부/release/stale 회수)'
     'PASS: quota-retry/auto-step opt-in 게이트'
     'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)'
-    'PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범, .gitignore 누락 줄 보충·멱등)'
+    'PASS: sync-templates (dry-run/apply·멱등, agent-policy 모델 키 전파·사용자 값 보존, AGENTS.md/STATE.md 비침범, .gitignore 보충)'
     'PASS: README 기대 출력 ↔ 실제 test 출력 정합'
     'PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)'
   )

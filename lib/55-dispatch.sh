@@ -74,16 +74,25 @@ cmd_dispatch() {
 
   # 도구 실행 승인만 정책으로 건너뛴다. 작업 방향성(상태 전이·완료 승인)은
   # 여기서 바뀌지 않는다 — transition/approve를 거쳐야만 움직인다.
-  local approval_mode agent_args_raw
+  local approval_mode approval_args_raw agent_args_raw selected_model model_source model_record
   local -a agent_args=()
   approval_mode="$(_runtime_approval_mode "$root")"
   # _runtime_agent_args는 die하지 않고 반환값으로 실패를 알린다 — auto-step처럼
   # cmd_dispatch가 커맨드 치환 안에서 불릴 때 안쪽 die가 삼켜지면 검증 실패가
   # 조용한 무인수 실행으로 바뀌기 때문이다. 여기서 명시적으로 멈춘다.
-  if ! agent_args_raw="$(_runtime_agent_args "$root" "$provider")"; then
+  if ! approval_args_raw="$(_runtime_agent_args "$root" "$provider")"; then
     die "agent-policy.yaml의 승인 정책 값이 유효하지 않아 dispatch를 중단합니다."
   fi
-  read -r -a agent_args <<<"$agent_args_raw"
+  read -r -a agent_args <<<"$approval_args_raw"
+  _runtime_select_model "$root" "$task_file" "$role" "$provider"
+  selected_model="$RUNTIME_MODEL"
+  model_source="$RUNTIME_MODEL_SOURCE"
+  model_record="${selected_model:-Provider 기본값 (Harness 미지정)}"
+  agent_args_raw="$approval_args_raw"
+  if [[ -n "$selected_model" ]]; then
+    agent_args+=(--model "$selected_model")
+    agent_args_raw="${agent_args_raw:+$agent_args_raw }--model $selected_model"
+  fi
 
   attempt="$(_runtime_next_attempt "$root" "$task_id")"
   started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -118,6 +127,7 @@ cmd_dispatch() {
     printf '  %s adopt %s %s %s --pane PANE_ID --agent %s\n\n' \
       "$SCRIPT_NAME" "$quoted_path" "$task_id" "$role" "$agent_name"
     printf '승인 모드: %s / Provider 인수: %s\n' "$approval_mode" "${agent_args_raw:-(없음)}"
+    printf '모델: %s / 출처: %s\n' "$model_record" "$model_source"
     printf 'Agent 작업 디렉터리: %s%s\n' "$agent_cwd" "$( [[ "$agent_cwd" == "$root" ]] && printf ' (워크스페이스 기본값)' || printf ' (--cwd)')"
     printf 'dispatch_result=print_only\n'
     return 0
@@ -136,12 +146,13 @@ cmd_dispatch() {
   pane_id="$(_runtime_json_field "$pane_output" pane_id)"
   [[ -n "$pane_id" ]] || die "Herdr Pane ID를 추출하지 못했습니다."
 
-  _runtime_write_meta "$root" "$task_id" "$role" "$agent_name" "$pane_id" "$provider" "$attempt"
+  _runtime_write_meta "$root" "$task_id" "$role" "$agent_name" "$pane_id" "$provider" "$attempt" 0 \
+    "$selected_model" "$model_source"
   attempt_file="$root/.harness/attempts/$task_id-attempt-$attempt.md"
   temporary="$(mktemp "$root/.harness/attempts/.attempt.XXXXXX")"
   {
     printf '# Attempt %s: %s\n\n' "$attempt" "$task_id"
-    printf -- '- Started: %s\n- Role: %s\n- Provider: %s\n- Pane ID: %s\n- Agent name: %s\n- Baseline commit: %s\n- Approval mode: %s\n- Provider args: %s\n- Agent cwd: %s\n' "$started_at" "$role" "$provider" "$pane_id" "$agent_name" "$baseline" "$approval_mode" "${agent_args_raw:-(없음)}" "$agent_cwd"
+    printf -- '- Started: %s\n- Role: %s\n- Provider: %s\n- Model: %s\n- Model source: %s\n- Pane ID: %s\n- Agent name: %s\n- Baseline commit: %s\n- Approval mode: %s\n- Provider args: %s\n- Agent cwd: %s\n' "$started_at" "$role" "$provider" "$model_record" "$model_source" "$pane_id" "$agent_name" "$baseline" "$approval_mode" "${agent_args_raw:-(없음)}" "$agent_cwd"
     if [[ "$agent_cwd" != "$root" ]] && git -C "$agent_cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       printf -- '- Agent cwd baseline commit: %s\n' \
         "$(git -C "$agent_cwd" rev-parse HEAD 2>/dev/null || printf 'unborn')"
@@ -203,7 +214,7 @@ cmd_dispatch() {
   temporary="$(mktemp "$root/.harness/evidence/.capture.XXXXXX")"
   {
     printf '# Evidence: %s / %s / Attempt %s\n\n' "$task_id" "$role" "$attempt"
-    printf -- '- Captured: %s\n- Dispatch result: %s\n- Approval mode: %s\n- Prompt exit: %s\n- Agent get exit: %s\n- Agent read exit: %s\n- Prompt 재전송: %s\n- 추가 지시 파일: %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$result" "$approval_mode" "$prompt_status" "$get_status" "$read_status" "$( ((prompt_resent==1)) && printf 'yes(1회)' || printf 'no')" "${extra_prompt:-(없음)}"
+    printf -- '- Captured: %s\n- Dispatch result: %s\n- Model: %s\n- Model source: %s\n- Approval mode: %s\n- Prompt exit: %s\n- Agent get exit: %s\n- Agent read exit: %s\n- Prompt 재전송: %s\n- 추가 지시 파일: %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$result" "$model_record" "$model_source" "$approval_mode" "$prompt_status" "$get_status" "$read_status" "$( ((prompt_resent==1)) && printf 'yes(1회)' || printf 'no')" "${extra_prompt:-(없음)}"
     printf '## Git status --short\n\n'
     git -C "$root" status --short 2>&1 || true
     printf '\n## Git diff --stat\n\n'
@@ -230,7 +241,7 @@ cmd_dispatch() {
   rm -f -- "$temporary"
   # 정본은 판단에 쓰이는 6필드 YAML이다. Reviewer와 transition은 이것만 읽는다.
   _runtime_write_evidence_yaml "$root" "$task_id" "$role" "$attempt" "$result" \
-    "dispatch 결과 $result (Provider $provider, 승인 모드 $approval_mode). 원문은 raw 참조." 0
+    "dispatch 결과 $result (Provider $provider, 모델 $model_record, 출처 $model_source, 승인 모드 $approval_mode). 원문은 raw 참조." 0
   _runtime_write_result "$root" "$task_id" "$role" "$result"
   printf 'dispatch_result=%s\n' "$result"
   [[ "$result" == settled || "$result" == blocked ]]
@@ -332,12 +343,20 @@ cmd_observe() {
   [[ "$role" == worker || "$role" == reviewer ]] || die "ROLE은 worker 또는 reviewer여야 합니다."
   _runtime_require_id "$task_id"
   local root meta agent_name pane_id attempt evidence addition get_output get_status read_output read_status result
+  local model model_source model_summary
   root="$(project_root "$path")"
   meta="$root/.harness/runtime/$task_id-$role.meta"
   [[ -f "$meta" ]] || die "Runtime 기록을 찾을 수 없습니다: $meta"
   agent_name="$(_runtime_meta_value "$meta" agent_name)"
   pane_id="$(_runtime_meta_value "$meta" pane_id)"
   attempt="$(_runtime_meta_value "$meta" attempt)"
+  model="$(_runtime_meta_value "$meta" model)"
+  model_source="$(_runtime_meta_value "$meta" model_source)"
+  if [[ -n "$model_source" ]]; then
+    model_summary=" 모델 ${model:-Provider 기본값 (Harness 미지정)}, 출처 $model_source."
+  else
+    model_summary=""
+  fi
   [[ -n "$agent_name" && -n "$pane_id" && "$attempt" =~ ^[0-9]+$ ]] || die "Runtime 기록이 손상되었습니다: $meta"
   set +e
   get_output="$(herdr agent get "$agent_name" 2>&1)"
@@ -364,7 +383,7 @@ cmd_observe() {
   local observations
   observations="$(_runtime_evidence_observations "$(_runtime_evidence_yaml_path "$root" "$task_id" "$role" "$attempt")")"
   _runtime_write_evidence_yaml "$root" "$task_id" "$role" "$attempt" "$result" \
-    "observe 결과 $result. 원문은 raw 참조." "$((observations + 1))"
+    "observe 결과 $result.$model_summary 원문은 raw 참조." "$((observations + 1))"
   _runtime_write_result "$root" "$task_id" "$role" "$result"
   printf 'observe_result=%s\n' "$result"
 }

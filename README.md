@@ -249,7 +249,7 @@ herdr-harness <TAB><TAB>
 
 ```text
 init             : 새 프로젝트에 Harness 문서·정책·역할 파일 생성
-sync-templates   : Skill·역할 파일을 지금 버전 템플릿으로 재동기화
+sync-templates   : Skill·역할·정책 템플릿을 지금 버전으로 재동기화
 start            : 프로젝트 디렉터리에서 Herdr Session 열기
 status           : STATE.md 출력 (--live로 문서·Herdr·Git 대조)
 validate         : 상태를 바꾸지 않고 정합성만 검사
@@ -310,7 +310,7 @@ herdr-harness test
 
 ```text
 PASS: Bash 문법
-PASS: Harness 파일 생성 (21종 템플릿, templates/ 파일 정본)
+PASS: Harness 파일 생성 (22종 템플릿, templates/ 파일 정본)
 PASS: 템플릿 배열 ↔ templates/ 파일 정합
 PASS: 공통 Skill과 Claude 연결
 PASS: 플레이스홀더 치환
@@ -327,6 +327,7 @@ PASS: 이벤트 로그 기록
 PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
 PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)
 PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)
+PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)
 PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)
 PASS: Agent 호출 없음
 PASS: 탭 완성 스크립트 문법
@@ -336,7 +337,7 @@ PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호
 PASS: Task Lock (동시 획득 거부/release/stale 회수)
 PASS: quota-retry/auto-step opt-in 게이트
 PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)
-PASS: sync-templates (dry-run 무변경 감지·미적용, apply 갱신·멱등, AGENTS.md/STATE.md 비침범, .gitignore 누락 줄 보충·멱등)
+PASS: sync-templates (dry-run/apply·멱등, agent-policy 모델 키 전파·사용자 값 보존, AGENTS.md/STATE.md 비침범, .gitignore 보충)
 PASS: README 기대 출력 ↔ 실제 test 출력 정합
 PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)
 ```
@@ -445,11 +446,11 @@ herdr-harness remote help          # 원격 모드 하위 명령 목록
 
 ```text
 $ herdr-harness help dispatch
-dispatch — Task와 역할에 맞는 Agent를 Pane에서 한 턴 실행한다
+dispatch — Task의 역할·모델 정책에 맞는 Agent를 Pane에서 한 턴 실행한다
 
 구문:
   herdr-harness dispatch PATH TASK_ID ROLE [--timeout MS] [--print-only]
-                        [--extra-prompt FILE]
+                        [--extra-prompt FILE] [--cwd DIR]
 
 무엇을 하나:
   Task 계약·SPEC 발췌·intent를 Context Packet으로 묶어 Herdr Pane에서 Agent를
@@ -460,6 +461,11 @@ dispatch — Task와 역할에 맞는 Agent를 Pane에서 한 턴 실행한다
   Provider CLI에 승인 우회 인수를 붙인다. 도구 실행 승인만 건너뛴다 — 상태
   전이와 완료 승인은 이 설정과 무관하게 transition/approve로만 가능하다.
   ...
+
+모델 선택:
+  Task의 worker_model/reviewer_model → agent-policy.yaml의 Provider 기본 모델 →
+  Provider CLI 기본값 순서로 고른다. 정책 허용 목록과 정확히 일치한 값만
+  --model로 전달하고, 실제 모델과 출처는 Attempt·Evidence에 남긴다.
 
 역할(ROLE): worker | reviewer
 
@@ -481,7 +487,7 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness validate [PATH] [--wave ID] [--no-git]` | Git 기준선, Task/Wave, Provider, 의존성, 실행 상한과 write scope를 읽기 전용 검증 |
 | `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제. `submitted`로 갈 때는 Acceptance Criteria의 `verified_by` 명령을 직접 실행하고 하나라도 실패하면 거부 |
 | `herdr-harness approve PATH TASK_ID --confirm-user-approval` | 사용자 명시 승인 확인 후 승인 증거를 원자적으로 기록하고 기존 `transition` 게이트로 `completed` 전이 |
-| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS] [--print-only] [--extra-prompt FILE]` | Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--extra-prompt`는 Task별 추가 지시를 Packet에 덧붙이고, `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
+| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS] [--print-only] [--extra-prompt FILE] [--cwd DIR]` | 역할별 Task 모델→Provider 정책 기본 모델→CLI 기본 모델 순으로 선택해 Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
 | `herdr-harness observe PATH TASK_ID [worker\|reviewer]` | 기존 Agent를 재조회하고 Evidence에 추가 |
 | `herdr-harness adopt PATH TASK_ID worker\|reviewer --pane PANE --agent NAME [--provider P]` | 사람이 직접 띄운 Agent를 Harness 추적에 등록(`--print-only` 폴백의 마지막 단계) |
 | `herdr-harness close-agent PATH TASK_ID [worker\|reviewer] [--force]` | Harness runtime에 등록된 Pane만 정리 |
@@ -511,7 +517,7 @@ Agent 생성 방식은 두 가지가 가능합니다: Harness가 Pane 분할·Ag
 
 **기본은 A(`dispatch`)입니다.** 취향 문제가 아니라 구조 때문입니다 — `transition`의 게이트가 Attempt·Evidence의 존재를 요구하도록 설계돼 있어서, Agent 생성을 사람 손에 넘기면 그 게이트가 통째로 헐거워집니다(문서는 `submitted`인데 실제로는 아무 근거도 남지 않는 상태). A에서만 다음이 성립합니다.
 
-- `pane_id`·`agent_name`·baseline commit·승인 모드가 자동으로 Attempt/Evidence에 기록됨
+- `pane_id`·`agent_name`·baseline commit·승인 모드·실제 모델과 출처가 자동으로 Attempt/Evidence에 기록됨
 - Context Packet(SPEC 발췌 + Task 계약 + intent)이 복붙 없이 그대로 전달됨
 - `observe`·`close-agent`·`quota-check`·`auto-step`이 그 Agent를 찾을 수 있음
 - `close-agent`가 "Harness가 만든 Pane"만 정리한다는 불변식이 유지됨
@@ -600,6 +606,43 @@ Agent를 띄울 때마다 "이 명령을 실행할까요? (y/n)"을 반복해서
 - claude의 `bypassPermissions`는 디렉터리마다 처음 한 번 확인 화면을 띄울 수 있고, 그러면 `herdr agent start`가 그 화면에서 멈춥니다. 기본값 `auto`(`acceptEdits`)는 그 화면이 없습니다.
 - 실제로 쓰인 모드와 인수는 Attempt·Evidence 문서에 기록됩니다.
 - 이 파일이 없는 예전 프로젝트에서는 인수를 붙이지 않습니다(= `ask`와 같음).
+
+### Task별 모델 선택 — 승인 인수와 분리된 정책 경로
+
+모델은 Task를 기안하는 사람이 난이도와 역할에 맞춰 선택합니다. Harness가 난이도를
+추측하지 않습니다. Task YAML의 선택 필드는 역할별로 나뉩니다.
+
+```yaml
+primary_worker: 'codex'
+reviewer: 'agy'
+worker_model: 'gpt-5.6-sol'
+reviewer_model: 'gemini-3.1-pro-high'
+```
+
+선택 우선순위는 `worker_model`/`reviewer_model` → 선택된 Provider의 정책 기본값 →
+Provider CLI 기본값입니다. 정책은 `.harness/policies/agent-policy.yaml`에서 관리합니다.
+
+```yaml
+agent_policy:
+  codex_models: 'gpt-5.6-sol gpt-5.6-terra'
+  codex_default_model: 'gpt-5.6-terra'
+  agy_models: 'gemini-3.8-flash-high gemini-3.1-pro-high'
+  agy_default_model: 'gemini-3.8-flash-high'
+```
+
+- `*_models`는 공백 구분 허용 목록입니다. Task 값과 `*_default_model`은 목록의
+  토큰과 정확히 일치해야 하며, CLI에는 Task 문자열이 아니라 목록에서 찾은 값만
+  `--model <MODEL>`로 전달됩니다.
+- Task 값이 목록 밖이거나 목록이 비어 있으면 경고 후 모델 인수를 붙이지 않고
+  Provider 기본값을 씁니다. 오타 때문에 Wave 전체를 중단하지 않습니다.
+- 모델 미지정 Task와 빈 초기 정책은 기존과 똑같이 모델 인수를 붙이지 않습니다.
+- 목록은 Provider에서 확인합니다: `agy models`, `claude --help`, codex는
+  `~/.codex/config.toml`과 `codex --help`. Provider 모델이 바뀌면 Harness 코드를
+  수정하지 않고 이 표를 갱신합니다.
+- 승인용 `*_auto`/`*_bypass` 표는 모델 통로가 아닙니다. 그 표의 `--model opus`는
+  계속 거부되며, 모델 선택은 별도의 허용 목록 검사를 거칩니다.
+- `dispatch`는 Attempt와 Evidence에 모델 및 출처를 `Task 지정`, `정책 기본값`,
+  `Provider 기본값(미지정 또는 지정 거부)`으로 구분해 기록합니다.
 
 ### Acceptance Criteria 게이트 — `transition ... submitted`가 직접 검증한다
 

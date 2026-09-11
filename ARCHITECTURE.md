@@ -136,7 +136,7 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 
 ### 7.1 Agent 생성 경로와 승인 정책
 
-기본은 `dispatch`입니다. 취향이 아니라 구조 때문입니다 — `transition` 게이트가 Attempt·Evidence의 존재를 요구하므로, Agent 생성을 사람 손에 넘기면 그 게이트가 헐거워집니다. `dispatch`에서만 `pane_id`·`agent_name`·baseline commit·승인 모드가 자동 기록되고, `observe`·`close-agent`·`quota-check`·`auto-step`이 그 Agent를 찾을 수 있습니다.
+기본은 `dispatch`입니다. 취향이 아니라 구조 때문입니다 — `transition` 게이트가 Attempt·Evidence의 존재를 요구하므로, Agent 생성을 사람 손에 넘기면 그 게이트가 헐거워집니다. `dispatch`에서만 `pane_id`·`agent_name`·baseline commit·승인 모드·모델과 출처가 자동 기록되고, `observe`·`close-agent`·`quota-check`·`auto-step`이 그 Agent를 찾을 수 있습니다.
 
 `--print-only`는 상태를 전혀 남기지 않고(Context Packet만 씀) 실행할 `herdr` 명령만 출력하는 폴백이며, `adopt`는 `herdr agent get`으로 생존을 확인한 뒤에만 등록합니다. `adopt`로 등록한 Pane은 사람이 만든 것이므로 `close-agent`가 `--force` 없이는 닫지 않습니다.
 
@@ -151,6 +151,29 @@ Agent가 기동되는 디렉터리는 기본값이 Harness 워크스페이스이
 | `bypass` | 도구 실행 승인을 전부 건너뜀 |
 
 사라지는 것은 **도구 단위 승인**뿐이며 상태 전이와 완료 승인은 그대로 사람 몫입니다. 정책 파일은 임의의 Provider 옵션을 넣는 통로가 아니라, Provider별·모드별로 허용 플래그와 값이 고정된 표입니다. 실제로 쓰인 모드와 인수는 Attempt·Evidence에 기록되고, 이 파일이 없는 예전 프로젝트에서는 인수를 붙이지 않습니다(= `ask`).
+
+모델 선택은 승인 인수와 분리된 타입 있는 경로다. Task YAML의 역할별
+`worker_model`/`reviewer_model` → `agent-policy.yaml`의
+`<provider>_default_model` → Provider CLI 기본값 순으로 선택한다. 앞의 두 값은
+Provider별 공백 구분 `<provider>_models` 목록의 토큰과 정확히 일치해야 한다.
+Task 문자열은 비교에만 쓰고, 실제 argv에는 목록에서 꺼낸 토큰만
+`--model <MODEL>`로 넣는다. 목록 밖 값·빈 목록·선행 `-` 같은 플래그 주입은
+경고 후 Provider 기본값으로 정규화하며 dispatch/Wave를 중단하지 않는다.
+미지정 Task는 모델 argv를 전혀 추가하지 않아 기존 기동 인수가 유지된다.
+
+Worker와 Reviewer 필드를 나눈 것은 역할마다 다른 모델을 고를 수 있게 해 같은
+결함을 같은 방식으로 놓치는 상관관계를 줄이기 위해서다. 난이도와 비용 판단은
+Task 기안자의 몫이며 Bash는 추측하지 않는다. 실제 선택과 출처(Task 지정/정책
+기본값/Provider 기본값)는 Attempt·Evidence와 runtime meta에 남아 `observe` 뒤에도
+정본 요약에서 유지된다. 허용 목록은 `agy models`, `claude --help`, codex의
+`~/.codex/config.toml`·`codex --help`로 확인하며 Provider 변화는 코드가 아니라
+정책 표에 반영한다. 승인 표의 `_runtime_agent_arg_allowlist`는 그대로 닫혀 있어
+승인 인수 칸의 `--model opus`는 계속 거부된다.
+
+`agent-policy.yaml` 정본은 `templates/`에 있고 `sync-templates`는 기존 정책 값을
+템플릿에 재주입한 뒤 새 모델 키를 전파하므로, 사용자가 조정한 승인·모델 값은
+초기값으로 되돌리지 않는다. 신규 프로젝트의 모든 모델 목록과 기본값은 비어
+있어 Provider CLI 기본값으로 시작한다.
 
 ## 8. 실패와 쿼터
 

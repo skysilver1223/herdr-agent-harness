@@ -125,6 +125,7 @@ _runtime_write_result() {
 _runtime_write_meta() {
   local root="$1" task_id="$2" role="$3" agent_name="$4" pane_id="$5" provider="$6" attempt="$7"
   local adopted="${8:-0}"
+  local model="${9:-}" model_source="${10:-}"
   local destination temporary
   destination="$root/.harness/runtime/$task_id-$role.meta"
   temporary="$(mktemp "$root/.harness/runtime/.meta.XXXXXX")"
@@ -136,6 +137,8 @@ _runtime_write_meta() {
     printf 'provider=%s\n' "$provider"
     printf 'attempt=%s\n' "$attempt"
     printf 'adopted=%s\n' "$adopted"
+    printf 'model=%s\n' "$model"
+    printf 'model_source=%s\n' "$model_source"
   } >"$temporary"
   chmod 0644 "$temporary"
   mv -f -- "$temporary" "$destination"
@@ -736,6 +739,105 @@ _runtime_agent_args() {
   printf '%s' "$value"
 }
 
+# ---------------------------------------------------------------------------
+# Agent 모델 선택 — 승인 인수와 별개의 타입 있는 경로
+#
+# Task YAML의 문자열을 argv에 직접 싣지 않는다. Provider별 *_models 정책을
+# 안전한 토큰으로 먼저 해석한 뒤, Task/정책 기본값과 정확히 일치한 "목록 쪽
+# 토큰"만 RUNTIME_MODEL에 담는다. 잘못된 지정은 Wave를 멈추지 않고 경고 후
+# Provider CLI 기본값으로 내린다.
+# ---------------------------------------------------------------------------
+_runtime_model_id_valid() {
+  local value="$1"
+  [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._/=-]*$ ]] || return 1
+  # 정책 파일에 Secret을 모델명으로 잘못 붙여 넣어도 argv·경고·Attempt에
+  # 출력하지 않는다. 길이 경계는 Context/Evidence Secret 스캐너와 맞춘다.
+  [[ ! "$value" =~ ^(AKIA[0-9A-Z]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.) ]]
+}
+
+_runtime_select_model() {
+  local root="$1" task_file="$2" role="$3" provider="$4"
+  local policy requested candidate candidate_source models token matched=""
+  local task_key="${role}_model" default_key="${provider}_default_model"
+  local -a allowed_models=()
+
+  RUNTIME_MODEL=""
+  RUNTIME_MODEL_SOURCE="Provider 기본값 (미지정)"
+  requested="$(_runtime_yaml_scalar "$task_file" "$task_key")"
+  policy="$root/.harness/policies/agent-policy.yaml"
+
+  if [[ -n "$requested" ]]; then
+    candidate="$requested"
+    candidate_source="Task 지정 ($task_key)"
+  elif [[ -f "$policy" ]]; then
+    candidate="$(_runtime_yaml_scalar "$policy" "$default_key")"
+    [[ -n "$candidate" ]] || return 0
+    candidate_source="정책 기본값 ($default_key)"
+  else
+    return 0
+  fi
+
+  if [[ ! -f "$policy" ]]; then
+    printf '경고: %s을(를) 지정했지만 agent-policy.yaml이 없어 Provider 기본값을 사용합니다.\n' \
+      "$task_key" >&2
+    RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 정책 파일 없음)"
+    return 0
+  fi
+
+  models="$(_runtime_yaml_scalar "$policy" "${provider}_models")"
+  if [[ -z "$models" ]]; then
+    printf '경고: %s을(를) 지정했지만 %s_models 허용 목록이 비어 있어 Provider 기본값을 사용합니다.\n' \
+      "$([[ -n "$requested" ]] && printf '%s' "$task_key" || printf '%s' "$default_key")" \
+      "$provider" >&2
+    RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 허용 목록 없음)"
+    return 0
+  fi
+
+  # 승인 인수 값과 같은 1차 문자 검사를 적용한다. 이어지는 토큰 검사에서는
+  # 공백과 선행 '-'를 허용하지 않아 `--model --add-dir` 형태의 플래그 주입도
+  # 목록 자체에서 차단한다.
+  if [[ ! "$models" =~ ^[-A-Za-z0-9=_./\ ]+$ ]]; then
+    printf '경고: agent-policy.yaml의 %s_models 값에 허용되지 않는 문자가 있어 Provider 기본값을 사용합니다.\n' \
+      "$provider" >&2
+    RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 허용 목록 오류)"
+    return 0
+  fi
+  read -r -a allowed_models <<<"$models"
+  for token in "${allowed_models[@]}"; do
+    if ! _runtime_model_id_valid "$token"; then
+      printf '경고: agent-policy.yaml의 %s_models에 모델 ID가 아닌 토큰이 있어 Provider 기본값을 사용합니다.\n' \
+        "$provider" >&2
+      RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 허용 목록 오류)"
+      return 0
+    fi
+  done
+
+  if ! _runtime_model_id_valid "$candidate"; then
+    printf '경고: %s의 모델 값이 안전한 모델 ID 형식이 아니어서 Provider 기본값을 사용합니다.\n' \
+      "$candidate_source" >&2
+    RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 잘못된 형식)"
+    return 0
+  fi
+
+  # 반드시 허용 목록에서 꺼낸 token을 채택한다. candidate는 비교에만 쓰며 CLI에
+  # 전달하지 않는다.
+  for token in "${allowed_models[@]}"; do
+    if [[ "$candidate" == "$token" ]]; then
+      matched="$token"
+      break
+    fi
+  done
+  if [[ -z "$matched" ]]; then
+    printf '경고: %s의 모델이 %s_models 허용 목록에 없어 Provider 기본값을 사용합니다.\n' \
+      "$candidate_source" "$provider" >&2
+    RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 허용 목록 불일치)"
+    return 0
+  fi
+
+  RUNTIME_MODEL="$matched"
+  RUNTIME_MODEL_SOURCE="$candidate_source"
+}
+
 _runtime_approval_mode() {
   local root="$1" policy mode
   policy="$root/.harness/policies/agent-policy.yaml"
@@ -749,7 +851,8 @@ _runtime_start_agent_when_ready() {
   # 측정 결과 4~7초. 그동안 agent start는 agent_pane_busy로 실패한다.
   # 이 대기는 Pane 준비 조건만 재확인하며, 실패한 Agent 턴을 재시도하지 않는다.
   #
-  # 6번째 인자부터는 Provider CLI에 그대로 넘길 인수다(_runtime_agent_args).
+  # 6번째 인자부터는 검증을 마친 승인 인수와 모델 인수다. dispatch가
+  # _runtime_agent_args와 _runtime_select_model의 결과로만 이 배열을 만든다.
   local agent_name="$1" provider="$2" pane_id="$3" timeout="$4"
   local deadline_s="${5:-30}"
   shift 5

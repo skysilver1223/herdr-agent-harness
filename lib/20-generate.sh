@@ -13,6 +13,52 @@ write_project_docs() {
 write_project_templates() {
   local root="$1"
   DOC_NAME="$2" DOC_ORCHESTRATOR="$3" DOC_WORKER="$4" DOC_REVIEWER="$5" DOC_FALLBACK="$6"
+  DOC_APPROVAL_MODE="${7:-auto}"
+  DOC_CLAUDE_AUTO='--permission-mode acceptEdits'
+  DOC_CLAUDE_BYPASS='--permission-mode bypassPermissions'
+  DOC_CODEX_AUTO='--ask-for-approval never --sandbox workspace-write'
+  DOC_CODEX_BYPASS='--dangerously-bypass-approvals-and-sandbox'
+  DOC_AGY_AUTO='--mode accept-edits'
+  DOC_AGY_BYPASS='--dangerously-skip-permissions'
+  DOC_CLAUDE_MODELS='' DOC_CLAUDE_DEFAULT_MODEL=''
+  DOC_CODEX_MODELS='' DOC_CODEX_DEFAULT_MODEL=''
+  DOC_AGY_MODELS='' DOC_AGY_DEFAULT_MODEL=''
+
+  # agent-policy.yaml은 사용자가 직접 조정하는 정책 파일이다. sync-templates가
+  # 새 모델 키를 전파하되 기존 승인 인수와 모델 목록을 초기값으로 되돌리지
+  # 않도록, 이미 존재하는 키의 값은 템플릿에 다시 주입한다.
+  local agent_policy="$root/.harness/policies/agent-policy.yaml" key variable value
+  if [[ "${HH_SYNC_MODE:-0}" -eq 1 && -f "$agent_policy" ]]; then
+    while IFS=':' read -r key variable; do
+      value="$(awk -v key="$key" '
+        $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
+          sub("^[[:space:]]*" key ":[[:space:]]*", "")
+          gsub(/^[\047\042]|[\047\042]$/, "")
+          print
+          exit
+        }
+      ' "$agent_policy")"
+      # 빈 값도 유효하다. 키가 실제로 있을 때만 기존 값을 보존하고, 구버전처럼
+      # 키가 없으면 위의 안전한 초기값을 사용한다.
+      if grep -Eq "^[[:space:]]*$key:" "$agent_policy"; then
+        printf -v "$variable" '%s' "$value"
+      fi
+    done <<'POLICY_FIELDS'
+approval_mode:DOC_APPROVAL_MODE
+claude_auto:DOC_CLAUDE_AUTO
+claude_bypass:DOC_CLAUDE_BYPASS
+codex_auto:DOC_CODEX_AUTO
+codex_bypass:DOC_CODEX_BYPASS
+agy_auto:DOC_AGY_AUTO
+agy_bypass:DOC_AGY_BYPASS
+claude_models:DOC_CLAUDE_MODELS
+claude_default_model:DOC_CLAUDE_DEFAULT_MODEL
+codex_models:DOC_CODEX_MODELS
+codex_default_model:DOC_CODEX_DEFAULT_MODEL
+agy_models:DOC_AGY_MODELS
+agy_default_model:DOC_AGY_DEFAULT_MODEL
+POLICY_FIELDS
+  fi
   local rel
   for rel in "${HARNESS_POLICY_TEMPLATES[@]}"; do
     emit_doc "$root" "$rel"
@@ -324,42 +370,6 @@ quota_policy:
   passive_scan_on_dispatch: true
 EOF
 
-  # Agent 승인 정책 정본. dispatch가 Agent를 띄울 때 Provider CLI에 붙일
-  # 인수를 여기서 정한다. 도구 실행(파일 편집·셸 명령) 승인만 대상이며,
-  # 작업 방향성에 대한 판단은 그대로 사람에게 남는다 — Task 상태 전이와
-  # 완료 승인은 Agent가 아니라 herdr-harness transition/approve로만 가능하다.
-  write_file "$target" ".harness/policies/agent-policy.yaml" <<EOF
-schema_version: '1.0'
-agent_policy:
-  # ask    : Provider 기본값. 도구 실행마다 사용자에게 물어본다.
-  # auto   : 작업 트리 안의 편집·명령은 묻지 않고 실행한다. 기본값.
-  #          트리 밖 쓰기·네트워크처럼 그 범위를 벗어나는 작업의 처리는
-  #          Provider마다 다르다 — claude(acceptEdits)는 사용자에게 묻고,
-  #          codex(--ask-for-approval never + --sandbox workspace-write)는
-  #          묻지 않고 즉시 실패를 모델에 돌려준다. 묻게 하려면 codex_auto를
-  #          '--ask-for-approval on-request --sandbox workspace-write'로 바꾼다.
-  # bypass : 도구 실행 승인을 전부 건너뛴다. Git 기준선이 있고 write_scope로
-  #          범위가 묶인 프로젝트에서만 쓴다.
-  approval_mode: '$approval_mode'
-
-  # approval_mode를 Provider CLI 인수로 옮기는 표. dispatch는 이 값을 공백으로
-  # 나눠 \`herdr agent start ... -- <인수>\`로 그대로 넘긴다. 빈 값이면 인수를
-  # 붙이지 않는다(= 그 Provider는 ask와 같게 동작한다).
-  #
-  # Provider CLI가 바뀌면 코드가 아니라 이 표를 고친다. 허용 문자는
-  # 영문·숫자와 = _ . / - 뿐이다 — 그 밖의 문자가 있으면 dispatch가 거부한다.
-  #
-  # 주의: claude의 bypassPermissions는 디렉터리마다 처음 한 번 확인 화면을
-  # 띄울 수 있다. 그러면 agent start가 그 화면에서 멈춘다 — 그런 경우 auto
-  # (acceptEdits)를 쓰거나, 이미 확인을 마친 디렉터리에서만 bypass를 쓴다.
-  claude_auto: '--permission-mode acceptEdits'
-  claude_bypass: '--permission-mode bypassPermissions'
-  codex_auto: '--ask-for-approval never --sandbox workspace-write'
-  codex_bypass: '--dangerously-bypass-approvals-and-sandbox'
-  agy_auto: '--mode accept-edits'
-  agy_bypass: '--dangerously-skip-permissions'
-EOF
-
   write_file "$target" ".harness/policies/loop-policy.yaml" <<'EOF'
 loop_policy:
   # true로 켜면 `herdr-harness auto-step PATH TASK_ID`가 동작한다. 기본은
@@ -430,7 +440,7 @@ EOF
   done
 
   write_project_docs "$target" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback"
-  write_project_templates "$target" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback"
+  write_project_templates "$target" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback" "$approval_mode"
 
   mkdir -p "$target/.claude/skills"
   local skill_dir skill_name
@@ -466,7 +476,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# sync-templates — 기존 프로젝트를 지금 harness.sh 버전의 skill/role 템플릿과
+# sync-templates — 기존 프로젝트를 지금 harness.sh 버전의 skill/role/정책 템플릿과
 # 맞춘다. init은 신규 프로젝트 전용(대상이 비어 있지 않으면 die)이라, 그보다
 # 먼저 만들어진 프로젝트는 나중에 추가된 Agent Loop 절차(dispatch/observe/
 # transition/close-agent)를 skill 파일이 한 줄도 언급하지 않는 채로 영영
@@ -534,7 +544,7 @@ cmd_sync_templates() {
   HH_SYNC_MODE=1
   if [[ "$apply" -eq 1 ]]; then
     HH_SYNC_DRYRUN=0
-    info "적용 모드 — .agents/skills/, .agents/roles/, .claude/skills/ 심볼릭 링크를 현재 템플릿으로 갱신합니다."
+    info "적용 모드 — Skill·역할·정책 템플릿과 .claude/skills/ 링크를 현재 버전으로 갱신합니다."
   else
     HH_SYNC_DRYRUN=1
     info "미리보기 모드(기본값) — 실제로 갱신하려면 --apply. 아래는 바뀌었을 내용이다."
@@ -643,4 +653,3 @@ cmd_sync_templates() {
   append_event "$root" sync_templates "-" "" "" \
     "mode=$([[ "$apply" -eq 1 ]] && echo apply || echo dry-run) changed=$change_count unchanged=${#SYNC_UNCHANGED[@]}"
 }
-

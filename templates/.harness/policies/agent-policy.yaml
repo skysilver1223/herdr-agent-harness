@@ -1,0 +1,40 @@
+schema_version: '1.0'
+agent_policy:
+  # ask    : Provider 기본값. 도구 실행마다 사용자에게 물어본다.
+  # auto   : 작업 트리 안의 편집·명령은 묻지 않고 실행한다. 기본값.
+  #          트리 밖 쓰기·네트워크처럼 그 범위를 벗어나는 작업의 처리는
+  #          Provider마다 다르다 — claude(acceptEdits)는 사용자에게 묻고,
+  #          codex(--ask-for-approval never + --sandbox workspace-write)는
+  #          묻지 않고 즉시 실패를 모델에 돌려준다. 묻게 하려면 codex_auto를
+  #          '--ask-for-approval on-request --sandbox workspace-write'로 바꾼다.
+  # bypass : 도구 실행 승인을 전부 건너뛴다. Git 기준선이 있고 write_scope로
+  #          범위가 묶인 프로젝트에서만 쓴다.
+  approval_mode: '@@APPROVAL_MODE@@'
+
+  # approval_mode를 Provider CLI 인수로 옮기는 표. dispatch는 이 값을 공백으로
+  # 나눠 `herdr agent start ... -- <인수>`로 그대로 넘긴다. 빈 값이면 인수를
+  # 붙이지 않는다(= 그 Provider는 ask와 같게 동작한다).
+  #
+  # Provider CLI가 바뀌면 코드가 아니라 이 표를 고친다. 허용 문자는
+  # 영문·숫자와 = _ . / - 뿐이다 — 그 밖의 문자가 있으면 dispatch가 거부한다.
+  #
+  # 주의: claude의 bypassPermissions는 디렉터리마다 처음 한 번 확인 화면을
+  # 띄울 수 있다. 그러면 agent start가 그 화면에서 멈춘다 — 그런 경우 auto
+  # (acceptEdits)를 쓰거나, 이미 확인을 마친 디렉터리에서만 bypass를 쓴다.
+  claude_auto: '@@CLAUDE_AUTO@@'
+  claude_bypass: '@@CLAUDE_BYPASS@@'
+  codex_auto: '@@CODEX_AUTO@@'
+  codex_bypass: '@@CODEX_BYPASS@@'
+  agy_auto: '@@AGY_AUTO@@'
+  agy_bypass: '@@AGY_BYPASS@@'
+
+  # Task별 모델 선택은 위 승인 인수와 분리된 타입 있는 경로다. *_models는
+  # 공백 구분 허용 목록, *_default_model은 해당 Provider의 프로젝트 기본값이다.
+  # 목록과 기본값을 비우면 Provider CLI 기본값을 써서 기존 동작을 유지한다.
+  # Task의 worker_model/reviewer_model도 해당 Provider 목록의 값만 선택할 수 있다.
+  claude_models: ''
+  claude_default_model: ''
+  codex_models: ''
+  codex_default_model: ''
+  agy_models: ''
+  agy_default_model: ''

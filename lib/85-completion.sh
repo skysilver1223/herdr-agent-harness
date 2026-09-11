@@ -213,13 +213,13 @@ _herdr_harness_note() {
 _herdr_harness_subcommand_help() {
   printf '%s\n' \
     "init::새 프로젝트에 Harness 문서·정책·역할 파일 생성" \
-    "sync-templates::Skill·역할 파일을 지금 버전 템플릿으로 재동기화" \
+    "sync-templates::Skill·역할·정책 템플릿을 지금 버전으로 재동기화" \
     "start::프로젝트 디렉터리에서 Herdr Session 열기" \
     "status::STATE.md 출력 (--live로 문서·Herdr·Git 대조)" \
     "validate::상태를 바꾸지 않고 정합성만 검사" \
     "transition::Task 상태를 전이표에 따라 전이" \
     "approve::사용자 승인 기록 후 completed로 전이" \
-    "dispatch::Task+역할로 Agent를 한 턴 실행" \
+    "dispatch::Task 역할+모델 정책으로 Agent를 한 턴 실행" \
     "observe::실행 중인 Agent 출력을 다시 읽어 갱신" \
     "adopt::사람이 직접 띄운 Agent를 Harness에 등록" \
     "close-agent::Harness가 만든 Agent Pane 정리" \
@@ -375,7 +375,7 @@ _herdr_harness_completions() {
       else
         _herdr_harness_describe "$cur" \
           "--dry-run::무엇이 바뀔지 diff로만 보여 준다 (기본값)" \
-          "--apply::실제로 Skill·역할·템플릿 파일을 덮어쓴다"
+          "--apply::Skill·역할·정책 템플릿을 실제로 갱신한다"
       fi
       ;;
     transition)
@@ -448,6 +448,9 @@ _herdr_harness_completions() {
           "--print-only::Pane을 만들지 않고 실행할 herdr 명령만 출력 (폴백)" \
           "--extra-prompt::이 Task에만 필요한 추가 지시 파일을 Context Packet에 덧붙인다" \
           "--cwd::Agent를 띄울 디렉터리 — Sandbox 쓰기 범위의 기준 (기본: 워크스페이스)"
+        _herdr_harness_note "$cur" \
+          "모델::Task worker_model/reviewer_model → Provider 정책 기본값 → CLI 기본값" \
+          "허용목록::agent-policy.yaml의 <provider>_models와 정확히 일치해야 전달"
       elif [[ "$cmd" == adopt && ( "$prev" == --pane || "$prev" == --agent ) ]]; then
         :
       elif [[ "$cmd" == adopt && "$prev" == --provider ]]; then
