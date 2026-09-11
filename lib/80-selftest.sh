@@ -974,6 +974,150 @@ PREMIUM_HERDR_STUB
   printf '%s' "$models_out" | grep -q '`agy models`' ||
     die "help models에 agy 조회 경로 설명이 없습니다."
 
+  # --- 모델 격리: 실 Provider를 띄우지 않고 실측 문자열 표본만 사용 --------
+  local quarantine_project="$test_root/model-quarantine-project"
+  local quarantine_policy quarantine_before codex_quarantine claude_quarantine
+  local codex_model_error claude_model_error agy_normal_output quarantine_warning
+  cp -a "$model_project" "$quarantine_project"
+  quarantine_policy="$quarantine_project/.harness/policies/agent-policy.yaml"
+  quarantine_before="$test_root/quarantine-policy-before.yaml"
+  sed -i \
+    -e "s|^  codex_models:.*|  codex_models: 'gpt-9-nonexistent gpt-5.6-sol'|" \
+    -e "s|^  codex_default_model:.*|  codex_default_model: 'gpt-9-nonexistent'|" \
+    -e "s|^  codex_premium_models:.*|  codex_premium_models: ''|" \
+    "$quarantine_policy"
+  sed -e 's/^task_id:.*/task_id: task-quarantine/' \
+      -e "s/^worker_model:.*/worker_model: 'gpt-9-nonexistent'/" \
+    "$model_task" >"$quarantine_project/.harness/tasks/task-quarantine.yaml"
+  cp "$quarantine_policy" "$quarantine_before"
+
+  codex_model_error=$'⚠ Model metadata for `gpt-9-nonexistent` not found. Defaulting to fallback metadata;\n■ {"type":"error","status":400,"error":{"type":"invalid_request_error",\n"message":"The '\''gpt-9-nonexistent'\'' model is not supported when using Codex with a ChatGPT account."}}'
+  claude_model_error="● There's an issue with the selected model (nonexistent-model-x). It may not exist"$'\n'"  or you may not have access to it. Run /model to pick a different model."
+  agy_normal_output='Gemini 3.8 Flash · high — working normally'
+
+  _runtime_quarantine_model_failure "$quarantine_project" codex gpt-9-nonexistent 1 \
+    "$codex_model_error" task-quarantine 7 ||
+    die "codex 400 실측 표본을 모델 문제로 식별하지 못했습니다."
+  codex_quarantine="$(_runtime_model_quarantine_path "$quarantine_project" codex)"
+  [[ -f "$codex_quarantine" ]] || die "codex 모델 격리 파일이 생성되지 않았습니다."
+  awk -F '\t' '$1 == "gpt-9-nonexistent" && $2 ~ /^202[0-9]-[0-9][0-9]-[0-9][0-9]T/ &&
+      $3 ~ /codex 400 invalid_request_error/ && $4 == "task-quarantine" && $5 == "7" { found=1 }
+      END { exit !found }' "$codex_quarantine" ||
+    die "codex 격리 기록에 전체 모델명·시각·근거·Task·Attempt가 없습니다."
+
+  _runtime_quarantine_model_failure "$quarantine_project" claude nonexistent-model-x 1 \
+    "$claude_model_error" task-quarantine 8 ||
+    die "claude 안내 실측 표본을 모델 문제로 식별하지 못했습니다."
+  claude_quarantine="$(_runtime_model_quarantine_path "$quarantine_project" claude)"
+  grep -q $'^nonexistent-model-x\t.*\tclaude: 지정 모델이 없거나 접근 권한이 없다는 안내\ttask-quarantine\t8$' \
+    "$claude_quarantine" || die "claude 모델 격리 기록이 불완전합니다."
+
+  if _runtime_quarantine_model_failure "$quarantine_project" agy nonexistent-model-x 1 \
+       "$agy_normal_output" task-quarantine 9; then
+    die "오류 없이 기본 모델로 폴백한 agy 출력을 모델 실패로 오판했습니다."
+  fi
+  [[ ! -e "$(_runtime_model_quarantine_path "$quarantine_project" agy)" ]] ||
+    die "패턴이 정의되지 않은 agy 모델이 격리됐습니다."
+
+  local unrelated_failure
+  for unrelated_failure in \
+    '{"status":400,"error":{"type":"invalid_request_error","message":"Authentication expired"}}' \
+    'Herdr integration error: agent unavailable' \
+    'agent_pane_busy: Pane is not available'; do
+    if _runtime_quarantine_model_failure "$quarantine_project" codex unrelated-model 1 \
+         "$unrelated_failure" task-quarantine 10; then
+      die "모델과 무관한 실패를 codex 모델 문제로 오판했습니다: $unrelated_failure"
+    fi
+    if _runtime_quarantine_model_failure "$quarantine_project" claude unrelated-model 1 \
+         "$unrelated_failure" task-quarantine 10; then
+      die "모델과 무관한 실패를 claude 모델 문제로 오판했습니다: $unrelated_failure"
+    fi
+  done
+  ! grep -q '^unrelated-model' "$codex_quarantine" ||
+    die "모델과 무관한 실패가 격리 파일에 기록됐습니다."
+
+  if _runtime_quarantine_model_failure "$quarantine_project" codex unpassed-model 0 \
+       "$codex_model_error" task-quarantine 11; then
+    die "Harness가 명시 전달하지 않은 모델을 격리했습니다."
+  fi
+  ! grep -q '^unpassed-model' "$codex_quarantine" ||
+    die "명시 전달하지 않은 모델이 격리 파일에 기록됐습니다."
+
+  quarantine_warning="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$quarantine_project" task-quarantine worker --print-only 2>&1)"
+  printf '%s' "$quarantine_warning" | grep -qF '격리된 모델 gpt-9-nonexistent' ||
+    die "다음 dispatch가 격리 모델과 해제 파일 경로를 매번 경고하지 않았습니다."
+  printf '%s' "$quarantine_warning" | grep -qF "$codex_quarantine" ||
+    die "격리 경고에 사람이 해제할 파일 경로가 없습니다."
+  printf '%s' "$quarantine_warning" | grep -q 'herdr agent start .* --model gpt-9-nonexistent' &&
+    die "격리된 모델이 다음 dispatch argv에 다시 들어갔습니다."
+  [[ "$quarantine_warning" == *'모델 강등: '*'실행 결과를 성공으로 간주하지 말 것'* ]] ||
+    die "격리 폴백이 print-only 결과에서 강등으로 표시되지 않았습니다."
+  [[ "$(_runtime_model_degraded_result settled '격리 폴백')" == model_degraded ]] ||
+    die "격리 폴백의 settled 결과가 성공과 구분되지 않았습니다."
+
+  # observe가 Agent 화면의 settled만 보고 기존 격리/강등 결과를 성공으로
+  # 덮어쓰지 않아야 한다. herdr는 함수 스텁이며 실제 Pane을 읽지 않는다.
+  local observe_probe
+  _runtime_write_meta "$quarantine_project" task-quarantine worker hh-task-quarantine-w-13 pane-13 codex 13 0 \
+    gpt-9-nonexistent 'Task 지정 (worker_model)' '해당 없음' '지정 모델 격리'
+  _runtime_write_result "$quarantine_project" task-quarantine worker model_quarantined
+  observe_probe="$(
+    herdr() {
+      case "${1:-}:${2:-}" in
+        agent:get) printf '{"agent_status":"done"}\n' ;;
+        agent:read) printf 'model failure screen remains\n' ;;
+        *) return 125 ;;
+      esac
+    }
+    cmd_observe "$quarantine_project" task-quarantine worker
+  )"
+  [[ "$observe_probe" == *'observe_result=model_quarantined'* ]] ||
+    die "observe가 model_quarantined를 settled 성공으로 덮었습니다."
+  _runtime_write_result "$quarantine_project" task-quarantine worker model_degraded
+  observe_probe="$(
+    herdr() {
+      case "${1:-}:${2:-}" in
+        agent:get) printf '{"agent_status":"done"}\n' ;;
+        agent:read) printf 'fallback turn settled\n' ;;
+        *) return 125 ;;
+      esac
+    }
+    cmd_observe "$quarantine_project" task-quarantine worker
+  )"
+  [[ "$observe_probe" == *'observe_result=model_degraded'* ]] ||
+    die "observe가 model_degraded를 settled 성공으로 덮었습니다."
+
+  # 프리미엄 정책이 켜진 프로젝트에서는 Provider 기본값으로 내려 task-009의
+  # 누출 차단을 다시 열지 않는다. 격리되지 않은 비프리미엄 token을 명시한다.
+  local quarantine_premium_project="$test_root/quarantine-premium-project"
+  cp -a "$premium_project" "$quarantine_premium_project"
+  _runtime_quarantine_model "$quarantine_premium_project" codex gpt-6-astra \
+    'codex 400 invalid_request_error: ChatGPT 계정에서 지정 모델 미지원' task-premium 12
+  premium_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$quarantine_premium_project" task-premium worker --print-only 2>&1)"
+  premium_start_line="$(printf '%s\n' "$premium_output" | grep '^  herdr agent start ')"
+  [[ "$premium_start_line" == *'--model gpt-5.6-sol'* && "$premium_start_line" != *'gpt-6-astra'* ]] ||
+    die "모델 격리 강등이 프리미엄 누출 차단을 깨고 Provider 기본값/격리 모델을 사용했습니다: $premium_start_line"
+  [[ "$premium_output" == *'모델 강등: 격리된 모델 gpt-6-astra'* ]] ||
+    die "프리미엄 누출 차단 아래의 격리 강등이 결과에 기록되지 않았습니다."
+
+  cmp -s "$quarantine_policy" "$quarantine_before" ||
+    die "모델 격리가 사용자의 agent-policy.yaml을 변경했습니다."
+  rm -f -- "$codex_quarantine"
+  quarantine_warning="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$quarantine_project" task-quarantine worker --print-only 2>&1)"
+  printf '%s' "$quarantine_warning" | grep -q 'herdr agent start .* --model gpt-9-nonexistent' ||
+    die "격리 파일을 사람이 삭제한 뒤에도 모델이 다시 선택되지 않았습니다."
+
+  # 조회 경로가 있는 Provider는 정책 전체와 실제 목록 차이를 Pane 생성 전에
+  # 알린다. 함수 스텁이므로 Agent·네트워크 호출은 없다.
+  _models_query_agy() {
+    printf '%s\n' 'gemini-3.8-flash-high Current' 'gemini-new-model New'
+  }
+  quarantine_warning="$(_runtime_warn_model_policy_mismatch "$quarantine_project" agy 2>&1)"
+  printf '%s' "$quarantine_warning" | grep -q '실제 모델 목록과 agent-policy.yaml이 다릅니다' ||
+    die "dispatch 사전 모델 목록 불일치 경고가 없습니다."
+  printf '%s' "$quarantine_warning" | grep -q '정책 파일은 변경하지 않았습니다' ||
+    die "사전 모델 검증이 정책 비수정 사실을 알리지 않았습니다."
+
   # --- dispatch 옵션 정합: 인수 파싱 ↔ help 상세 ↔ 탭 완성 설명 -------------
   # 명령 이름은 기존 "도움말 정합성"이 검사하지만 옵션은 아무도 보지 않았다.
   # 실제로 --extra-prompt가 탭 완성 목록에서 빠진 채(줄바꿈 누락으로) 통과했다.
@@ -1817,6 +1961,7 @@ STUB
     'PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)'
     'PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)'
     'PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존)'
+    'PASS: 모델 격리 (codex·claude 식별/agy·무관 실패·미지정 비격리/정책 보존/재선택 경고·수동 해제/강등 기록·누출 차단/조회 사전 경고)'
     'PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)'
     'PASS: Agent 호출 없음'
     'PASS: 탭 완성 스크립트 문법'

@@ -332,6 +332,7 @@ PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무
 PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)
 PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)
 PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존)
+PASS: 모델 격리 (codex·claude 식별/agy·무관 실패·미지정 비격리/정책 보존/재선택 경고·수동 해제/강등 기록·누출 차단/조회 사전 경고)
 PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)
 PASS: Agent 호출 없음
 PASS: 탭 완성 스크립트 문법
@@ -518,9 +519,13 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `unknown` | `unknown` | Herdr가 상태를 관측하지 못함 |
 | 그 밖의 상태값 | `unknown` + 경고 | 새 값을 장애로 단정하지 않고 원래 값을 경고에 표시 |
 | `agent get` 실패 | `agent_lost` | Agent 조회 자체가 실패 |
+| 명시 모델의 확인된 거부 출력 | `model_quarantined` | 모델을 runtime 격리에 기록; 자동 재시도하지 않음 |
+| 격리 모델을 건너뛴 턴이 `settled` | `model_degraded` | Provider 기본값/비프리미엄 강등을 성공으로 숨기지 않음 |
 
 프롬프트 명령 자체의 기존 `stalled`·`timeout` 판정도 유지됩니다. Pane 생성이나 Agent
 기동처럼 상태 조회 전 단계에서 실패한 경우에는 `error`가 반환될 수 있습니다.
+`model_quarantined`와 `model_degraded`도 성공 종료가 아니며 Orchestrator 확인이
+필요합니다.
 
 `approve`는 사용자가 채팅에서 **현재 Task의 완료를 명시적으로 승인한 뒤** Orchestrator가
 호출하는 기록 대행 명령입니다. `--confirm-user-approval`이 없거나 Task가
@@ -682,6 +687,35 @@ agent_policy:
 - `dispatch`는 Attempt와 Evidence에 모델·출처와 프리미엄 승인 근거 또는 구체적인
   거부 사유를 기록합니다. 승인 파일의 모델 값은 비교에만 쓰고 argv에는 허용
   목록에서 꺼낸 token만 전달합니다.
+
+`dispatch`는 조회 경로가 있는 Provider(현재 `agy`)에 한해 Pane을 만들기 전에
+실제 목록과 `*_models` 정책 전체를 비교합니다. 차이가 있으면 `models --refresh`로
+확인하라는 경고를 내지만 정책 파일은 고치지 않습니다. 조회 실패는 모델 삭제로
+해석하지 않습니다. `codex`·`claude`는 안전한 목록 조회 경로가 없어 이 사전 비교를
+할 수 없습니다.
+
+Harness가 `--model`로 명시 전달한 모델을 Provider가 거부한 경우에는 출력에서
+실측으로 확인한 좁은 신호만 찾습니다. 현재 `codex`의 400
+`invalid_request_error` + ChatGPT 계정 미지원 문구, `claude`의 “선택 모델에
+문제가 있고 없거나 접근할 수 없다”는 안내 조합만 대상입니다. 인증 만료,
+Herdr 오류, Pane 문제처럼 모델과 무관한 실패나 Harness가 모델을 명시하지 않은
+기동은 격리하지 않습니다.
+
+확인된 모델은 `.harness/runtime/<provider>-models.quarantine`에 전체 모델명,
+UTC 격리 시각, 고정된 근거 요약, 관련 Task·Attempt와 함께 남습니다. 정책 파일은
+변경하지 않고 자동 해제도 하지 않습니다. 다음 dispatch는 정확히 같은 모델을
+건너뛸 때마다 파일 경로와 함께 경고합니다. 프리미엄 정책이 비어 있으면 Provider
+기본값으로, 프리미엄 누출 차단이 켜져 있으면 격리되지 않은 비프리미엄 모델로
+강등합니다(후보가 없으면 fail-closed). 강등 턴이 끝나도 `settled`가 아니라
+`model_degraded`로 보고하며 Attempt·Evidence·runtime meta에도 강등을 남깁니다.
+해제는 사람이 해당 행 또는 격리 파일을 삭제해야 합니다. 격리 직후 같은 dispatch
+안에서 자동 재시도하거나 다른 모델을 자동 선택하지 않습니다.
+
+`agy`는 잘못된 `--model` 값을 받아도 오류 없이 자체 기본 모델로 조용히 폴백하는
+것이 실측되어 출력으로 식별할 수 없습니다. 따라서 `agy`에는 기동 실패 격리를
+적용하지 않습니다. 이 특성 때문에 프리미엄 승인 정책이 Harness의 argv 누출은
+막더라도, `agy`가 그 argv를 무시해 실제로 다른 모델을 쓰는 경우까지는 검증하지
+못합니다. 즉 task-009의 프리미엄 모델 누출 차단은 `agy`에서는 절반의 가드레일입니다.
 
 모델 정책 명령은 `sync-templates`와 같은 안전 규약을 사용합니다.
 

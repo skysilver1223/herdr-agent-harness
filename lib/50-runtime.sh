@@ -100,6 +100,85 @@ _runtime_scan_quota_signal() {
   return 1
 }
 
+# 모델 기동 실패 신호 스캔. Provider마다 공통 종료 코드가 없으므로 실제로
+# 확인된 출력 조합만 좁게 본다. "model"이나 400 하나만으로 판정하지 않는다 —
+# 인증·Herdr·Pane 실패를 모델 탓으로 돌리느니 새 문구를 놓치는 편이 안전하다.
+# 패턴이 정의되지 않은 Provider(현재 agy)는 항상 미감지다.
+_runtime_scan_model_failure() {
+  local provider="$1" text="$2" compact
+  compact="$(printf '%s' "$text" | tr '\r\n' '  ')"
+  case "$provider" in
+    codex)
+      grep -Eqi '"status"[[:space:]]*:[[:space:]]*400' <<<"$compact" || return 1
+      grep -Eqi '"type"[[:space:]]*:[[:space:]]*"invalid_request_error"' <<<"$compact" || return 1
+      grep -Eqi "model is not supported when using Codex with a ChatGPT account" <<<"$compact" || return 1
+      printf 'codex 400 invalid_request_error: ChatGPT 계정에서 지정 모델 미지원'
+      ;;
+    claude)
+      grep -Eqi "there('s| is) an issue with the selected model" <<<"$compact" || return 1
+      grep -Eqi 'it may not exist[[:space:]]+or you may not have access to it' <<<"$compact" || return 1
+      printf 'claude: 지정 모델이 없거나 접근 권한이 없다는 안내'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+_runtime_model_quarantine_path() {
+  printf '%s/.harness/runtime/%s-models.quarantine' "$1" "$2"
+}
+
+_runtime_model_is_quarantined() {
+  local root="$1" provider="$2" model="$3" quarantine
+  quarantine="$(_runtime_model_quarantine_path "$root" "$provider")"
+  [[ -f "$quarantine" ]] || return 1
+  awk -F '\t' -v model="$model" 'NR > 1 && $1 == model { found=1; exit } END { exit !found }' "$quarantine"
+}
+
+# 격리 기록은 정책 파일이 아니라 runtime 상태에 원자적으로 쓴다. 모델명은 이미
+# 허용 목록에서 꺼낸 안전한 token이고 reason은 위 스캐너의 고정 요약뿐이다.
+_runtime_quarantine_model() {
+  local root="$1" provider="$2" model="$3" reason="$4" task_id="$5" attempt="$6"
+  local quarantine temporary timestamp
+  [[ -n "$model" ]] || return 1
+  _runtime_model_id_valid "$model" || return 1
+  quarantine="$(_runtime_model_quarantine_path "$root" "$provider")"
+  mkdir -p "$(dirname "$quarantine")"
+  _runtime_model_is_quarantined "$root" "$provider" "$model" && return 0
+  temporary="$(mktemp "$(dirname "$quarantine")/.model-quarantine.XXXXXX")"
+  if [[ -f "$quarantine" ]]; then
+    cp -- "$quarantine" "$temporary"
+  else
+    printf 'model\tquarantined_at\treason\ttask\tattempt\n' >"$temporary"
+  fi
+  timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$model" "$timestamp" "$reason" "$task_id" "$attempt" >>"$temporary"
+  chmod 0644 "$temporary"
+  mv -f -- "$temporary" "$quarantine"
+}
+
+# 명시 전달한 모델에서만 실패를 격리한다. model_explicit=0이면 Provider가 실제로
+# 무엇을 썼는지 Harness가 모르므로, 출력이 우연히 패턴과 닮아도 기록하지 않는다.
+_runtime_quarantine_model_failure() {
+  local root="$1" provider="$2" model="$3" model_explicit="$4"
+  local text="$5" task_id="$6" attempt="$7" reason
+  [[ "$model_explicit" == 1 && -n "$model" ]] || return 1
+  reason="$(_runtime_scan_model_failure "$provider" "$text")" || return 1
+  _runtime_quarantine_model "$root" "$provider" "$model" "$reason" "$task_id" "$attempt" || return 1
+  RUNTIME_MODEL_FAILURE_REASON="$reason"
+  return 0
+}
+
+# 격리된 모델 대신 실행한 턴이 settled여도 요청대로 성공한 것은 아니다.
+# 다른 실행 상태(running/blocked/error 등)는 더 구체적인 현재 상태라 보존한다.
+_runtime_model_degraded_result() {
+  local result="$1" degradation="$2"
+  if [[ -n "$degradation" && "$result" == settled ]]; then
+    printf 'model_degraded'
+  else
+    printf '%s' "$result"
+  fi
+}
+
 _runtime_next_attempt() {
   local root="$1" task_id="$2" path base number maximum=0
   shopt -s nullglob
@@ -126,6 +205,7 @@ _runtime_write_meta() {
   local root="$1" task_id="$2" role="$3" agent_name="$4" pane_id="$5" provider="$6" attempt="$7"
   local adopted="${8:-0}"
   local model="${9:-}" model_source="${10:-}" model_approval="${11:-}"
+  local model_degradation="${12:-}"
   local destination temporary
   destination="$root/.harness/runtime/$task_id-$role.meta"
   temporary="$(mktemp "$root/.harness/runtime/.meta.XXXXXX")"
@@ -140,6 +220,7 @@ _runtime_write_meta() {
     printf 'model=%s\n' "$model"
     printf 'model_source=%s\n' "$model_source"
     printf 'model_approval=%s\n' "$model_approval"
+    printf 'model_degradation=%s\n' "$model_degradation"
   } >"$temporary"
   chmod 0644 "$temporary"
   mv -f -- "$temporary" "$destination"
@@ -842,6 +923,34 @@ _runtime_model_list_contains() {
   return 1
 }
 
+# 조회 경로가 정의된 Provider만 dispatch 직전에 실제 목록과 정책 목록을
+# 비교한다. 조회 실패는 "모델이 없다"로 해석하지 않으며 정책을 수정하지 않는다.
+_runtime_warn_model_policy_mismatch() {
+  local root="$1" provider="$2" policy query_output token stale="" missing=""
+  local -a actual=() configured=()
+  case "$provider" in
+    agy) ;;
+    *) return 0 ;;
+  esac
+  policy="$root/.harness/policies/agent-policy.yaml"
+  [[ -f "$policy" ]] || return 0
+  query_output="$(_models_query_agy 2>/dev/null)" || return 0
+  mapfile -t actual < <(_models_parse_agy_output <<<"$query_output")
+  (( ${#actual[@]} > 0 )) || return 0
+  _models_read_policy_list "$policy" "${provider}_models" configured || return 0
+  for token in "${configured[@]}"; do
+    _runtime_model_list_contains "$token" "${actual[@]}" || stale+="${stale:+ }$token"
+  done
+  for token in "${actual[@]}"; do
+    _runtime_model_list_contains "$token" "${configured[@]}" || missing+="${missing:+ }$token"
+  done
+  [[ -n "$stale$missing" ]] || return 0
+  printf '경고: %s의 실제 모델 목록과 agent-policy.yaml이 다릅니다.' "$provider" >&2
+  [[ -z "$stale" ]] || printf ' 조회 결과에 없는 정책 모델: %s.' "$stale" >&2
+  [[ -z "$missing" ]] || printf ' 정책에 없는 적용 가능 모델: %s.' "$missing" >&2
+  printf ' `herdr-harness models %s --refresh`로 확인하세요. 정책 파일은 변경하지 않았습니다.\n' "$root" >&2
+}
+
 # 승인 문서는 YAML이 아니라 Markdown 목록이다. 한 필드가 중복되면 어느 값을
 # 사람이 승인한 것인지 모호하므로 유효한 승인으로 보지 않는다.
 _runtime_model_approval_field() {
@@ -910,13 +1019,15 @@ _runtime_premium_model_approved() {
 _runtime_select_model() {
   local root="$1" task_file="$2" role="$3" provider="$4" task_id="$5"
   local policy requested candidate="" candidate_source="모델 미지정" models premiums token matched=""
-  local fallback="" fallback_source="" default_candidate=""
+  local fallback="" fallback_source="" default_candidate="" quarantine_path=""
+  local quarantined_candidate=0
   local task_key="${role}_model" default_key="${provider}_default_model"
   local -a allowed_models=() premium_models=()
 
   RUNTIME_MODEL=""
   RUNTIME_MODEL_SOURCE="Provider 기본값 (미지정)"
   RUNTIME_MODEL_APPROVAL="해당 없음 (프리미엄 정책 꺼짐)"
+  RUNTIME_MODEL_DEGRADATION=""
   requested="$(_runtime_yaml_scalar "$task_file" "$task_key")"
   policy="$root/.harness/policies/agent-policy.yaml"
 
@@ -1013,6 +1124,15 @@ _runtime_select_model() {
       return 0
     fi
 
+    if _runtime_model_is_quarantined "$root" "$provider" "$matched"; then
+      quarantine_path="$(_runtime_model_quarantine_path "$root" "$provider")"
+      printf '경고: 격리된 모델 %s을(를) 건너뛰고 Provider 기본값으로 강등합니다. 해제하려면 사람이 %s에서 해당 기록을 지우거나 파일을 삭제하세요.\n' \
+        "$matched" "$quarantine_path" >&2
+      RUNTIME_MODEL_SOURCE="Provider 기본값 (${candidate_source} 거부 — 모델 격리)"
+      RUNTIME_MODEL_DEGRADATION="격리된 모델 $matched 건너뜀; Provider 기본값 사용; 해제: $quarantine_path"
+      return 0
+    fi
+
     RUNTIME_MODEL="$matched"
     RUNTIME_MODEL_SOURCE="$candidate_source"
     return 0
@@ -1055,6 +1175,16 @@ _runtime_select_model() {
       "$candidate_source" "$provider" >&2
   fi
 
+  if [[ -n "$matched" ]] && _runtime_model_is_quarantined "$root" "$provider" "$matched"; then
+    quarantine_path="$(_runtime_model_quarantine_path "$root" "$provider")"
+    printf '경고: 격리된 모델 %s을(를) 건너뜁니다. 해제하려면 사람이 %s에서 해당 기록을 지우거나 파일을 삭제하세요. 프리미엄 누출 차단은 유지하므로 격리되지 않은 비프리미엄 모델을 찾습니다.\n' \
+      "$matched" "$quarantine_path" >&2
+    RUNTIME_MODEL_DEGRADATION="격리된 모델 $matched 건너뜀; 비프리미엄 모델로 강등; 해제: $quarantine_path"
+    quarantined_candidate=1
+    matched=""
+    RUNTIME_MODEL_APPROVAL="해당 없음 (모델 격리 강등)"
+  fi
+
   if [[ -n "$matched" ]] && _runtime_model_list_contains "$matched" "${premium_models[@]}"; then
     if _runtime_premium_model_approved "$root" "$task_id" "$role" "$matched"; then
       RUNTIME_MODEL="$matched"
@@ -1078,6 +1208,13 @@ _runtime_select_model() {
       && ! _runtime_model_list_contains "$default_candidate" "${premium_models[@]}"; then
     for token in "${allowed_models[@]}"; do
       [[ "$token" == "$default_candidate" ]] || continue
+      if _runtime_model_is_quarantined "$root" "$provider" "$token"; then
+        if [[ "$quarantined_candidate" -eq 0 || "$token" != "$candidate" ]]; then
+          quarantine_path="$(_runtime_model_quarantine_path "$root" "$provider")"
+          printf '경고: 격리된 비프리미엄 기본 모델 %s도 건너뜁니다. 해제: %s\n' "$token" "$quarantine_path" >&2
+        fi
+        continue
+      fi
       fallback="$token"
       fallback_source="정책 기본값 ($default_key, 누출 차단)"
       break
@@ -1085,11 +1222,17 @@ _runtime_select_model() {
   fi
   if [[ -z "$fallback" ]]; then
     for token in "${allowed_models[@]}"; do
-      if ! _runtime_model_list_contains "$token" "${premium_models[@]}"; then
-        fallback="$token"
-        fallback_source="정책 목록 첫 비프리미엄 (누출 차단)"
-        break
+      _runtime_model_list_contains "$token" "${premium_models[@]}" && continue
+      if _runtime_model_is_quarantined "$root" "$provider" "$token"; then
+        if [[ "$token" != "$candidate" && "$token" != "$default_candidate" ]]; then
+          quarantine_path="$(_runtime_model_quarantine_path "$root" "$provider")"
+          printf '경고: 격리된 비프리미엄 모델 %s도 건너뜁니다. 해제: %s\n' "$token" "$quarantine_path" >&2
+        fi
+        continue
       fi
+      fallback="$token"
+      fallback_source="정책 목록 첫 비프리미엄 (누출 차단)"
+      break
     done
   fi
   if [[ -z "$fallback" ]]; then

@@ -150,6 +150,8 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 | `unknown` | `unknown` | 관측 실패를 Agent 장애와 분리 |
 | 그 밖의 값 | `unknown` + 원래 값 경고 | Herdr의 새 상태를 조용히 `error`로 뭉개지 않음 |
 | `agent get` 실패 | `agent_lost` | 조회 실패의 기존 의미 보존 |
+| 명시 모델의 확인된 거부 출력 | `model_quarantined` | runtime 격리 기록 후 자동 재시도 없이 정지 |
+| 격리 모델을 건너뛴 턴이 `settled` | `model_degraded` | 강등을 정상 성공으로 숨기지 않음 |
 
 프롬프트 직전 기준값은 REPL 준비 확인 뒤 `herdr agent get`으로 한 번 더 읽습니다.
 `idle`/`done`인데 두 지표가 그대로면 프롬프트 명령의 종료 코드와 관계없이 유실로
@@ -218,6 +220,42 @@ Provider를 여러 번 지정하면 누적되고, 빈 값은 비우며, 언급�
 있을 때만 적용 상태다. 그 외에는 `미적용`으로 명시하며, 런타임 dispatch는 그
 상태를 fail-open하지 않고 거부한다. `models` 명령은 선언·표시를 담당하고 실제
 승인 집행과 누출 차단은 `_runtime_select_model`이 담당한다.
+
+dispatch 직전의 모델 사전 검증도 조회 능력에 따라 제한한다. 조회 패턴이 정의된
+Provider(현재 `agy`)는 task-008의 `agy models` 파서로 실제 목록과 정책 목록
+전체를 비교하고 차이를 경고한다. 조회 실패는 "모델 없음"으로 바꾸지 않으며,
+이 경로는 정책 파일을 쓰지 않는다. `codex`·`claude`는 비대화형 조회 경로가 없어
+사전 검증을 추측으로 대체하지 않는다.
+
+사전 조회가 불가능한 경우의 두 번째 방어선은 Agent 출력 스캔이다. 이 판정은
+`_runtime_normalize_state`에 섞지 않고 `_runtime_scan_model_failure`가 맡는다.
+현재 패턴은 실측된 `codex`의 400 + `invalid_request_error` + ChatGPT 계정 모델
+미지원 문구 조합과 `claude`의 선택 모델 문제 + 모델 부재/접근 불가 안내 조합뿐이다.
+단순 400, `model`이라는 단어, 인증 만료, Herdr·Pane 실패는 일치하지 않는다.
+패턴이 정의된 Provider만 격리되므로 Provider 동작이 달라지면 별도 실측 뒤 패턴을
+추가해야 한다.
+
+또한 격리는 Harness가 검증된 정책 token을 `--model`로 실제 전달한 경우에만
+가능하다. Provider 기본값 기동은 실제 모델을 알 수 없으므로 같은 문구가 보여도
+어떤 이름도 격리하지 않는다. 확인된 항목은
+`.harness/runtime/<provider>-models.quarantine` TSV에 전체 모델명, UTC 시각,
+고정 근거 요약, Task, Attempt로 저장한다. 정책 파일은 사용자 입력이므로 바꾸지
+않고, Event Log 통합은 §13의 미구현 범위에 그대로 둔다. 다음 선택은 격리 파일을
+정확 일치로 읽어 그 모델을 건너뛸 때마다 파일 경로와 해제 방법을 경고한다.
+자동 해제는 없으며 사람이 행 또는 파일을 삭제해야 한다.
+
+격리를 만든 dispatch는 `model_quarantined`로 끝나고 같은 호출에서 재시도하지
+않는다. 다음 dispatch의 일반 정책은 Provider 기본값으로 강등한다. 프리미엄
+정책이 켜져 있으면 task-009의 보이지 않는 기본값 누출 차단을 약화시키지 않고,
+격리되지 않은 비프리미엄 정책 token만 명시 고정하며 없으면 fail-closed한다.
+강등 턴의 원래 상태가 `settled`여도 최종 결과는 `model_degraded`다. 강등 내용과
+격리 경로는 Attempt·Evidence·runtime meta에 남으므로 폴백이 성공처럼 보이지 않는다.
+
+`agy`는 잘못된 `--model`을 오류 없이 무시하고 자체 기본 모델로 조용히 폴백하는
+것이 실측되어 기동 출력 패턴이 없다. 따라서 현재 격리 대상이 아니며 Harness는
+실제 사용 모델을 관측할 수 없다. 같은 이유로 task-009가 프리미엄 모델을 argv에서
+차단·고정하더라도 `agy`가 그 argv를 무시한 뒤 어떤 모델을 썼는지는 보장하지
+못한다. `agy`에서 프리미엄 누출 차단은 절반의 가드레일이다.
 
 `agent-policy.yaml` 정본은 `templates/`에 있고 `sync-templates`는 기존 정책 값을
 템플릿에 재주입한 뒤 새 모델·프리미엄 키를 전파하므로, 사용자가 조정한 승인·모델

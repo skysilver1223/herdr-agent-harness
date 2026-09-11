@@ -75,6 +75,7 @@ cmd_dispatch() {
   # 도구 실행 승인만 정책으로 건너뛴다. 작업 방향성(상태 전이·완료 승인)은
   # 여기서 바뀌지 않는다 — transition/approve를 거쳐야만 움직인다.
   local approval_mode approval_args_raw agent_args_raw selected_model model_source model_record model_approval
+  local model_degradation="" model_failure_reason="" model_quarantine=""
   local -a agent_args=()
   approval_mode="$(_runtime_approval_mode "$root")"
   # _runtime_agent_args는 die하지 않고 반환값으로 실패를 알린다 — auto-step처럼
@@ -90,6 +91,10 @@ cmd_dispatch() {
   selected_model="$RUNTIME_MODEL"
   model_source="$RUNTIME_MODEL_SOURCE"
   model_approval="$RUNTIME_MODEL_APPROVAL"
+  model_degradation="$RUNTIME_MODEL_DEGRADATION"
+  # task-008의 실제 목록 조회를 dispatch 사전 경고에도 재사용한다. 조회 경로가
+  # 없거나 조회가 실패한 Provider는 추측하지 않고 기동 출력 스캔으로 넘긴다.
+  _runtime_warn_model_policy_mismatch "$root" "$provider"
   model_record="${selected_model:-Provider 기본값 (Harness 미지정)}"
   agent_args_raw="$approval_args_raw"
   if [[ -n "$selected_model" ]]; then
@@ -132,6 +137,7 @@ cmd_dispatch() {
     printf '승인 모드: %s / Provider 인수: %s\n' "$approval_mode" "${agent_args_raw:-(없음)}"
     printf '모델: %s / 출처: %s\n' "$model_record" "$model_source"
     printf '프리미엄 모델 승인: %s\n' "$model_approval"
+    [[ -z "$model_degradation" ]] || printf '모델 강등: %s (실행 결과를 성공으로 간주하지 말 것)\n' "$model_degradation"
     printf 'Agent 작업 디렉터리: %s%s\n' "$agent_cwd" "$( [[ "$agent_cwd" == "$root" ]] && printf ' (워크스페이스 기본값)' || printf ' (--cwd)')"
     printf 'dispatch_result=print_only\n'
     return 0
@@ -151,12 +157,12 @@ cmd_dispatch() {
   [[ -n "$pane_id" ]] || die "Herdr Pane ID를 추출하지 못했습니다."
 
   _runtime_write_meta "$root" "$task_id" "$role" "$agent_name" "$pane_id" "$provider" "$attempt" 0 \
-    "$selected_model" "$model_source" "$model_approval"
+    "$selected_model" "$model_source" "$model_approval" "$model_degradation"
   attempt_file="$root/.harness/attempts/$task_id-attempt-$attempt.md"
   temporary="$(mktemp "$root/.harness/attempts/.attempt.XXXXXX")"
   {
     printf '# Attempt %s: %s\n\n' "$attempt" "$task_id"
-    printf -- '- Started: %s\n- Role: %s\n- Provider: %s\n- Model: %s\n- Model source: %s\n- Model approval: %s\n- Pane ID: %s\n- Agent name: %s\n- Baseline commit: %s\n- Approval mode: %s\n- Provider args: %s\n- Agent cwd: %s\n' "$started_at" "$role" "$provider" "$model_record" "$model_source" "$model_approval" "$pane_id" "$agent_name" "$baseline" "$approval_mode" "${agent_args_raw:-(없음)}" "$agent_cwd"
+    printf -- '- Started: %s\n- Role: %s\n- Provider: %s\n- Model: %s\n- Model source: %s\n- Model approval: %s\n- Model degradation: %s\n- Pane ID: %s\n- Agent name: %s\n- Baseline commit: %s\n- Approval mode: %s\n- Provider args: %s\n- Agent cwd: %s\n' "$started_at" "$role" "$provider" "$model_record" "$model_source" "$model_approval" "${model_degradation:-(없음)}" "$pane_id" "$agent_name" "$baseline" "$approval_mode" "${agent_args_raw:-(없음)}" "$agent_cwd"
     if [[ "$agent_cwd" != "$root" ]] && git -C "$agent_cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       printf -- '- Agent cwd baseline commit: %s\n' \
         "$(git -C "$agent_cwd" rev-parse HEAD 2>/dev/null || printf 'unborn')"
@@ -210,6 +216,28 @@ cmd_dispatch() {
     fi
   fi
 
+  # 정규화 함수와 섞지 않는다. Herdr 상태가 settled여도 Provider가 모델 거부를
+  # 명시하면 별도의 실패다. Harness가 --model로 명시 전달한 경우만 격리한다.
+  RUNTIME_MODEL_FAILURE_REASON=""
+  if _runtime_quarantine_model_failure "$root" "$provider" "$selected_model" \
+      "$([[ -n "$selected_model" ]] && printf 1 || printf 0)" \
+      "$prompt_output"$'\n'"$read_output" "$task_id" "$attempt"; then
+    model_failure_reason="$RUNTIME_MODEL_FAILURE_REASON"
+    model_quarantine="$(_runtime_model_quarantine_path "$root" "$provider")"
+    model_degradation="지정 모델 $selected_model 격리; 다음 dispatch에서 Provider 기본값으로 강등; 해제: $model_quarantine"
+    result=model_quarantined
+    printf '경고: 지정 모델 %s의 기동 실패를 확인해 격리했습니다 (%s). 다음 dispatch에서는 이 모델을 건너뛰며, 자동 재시도하지 않습니다. 해제하려면 사람이 %s에서 해당 기록을 지우거나 파일을 삭제하세요.\n' \
+      "$selected_model" "$model_failure_reason" "$model_quarantine" >&2
+    _runtime_write_meta "$root" "$task_id" "$role" "$agent_name" "$pane_id" "$provider" "$attempt" 0 \
+      "$selected_model" "$model_source" "$model_approval" "$model_degradation"
+    printf -- '- Model quarantine: %s\n- Model failure reason: %s\n' \
+      "$model_quarantine" "$model_failure_reason" >>"$attempt_file"
+  elif [[ -n "$model_degradation" ]]; then
+    # Provider 기본값/비프리미엄으로 작업이 끝나도 요청 모델대로 성공한 것은
+    # 아니다. 강등을 독립 결과로 올려 Orchestrator가 반드시 보게 한다.
+    result="$(_runtime_model_degraded_result "$result" "$model_degradation")"
+  fi
+
   local quota_signal
   quota_signal="$(_runtime_scan_quota_signal "$prompt_output"$'\n'"$read_output" || true)"
 
@@ -218,7 +246,7 @@ cmd_dispatch() {
   temporary="$(mktemp "$root/.harness/evidence/.capture.XXXXXX")"
   {
     printf '# Evidence: %s / %s / Attempt %s\n\n' "$task_id" "$role" "$attempt"
-    printf -- '- Captured: %s\n- Dispatch result: %s\n- Model: %s\n- Model source: %s\n- Model approval: %s\n- Approval mode: %s\n- Prompt exit: %s\n- Agent get exit: %s\n- Agent read exit: %s\n- Prompt 재전송: %s\n- 추가 지시 파일: %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$result" "$model_record" "$model_source" "$model_approval" "$approval_mode" "$prompt_status" "$get_status" "$read_status" "$( ((prompt_resent==1)) && printf 'yes(1회)' || printf 'no')" "${extra_prompt:-(없음)}"
+    printf -- '- Captured: %s\n- Dispatch result: %s\n- Model: %s\n- Model source: %s\n- Model approval: %s\n- Model degradation: %s\n- Model failure reason: %s\n- Model quarantine: %s\n- Approval mode: %s\n- Prompt exit: %s\n- Agent get exit: %s\n- Agent read exit: %s\n- Prompt 재전송: %s\n- 추가 지시 파일: %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$result" "$model_record" "$model_source" "$model_approval" "${model_degradation:-(없음)}" "${model_failure_reason:-(없음)}" "${model_quarantine:-(없음)}" "$approval_mode" "$prompt_status" "$get_status" "$read_status" "$( ((prompt_resent==1)) && printf 'yes(1회)' || printf 'no')" "${extra_prompt:-(없음)}"
     printf '## Git status --short\n\n'
     git -C "$root" status --short 2>&1 || true
     printf '\n## Git diff --stat\n\n'
@@ -245,7 +273,7 @@ cmd_dispatch() {
   rm -f -- "$temporary"
   # 정본은 판단에 쓰이는 6필드 YAML이다. Reviewer와 transition은 이것만 읽는다.
   _runtime_write_evidence_yaml "$root" "$task_id" "$role" "$attempt" "$result" \
-    "dispatch 결과 $result (Provider $provider, 모델 $model_record, 출처 $model_source, 프리미엄 모델 승인 $model_approval, 승인 모드 $approval_mode). 원문은 raw 참조." 0
+    "dispatch 결과 $result (Provider $provider, 모델 $model_record, 출처 $model_source, 프리미엄 모델 승인 $model_approval, 모델 강등 ${model_degradation:-(없음)}, 모델 실패 ${model_failure_reason:-(없음)}, 승인 모드 $approval_mode). 원문은 raw 참조." 0
   _runtime_write_result "$root" "$task_id" "$role" "$result"
   printf 'dispatch_result=%s\n' "$result"
   [[ "$result" == settled || "$result" == blocked ]]
@@ -347,7 +375,7 @@ cmd_observe() {
   [[ "$role" == worker || "$role" == reviewer ]] || die "ROLE은 worker 또는 reviewer여야 합니다."
   _runtime_require_id "$task_id"
   local root meta agent_name pane_id attempt evidence addition get_output get_status read_output read_status result
-  local model model_source model_summary
+  local model model_source model_degradation model_summary previous_result
   root="$(project_root "$path")"
   meta="$root/.harness/runtime/$task_id-$role.meta"
   [[ -f "$meta" ]] || die "Runtime 기록을 찾을 수 없습니다: $meta"
@@ -356,11 +384,13 @@ cmd_observe() {
   attempt="$(_runtime_meta_value "$meta" attempt)"
   model="$(_runtime_meta_value "$meta" model)"
   model_source="$(_runtime_meta_value "$meta" model_source)"
+  model_degradation="$(_runtime_meta_value "$meta" model_degradation)"
   if [[ -n "$model_source" ]]; then
     model_summary=" 모델 ${model:-Provider 기본값 (Harness 미지정)}, 출처 $model_source."
   else
     model_summary=""
   fi
+  [[ -z "$model_degradation" ]] || model_summary+=" 모델 강등 $model_degradation."
   [[ -n "$agent_name" && -n "$pane_id" && "$attempt" =~ ^[0-9]+$ ]] || die "Runtime 기록이 손상되었습니다: $meta"
   set +e
   get_output="$(herdr agent get "$agent_name" 2>&1)"
@@ -369,6 +399,14 @@ cmd_observe() {
   read_status=$?
   set -e
   result="$(_runtime_normalize_state "$get_status" "$get_output" 0 "")"
+  previous_result="$(cat "$root/.harness/runtime/$task_id-$role.result" 2>/dev/null || true)"
+  if [[ "$previous_result" == model_quarantined ]]; then
+    # 같은 Agent가 자동 복구된 적은 없다. 화면 상태만 settled로 바뀌었다고
+    # 모델 거부가 사라진 것으로 쓰면 격리 실패가 다시 성공으로 보인다.
+    result=model_quarantined
+  else
+    result="$(_runtime_model_degraded_result "$result" "$model_degradation")"
+  fi
   local quota_signal
   quota_signal="$(_runtime_scan_quota_signal "$read_output" || true)"
   evidence="$(_runtime_evidence_raw_path "$root" "$task_id" "$role" "$attempt")"
@@ -376,7 +414,7 @@ cmd_observe() {
   addition="$(mktemp "$root/.harness/evidence/.observe.XXXXXX")"
   {
     printf '\n## Observation %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-    printf -- '- Result: %s\n- Pane ID: %s\n- Agent get exit: %s\n- Agent read exit: %s\n\n' "$result" "$pane_id" "$get_status" "$read_status"
+    printf -- '- Result: %s\n- Model degradation: %s\n- Pane ID: %s\n- Agent get exit: %s\n- Agent read exit: %s\n\n' "$result" "${model_degradation:-(없음)}" "$pane_id" "$get_status" "$read_status"
     printf '### Agent state\n\n%s\n\n### Agent output\n\n%s\n' "$get_output" "$read_output"
     if [[ -n "$quota_signal" ]]; then
       printf '\n### 쿼터 신호(자동 감지 — 확정 아님)\n\n%s\n' "$quota_signal"
