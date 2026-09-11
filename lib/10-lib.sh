@@ -8,6 +8,7 @@ Herdr Agent/Skills Harness
   $SCRIPT_NAME help | -h | --help  이 도움말 출력(인자 없이 실행해도 같다)
   $SCRIPT_NAME init PATH [옵션]   새 프로젝트 Harness 생성
   $SCRIPT_NAME sync-templates PATH [--apply]  기존 프로젝트의 skill·role·정책 템플릿을 재동기화(기본은 diff 미리보기)
+  $SCRIPT_NAME models PATH [--refresh] [--premium PROVIDER=MODEL]... [--apply]  모델 정책 조회·미리보기·적용
   $SCRIPT_NAME start [PATH]       Herdr Session 시작
   $SCRIPT_NAME status [PATH]      현재 STATE.md 출력
   $SCRIPT_NAME status --live      문서·Herdr·Git 상태 대조 (DRIFT 표시)
@@ -170,13 +171,19 @@ emit_doc() {
       -v codex_models="${DOC_CODEX_MODELS:-}" \
       -v codex_default_model="${DOC_CODEX_DEFAULT_MODEL:-}" \
       -v agy_models="${DOC_AGY_MODELS:-}" \
-      -v agy_default_model="${DOC_AGY_DEFAULT_MODEL:-}" '
+      -v agy_default_model="${DOC_AGY_DEFAULT_MODEL:-}" \
+      -v claude_premium_models="${DOC_CLAUDE_PREMIUM_MODELS:-}" \
+      -v codex_premium_models="${DOC_CODEX_PREMIUM_MODELS:-}" \
+      -v agy_premium_models="${DOC_AGY_PREMIUM_MODELS:-}" '
         /^  claude_models:/ { print "  claude_models: \047" claude_models "\047"; next }
         /^  claude_default_model:/ { print "  claude_default_model: \047" claude_default_model "\047"; next }
         /^  codex_models:/ { print "  codex_models: \047" codex_models "\047"; next }
         /^  codex_default_model:/ { print "  codex_default_model: \047" codex_default_model "\047"; next }
         /^  agy_models:/ { print "  agy_models: \047" agy_models "\047"; next }
         /^  agy_default_model:/ { print "  agy_default_model: \047" agy_default_model "\047"; next }
+        /^  claude_premium_models:/ { print "  claude_premium_models: \047" claude_premium_models "\047"; next }
+        /^  codex_premium_models:/ { print "  codex_premium_models: \047" codex_premium_models "\047"; next }
+        /^  agy_premium_models:/ { print "  agy_premium_models: \047" agy_premium_models "\047"; next }
         { print }
       ')"
   fi

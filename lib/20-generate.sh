@@ -23,6 +23,9 @@ write_project_templates() {
   DOC_CLAUDE_MODELS='' DOC_CLAUDE_DEFAULT_MODEL=''
   DOC_CODEX_MODELS='' DOC_CODEX_DEFAULT_MODEL=''
   DOC_AGY_MODELS='' DOC_AGY_DEFAULT_MODEL=''
+  DOC_CLAUDE_PREMIUM_MODELS=''
+  DOC_CODEX_PREMIUM_MODELS=''
+  DOC_AGY_PREMIUM_MODELS=''
 
   # agent-policy.yaml은 사용자가 직접 조정하는 정책 파일이다. sync-templates가
   # 새 모델 키를 전파하되 기존 승인 인수와 모델 목록을 초기값으로 되돌리지
@@ -57,6 +60,9 @@ codex_models:DOC_CODEX_MODELS
 codex_default_model:DOC_CODEX_DEFAULT_MODEL
 agy_models:DOC_AGY_MODELS
 agy_default_model:DOC_AGY_DEFAULT_MODEL
+claude_premium_models:DOC_CLAUDE_PREMIUM_MODELS
+codex_premium_models:DOC_CODEX_PREMIUM_MODELS
+agy_premium_models:DOC_AGY_PREMIUM_MODELS
 POLICY_FIELDS
   fi
   local rel

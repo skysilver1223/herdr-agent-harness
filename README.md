@@ -250,6 +250,7 @@ herdr-harness <TAB><TAB>
 ```text
 init             : 새 프로젝트에 Harness 문서·정책·역할 파일 생성
 sync-templates   : Skill·역할·정책 템플릿을 지금 버전으로 재동기화
+models           : 적용 가능 모델과 허용·프리미엄 정책 조회·갱신
 start            : 프로젝트 디렉터리에서 Herdr Session 열기
 status           : STATE.md 출력 (--live로 문서·Herdr·Git 대조)
 validate         : 상태를 바꾸지 않고 정합성만 검사
@@ -329,6 +330,7 @@ PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
 PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)
 PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)
 PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)
+PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존)
 PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)
 PASS: Agent 호출 없음
 PASS: 탭 완성 스크립트 문법
@@ -338,7 +340,7 @@ PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호
 PASS: Task Lock (동시 획득 거부/release/stale 회수)
 PASS: quota-retry/auto-step opt-in 게이트
 PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)
-PASS: sync-templates (dry-run/apply·멱등, agent-policy 모델 키 전파·사용자 값 보존, AGENTS.md/STATE.md 비침범, .gitignore 보충)
+PASS: sync-templates (dry-run/apply·멱등, agent-policy 모델·프리미엄 키 전파·사용자 값 보존, AGENTS.md/STATE.md 비침범, .gitignore 보충)
 PASS: README 기대 출력 ↔ 실제 test 출력 정합
 PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)
 ```
@@ -645,8 +647,10 @@ Provider CLI 기본값입니다. 정책은 `.harness/policies/agent-policy.yaml`
 agent_policy:
   codex_models: 'gpt-5.6-sol gpt-5.6-terra'
   codex_default_model: 'gpt-5.6-terra'
+  codex_premium_models: 'gpt-5.6-terra'
   agy_models: 'gemini-3.8-flash-high gemini-3.1-pro-high'
   agy_default_model: 'gemini-3.8-flash-high'
+  agy_premium_models: ''
 ```
 
 - `*_models`는 공백 구분 허용 목록입니다. Task 값과 `*_default_model`은 목록의
@@ -655,13 +659,42 @@ agent_policy:
 - Task 값이 목록 밖이거나 목록이 비어 있으면 경고 후 모델 인수를 붙이지 않고
   Provider 기본값을 씁니다. 오타 때문에 Wave 전체를 중단하지 않습니다.
 - 모델 미지정 Task와 빈 초기 정책은 기존과 똑같이 모델 인수를 붙이지 않습니다.
-- 목록은 Provider에서 확인합니다: `agy models`, `claude --help`, codex는
-  `~/.codex/config.toml`과 `codex --help`. Provider 모델이 바뀌면 Harness 코드를
-  수정하지 않고 이 표를 갱신합니다.
+- `*_premium_models`는 프리미엄(최상위) 등급의 선언입니다. `*_models`를 넓히지
+  않으며, 전체 모델 ID가 허용 목록 토큰과 정확히 일치할 때만 `적용`입니다.
+  목록 밖 선언은 `미적용`으로 표시됩니다. 이 명령은 선언·표시만 담당하고 승인
+  게이트 집행은 하지 않습니다.
+- 목록 조회와 갱신은 `herdr-harness models PATH`를 사용합니다. `agy`는 실제
+  `agy models` 결과와 정책의 추가·삭제·유지를 보여 주지만, 비대화형 조회 경로가
+  없는 `codex`·`claude`는 `조회 경로 없음 — 수동 관리`로 표시하고 값을 추측하지
+  않습니다.
 - 승인용 `*_auto`/`*_bypass` 표는 모델 통로가 아닙니다. 그 표의 `--model opus`는
   계속 거부되며, 모델 선택은 별도의 허용 목록 검사를 거칩니다.
 - `dispatch`는 Attempt와 Evidence에 모델 및 출처를 `Task 지정`, `정책 기본값`,
   `Provider 기본값(미지정 또는 지정 거부)`으로 구분해 기록합니다.
+
+모델 정책 명령은 `sync-templates`와 같은 안전 규약을 사용합니다.
+
+```bash
+# 정책·실제 조회 결과와 프리미엄 적용 여부 표시(파일 변경 없음)
+herdr-harness models .
+
+# agy 전체 목록 갱신의 추가·삭제·유지 diff만 미리보기
+herdr-harness models . --refresh
+
+# 조회가 성공한 경우에만 agy_models와 조회 시각 주석을 실제 반영
+herdr-harness models . --refresh --apply
+
+# 언급한 Provider의 프리미엄 집합 전체를 대체(반복 지정은 누적, 빈 값은 비우기)
+herdr-harness models . \
+  --premium claude=claude-fable-5 \
+  --premium claude=claude-opus-4-6 --apply
+herdr-harness models . --premium agy= --apply
+```
+
+`--apply`가 없으면 정책 파일을 쓰지 않습니다. 조회가 비정상 종료하거나 빈 목록을
+돌려주면 삭제를 계산하지 않고 기존 값과 조회 시각을 보존합니다. 프리미엄 선언은
+그 호출에서 언급한 Provider에만 set 의미로 적용되며, 다른 Provider의 선언과
+`approval_mode`·`*_auto`·`*_bypass`·사용자 주석은 그대로 남습니다.
 
 ### Acceptance Criteria 게이트 — `transition ... submitted`가 직접 검증한다
 

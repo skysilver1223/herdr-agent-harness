@@ -38,3 +38,10 @@ agent_policy:
   codex_default_model: ''
   agy_models: ''
   agy_default_model: ''
+
+  # 프리미엄은 비용·승인 등급의 선언일 뿐 허용 목록을 넓히지 않는다.
+  # 전체 모델 ID를 공백으로 구분하며 *_models와 정확히 일치할 때만 적용 상태다.
+  # 실제 승인 게이트는 별도 단계에서 집행한다.
+  claude_premium_models: ''
+  codex_premium_models: ''
+  agy_premium_models: ''

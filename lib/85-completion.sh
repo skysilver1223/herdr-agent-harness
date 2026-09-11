@@ -214,6 +214,7 @@ _herdr_harness_subcommand_help() {
   printf '%s\n' \
     "init::새 프로젝트에 Harness 문서·정책·역할 파일 생성" \
     "sync-templates::Skill·역할·정책 템플릿을 지금 버전으로 재동기화" \
+    "models::적용 가능 모델과 허용·프리미엄 정책 조회·갱신" \
     "start::프로젝트 디렉터리에서 Herdr Session 열기" \
     "status::STATE.md 출력 (--live로 문서·Herdr·Git 대조)" \
     "validate::상태를 바꾸지 않고 정합성만 검사" \
@@ -264,7 +265,7 @@ _herdr_harness_completions() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local subcommands="init sync-templates start status doctor test uninstall validate transition approve dispatch observe adopt close-agent quota-check quota-retry auto-step remote completion help"
+  local subcommands="init sync-templates models start status doctor test uninstall validate transition approve dispatch observe adopt close-agent quota-check quota-retry auto-step remote completion help"
 
   if (( COMP_CWORD == 1 )); then
     local described=()
@@ -376,6 +377,25 @@ _herdr_harness_completions() {
         _herdr_harness_describe "$cur" \
           "--dry-run::무엇이 바뀔지 diff로만 보여 준다 (기본값)" \
           "--apply::Skill·역할·정책 템플릿을 실제로 갱신한다"
+      fi
+      ;;
+    models)
+      if [[ "$prev" == --premium ]]; then
+        _herdr_harness_describe "$cur" \
+          "claude=::Claude 전체 모델 ID (반복 지정 가능)" \
+          "codex=::Codex 전체 모델 ID (반복 지정 가능)" \
+          "agy=::agy 전체 모델 ID (빈 값은 프리미엄 비우기)"
+      elif (( COMP_CWORD == 2 )); then
+        COMPREPLY=($(compgen -d -- "$cur"))
+        _herdr_harness_note "$cur" \
+          "구문::herdr-harness models PATH [--refresh] [--premium PROVIDER=MODEL]... [--apply]" \
+          "PATH::Harness 프로젝트 디렉터리 (필수)" \
+          "help::herdr-harness help models"
+      else
+        _herdr_harness_describe "$cur" \
+          "--refresh::조회 가능한 Provider의 허용 목록 전체 갱신을 미리보기" \
+          "--premium::Provider의 프리미엄 집합을 선언적으로 대체" \
+          "--apply::미리 본 모델 정책 변경을 실제로 적용"
       fi
       ;;
     transition)

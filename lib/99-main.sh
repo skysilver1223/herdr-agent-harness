@@ -7,6 +7,7 @@ main() {
   case "$command" in
     init) cmd_init "$@" ;;
     sync-templates) cmd_sync_templates "$@" ;;
+    models) cmd_models "$@" ;;
     start) cmd_start "$@" ;;
     status) cmd_status "$@" ;;
     validate) cmd_validate "$@" ;;

@@ -2,6 +2,9 @@
 
 
 cmd_test() {
+  # 이후 띄우는 모든 하위 harness 프로세스에도 전달한다. 신규 models 검사는
+  # _models_query_agy를 함수 스텁으로 교체하며, 그 밖의 실제 조회는 125로 막힌다.
+  export HH_HARNESS_SELFTEST=1
   bash -n "$SELF_PATH"
   local _lib
   for _lib in "$HARNESS_LIB_DIR"/*.sh; do
@@ -11,6 +14,21 @@ cmd_test() {
   test_root="$(mktemp -d "${TMPDIR:-/tmp}/herdr-harness-test.XXXXXX")"
   test_project="$test_root/sample-project"
   trap 'case "${test_root:-}" in "${TMPDIR:-/tmp}"/herdr-harness-test.*) rm -rf -- "$test_root" ;; esac' EXIT
+
+  # 하위 프로세스가 실수로 _models_query_agy 기본 구현에 도달해도 실제 CLI를
+  # 시작하지 않는다. models 동작 검사는 아래에서 이 함수 자체를 시나리오별로
+  # 스텁하고, 이 PATH 스텁은 self-test 전체의 마지막 안전망이다.
+  local provider_stub_dir="$test_root/provider-stubs"
+  local provider_stub_log="$test_root/provider-stub-invocations.log"
+  mkdir -p "$provider_stub_dir"
+  cat >"$provider_stub_dir/agy" <<'PROVIDER_STUB'
+#!/usr/bin/env bash
+printf 'agy %s\n' "$*" >>"${HH_PROVIDER_STUB_LOG:?}"
+exit 125
+PROVIDER_STUB
+  chmod +x "$provider_stub_dir/agy"
+  export HH_PROVIDER_STUB_LOG="$provider_stub_log"
+  export PATH="$provider_stub_dir:$PATH"
 
   bash "$SELF_PATH" init "$test_project" \
     --name sample-project \
@@ -647,6 +665,135 @@ AC_PY
   grep -q "printf -- '- Captured:.*- Model:.*- Model source:" "$dispatch_src" ||
     die "dispatch Evidence에 Model과 Model source 기록이 없습니다."
 
+  # --- models: 실제 Provider 호출 없이 목록 diff·정책 갱신·보존 검증 ------
+  local models_project="$test_root/models-command-project" models_policy models_out
+  local models_before="$test_root/models-before.yaml" models_once="$test_root/models-once.yaml"
+  cp -a "$test_project" "$models_project"
+  models_policy="$models_project/.harness/policies/agent-policy.yaml"
+  sed -i \
+    -e "s|^  claude_models:.*|  claude_models: 'claude-fable-5 claude-opus-4-6'|" \
+    -e "s|^  codex_models:.*|  codex_models: 'gpt-5.6-sol gpt-6-astra'|" \
+    -e "s|^  agy_models:.*|  agy_models: 'agy-keep agy-remove agy-premium-removed' # 사용자 모델 주석|" \
+    -e "s|^  claude_premium_models:.*|  claude_premium_models: 'fable'|" \
+    -e "s|^  codex_premium_models:.*|  codex_premium_models: 'gpt-6-astra'|" \
+    -e "s|^  agy_premium_models:.*|  agy_premium_models: 'agy-premium-removed'|" \
+    "$models_policy"
+  sed -i '/^  approval_mode:/i\  # 사용자 정책 주석 — models가 보존해야 함' "$models_policy"
+
+  _models_query_agy() {
+    printf '%s\n' \
+      'MODEL DISPLAY NAME' \
+      'agy-new New model' \
+      'agy-keep Kept model'
+  }
+  _models_now_utc() { printf '2026-09-11T07:00:00Z'; }
+
+  # 기본 표시, --apply만, --refresh dry-run은 모두 정책 파일을 쓰지 않는다.
+  cp "$models_policy" "$models_before"
+  models_out="$(cmd_models "$models_project")"
+  cmp -s "$models_policy" "$models_before" ||
+    die "models 기본 표시가 정책 파일을 변경했습니다."
+  printf '%s' "$models_out" | grep -q 'claude.*조회 경로 없음 — 수동 관리' ||
+    die "models가 조회 불가 Provider를 수동 관리로 안내하지 않았습니다."
+  printf '%s' "$models_out" | grep -q 'agy-new (추가)' ||
+    die "models 기본 표시에 실제 목록과 정책의 추가 diff가 없습니다."
+  printf '%s' "$models_out" | grep -q 'agy-remove (조회 결과에 없음 — 삭제)' ||
+    die "models 기본 표시에 실제 목록에서 사라진 모델의 삭제 diff가 없습니다."
+  printf '%s' "$models_out" | grep -q 'fable (미적용 — 허용 목록에 정확히 일치하는 값 없음)' ||
+    die "models가 약칭 프리미엄을 전체 모델 이름과 부분 일치시켰습니다."
+  if printf '%s' "$models_out" | grep -q 'fable (적용)'; then
+    die "models가 프리미엄 약칭을 적용 상태로 표시했습니다."
+  fi
+
+  cmd_models "$models_project" --apply >/dev/null
+  cmp -s "$models_policy" "$models_before" ||
+    die "models --apply만으로 정책 파일이 변경됐습니다."
+  models_out="$(cmd_models "$models_project" --refresh)"
+  cmp -s "$models_policy" "$models_before" ||
+    die "models --refresh dry-run이 정책 파일을 변경했습니다."
+  printf '%s' "$models_out" | grep -q 'agy-keep (유지)' ||
+    die "models --refresh가 유지 모델을 구분하지 않았습니다."
+  printf '%s' "$models_out" | LC_ALL=C grep -q 'agy-premium-removed.*프리미엄 선언도 미적용 예정' ||
+    die "models --refresh가 삭제될 프리미엄 모델을 특별 표시하지 않았습니다."
+
+  # --refresh --apply는 추가·삭제 전체와 조회 시각을 반영한다.
+  cmd_models "$models_project" --refresh --apply >/dev/null
+  grep -q "^  agy_models: 'agy-keep agy-new' # 사용자 모델 주석$" "$models_policy" ||
+    die "models --refresh --apply가 agy_models를 조회 결과 전체로 교체하지 않았습니다."
+  grep -q '^  # 마지막 조회: 2026-09-11T07:00:00Z (agy models)$' "$models_policy" ||
+    die "models --refresh --apply가 agy_models 바로 위에 조회 시각을 남기지 않았습니다."
+  grep -q '^  # 사용자 정책 주석 — models가 보존해야 함$' "$models_policy" ||
+    die "models 갱신이 사용자 주석을 삭제했습니다."
+  grep -q "^  approval_mode: 'auto'$" "$models_policy" ||
+    die "models 갱신이 approval_mode를 바꿨습니다."
+  grep -q "^  codex_auto: '--ask-for-approval never --sandbox workspace-write'$" "$models_policy" ||
+    die "models 갱신이 *_auto 정책을 바꿨습니다."
+
+  # 비정상 종료와 성공+빈 출력은 둘 다 조회 실패다. 기존 목록·시각에 손대거나
+  # 삭제 diff를 만들면 안 된다.
+  cp "$models_policy" "$models_before"
+  _models_query_agy() { return 17; }
+  models_out="$(cmd_models "$models_project" --refresh --apply)"
+  cmp -s "$models_policy" "$models_before" ||
+    die "agy models 비정상 종료가 기존 모델 정책을 변경했습니다."
+  printf '%s' "$models_out" | grep -q '삭제를 계산하지 않고 기존 정책을 보존' ||
+    die "agy models 비정상 종료 시 보존 경고가 없습니다."
+  _models_query_agy() { :; }
+  models_out="$(cmd_models "$models_project" --refresh --apply)"
+  cmp -s "$models_policy" "$models_before" ||
+    die "agy models 빈 출력이 기존 모델 정책을 변경했습니다."
+  printf '%s' "$models_out" | grep -q '삭제를 계산하지 않고 기존 정책을 보존' ||
+    die "agy models 빈 출력 시 보존 경고가 없습니다."
+
+  # --premium은 Provider별 set 의미이며, 같은 Provider의 반복은 누적하고 다른
+  # Provider는 보존한다. 빈 값은 그 Provider의 집합을 비운다.
+  _models_query_agy() { printf '%s\n' 'agy-keep Kept' 'agy-new New'; }
+  models_out="$(cmd_models "$models_project" \
+    --premium claude=claude-fable-5 \
+    --premium claude=claude-opus-4-6 --apply)"
+  grep -q "^  claude_premium_models: 'claude-fable-5 claude-opus-4-6'$" "$models_policy" ||
+    die "models --premium 반복 지정이 Provider 프리미엄 집합으로 누적되지 않았습니다."
+  grep -q "^  codex_premium_models: 'gpt-6-astra'$" "$models_policy" ||
+    die "models --premium이 언급하지 않은 Provider를 변경했습니다."
+  printf '%s' "$models_out" | grep -q 'claude-fable-5 (적용)' ||
+    die "models --premium 전체 이름이 적용 상태로 표시되지 않았습니다."
+  cmd_models "$models_project" --premium claude= --apply >/dev/null
+  grep -q "^  claude_premium_models: ''$" "$models_policy" ||
+    die "models --premium PROVIDER=가 프리미엄 집합을 비우지 않았습니다."
+
+  # 허용 목록 밖 선언은 허용 목록을 넓히지 않고 미적용으로 분명히 보인다.
+  models_out="$(cmd_models "$models_project" --premium claude=claude-unknown-9 --apply)"
+  grep -q "^  claude_models: 'claude-fable-5 claude-opus-4-6'$" "$models_policy" ||
+    die "models --premium이 Provider 허용 목록을 넓혔습니다."
+  printf '%s' "$models_out" | grep -q 'claude-unknown-9 (미적용 — 허용 목록에 정확히 일치하는 값 없음)' ||
+    die "허용 목록 밖 프리미엄 선언이 미적용으로 표시되지 않았습니다."
+
+  # 같은 조회 결과의 연속 적용은 파일 전체가 같아야 한다(주석 시각 포함).
+  cmd_models "$models_project" --refresh --apply >/dev/null
+  cp "$models_policy" "$models_once"
+  cmd_models "$models_project" --refresh --apply >/dev/null
+  cmp -s "$models_policy" "$models_once" ||
+    die "models --refresh --apply가 연속 실행에서 멱등이 아닙니다."
+
+  # 구버전 정책처럼 프리미엄 키가 하나도 없어도 조회가 되고, 명시한 Provider
+  # 키만 추가된다. 나머지 Provider의 논리적 빈 값은 그대로다.
+  sed -i '/^  \(claude\|codex\|agy\)_premium_models:/d' "$models_policy"
+  models_out="$(cmd_models "$models_project")"
+  printf '%s' "$models_out" | grep -q '현재 codex_premium_models: (비어 있음)' ||
+    die "models가 *_premium_models 없는 구버전 정책을 읽지 못했습니다."
+  cmd_models "$models_project" --premium agy= --apply >/dev/null
+  grep -q "^  agy_premium_models: ''$" "$models_policy" ||
+    die "models가 구버전 정책에 명시한 프리미엄 키를 추가하지 않았습니다."
+  if grep -q '^  codex_premium_models:' "$models_policy"; then
+    die "models가 언급하지 않은 구버전 Provider 프리미엄 키를 추가했습니다."
+  fi
+  if grep -q 'herdr agent' "$HARNESS_LIB_DIR/52-models.sh"; then
+    die "models 구현에 Agent 기동 경로가 들어갔습니다."
+  fi
+  models_out="$(bash "$SELF_PATH" help models)"
+  printf '%s' "$models_out" | grep -q '`agy models`' ||
+    die "help models에 agy 조회 경로 설명이 없습니다."
+
   # --- dispatch 옵션 정합: 인수 파싱 ↔ help 상세 ↔ 탭 완성 설명 -------------
   # 명령 이름은 기존 "도움말 정합성"이 검사하지만 옵션은 아무도 보지 않았다.
   # 실제로 --extra-prompt가 탭 완성 목록에서 빠진 채(줄바꿈 누락으로) 통과했다.
@@ -790,7 +937,7 @@ AC_PY
 
   # agent-policy는 사용자가 직접 편집하는 정책이라 통째로 초기화하면 안 된다.
   # 구버전 파일에 모델 키만 보충하면서 기존 승인 인수는 보존해야 한다.
-  sed -i '/^  \(claude\|codex\|agy\)_\(models\|default_model\):/d' \
+  sed -i '/^  \(claude\|codex\|agy\)_\(models\|default_model\|premium_models\):/d' \
     "$test_project/.harness/policies/agent-policy.yaml"
   sed -i "s|^  codex_auto:.*|  codex_auto: '--ask-for-approval on-request --sandbox workspace-write'|" \
     "$test_project/.harness/policies/agent-policy.yaml"
@@ -804,12 +951,16 @@ AC_PY
     die "sync-templates --apply: agent-policy 모델 키 전파 건수가 예상과 다릅니다."
   grep -q "^  codex_models: ''$" "$test_project/.harness/policies/agent-policy.yaml" ||
     die "sync-templates --apply가 빈 초기 모델 허용 목록을 전파하지 않았습니다."
+  grep -q "^  codex_premium_models: ''$" "$test_project/.harness/policies/agent-policy.yaml" ||
+    die "sync-templates --apply가 빈 초기 프리미엄 모델 목록을 전파하지 않았습니다."
   grep -q "^  codex_auto: '--ask-for-approval on-request --sandbox workspace-write'$" \
     "$test_project/.harness/policies/agent-policy.yaml" ||
     die "sync-templates가 사용자가 고친 승인 정책 값을 초기화했습니다."
   sed -i "s|^  codex_models:.*|  codex_models: 'gpt-project-model gpt-review-model'|" \
     "$test_project/.harness/policies/agent-policy.yaml"
   sed -i "s|^  codex_default_model:.*|  codex_default_model: 'gpt-project-model'|" \
+    "$test_project/.harness/policies/agent-policy.yaml"
+  sed -i "s|^  codex_premium_models:.*|  codex_premium_models: 'gpt-project-premium'|" \
     "$test_project/.harness/policies/agent-policy.yaml"
   sync_out="$(bash "$SELF_PATH" sync-templates "$test_project" --apply)"
   printf '%s' "$sync_out" | grep -q '요약: 변경 0' ||
@@ -820,6 +971,9 @@ AC_PY
   grep -q "^  codex_default_model: 'gpt-project-model'$" \
     "$test_project/.harness/policies/agent-policy.yaml" ||
     die "sync-templates가 사용자가 고친 정책 기본 모델을 초기화했습니다."
+  grep -q "^  codex_premium_models: 'gpt-project-premium'$" \
+    "$test_project/.harness/policies/agent-policy.yaml" ||
+    die "sync-templates가 사용자가 고친 프리미엄 모델 선언을 초기화했습니다."
 
   cat >"$test_project/.agents/skills/harness-orchestrate/SKILL.md" <<'EOF'
 ---
@@ -1481,6 +1635,7 @@ STUB
     'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)'
     'PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)'
     'PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)'
+    'PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존)'
     'PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)'
     'PASS: Agent 호출 없음'
     'PASS: 탭 완성 스크립트 문법'
@@ -1490,7 +1645,7 @@ STUB
     'PASS: Task Lock (동시 획득 거부/release/stale 회수)'
     'PASS: quota-retry/auto-step opt-in 게이트'
     'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)'
-    'PASS: sync-templates (dry-run/apply·멱등, agent-policy 모델 키 전파·사용자 값 보존, AGENTS.md/STATE.md 비침범, .gitignore 보충)'
+    'PASS: sync-templates (dry-run/apply·멱등, agent-policy 모델·프리미엄 키 전파·사용자 값 보존, AGENTS.md/STATE.md 비침범, .gitignore 보충)'
     'PASS: README 기대 출력 ↔ 실제 test 출력 정합'
     'PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)'
   )
@@ -1517,6 +1672,10 @@ STUB
     readme_check_ran=1
   else
     info "README.md가 없어(설치본) 기대 출력 정합성 검사는 건너뜁니다."
+  fi
+
+  if [[ -s "$provider_stub_log" ]]; then
+    die "self-test가 함수 스텁 밖에서 Provider CLI를 호출했습니다: $(tr '\n' ' ' <"$provider_stub_log")"
   fi
 
   rm -rf -- "$test_root"

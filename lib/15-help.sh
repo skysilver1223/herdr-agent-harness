@@ -15,6 +15,7 @@
 HARNESS_COMMAND_SUMMARIES=(
   "init:새 프로젝트에 Harness 문서·정책·역할 파일을 생성한다"
   "sync-templates:기존 프로젝트의 Skill·역할·정책 템플릿을 지금 버전으로 재동기화한다"
+  "models:Provider별 적용 가능 모델과 허용·프리미엄 정책을 조회하고 갱신한다"
   "start:프로젝트 디렉터리에서 Herdr Session을 연다"
   "status:STATE.md를 출력한다 (--live로 문서·Herdr·Git 대조)"
   "validate:상태를 바꾸지 않고 문서·정책·Git 정합성만 검사한다"
@@ -123,6 +124,37 @@ EOF
   $SCRIPT_NAME sync-templates ~/Projects/telemetry --apply  # 실제 적용
 EOF
       ;;
+    models) cat <<EOF
+구문:
+  $SCRIPT_NAME models PATH [--refresh] [--premium PROVIDER=MODEL]... [--apply]
+
+무엇을 하나:
+  Provider별 현재 <provider>_models 허용 목록, 프리미엄 선언과 적용 여부를
+  표시한다. agy는 \`agy models\`의 실제 목록과 정책 diff를 함께 보여 주며,
+  codex·claude는 비대화형 목록 조회 경로가 없어 추측하지 않고 수동 관리로
+  표시한다. 이 명령은 Agent를 띄우지 않는다.
+
+쓰기 규약:
+  기본은 sync-templates와 같은 미리보기다. --refresh는 조회된 agy 목록을
+  추가·삭제·유지로 나누어 보여 주고, --apply를 함께 줬을 때만 허용 목록과
+  마지막 조회 시각 주석을 정책 파일에 쓴다. 조회 실패나 빈 결과는 삭제로
+  계산하지 않고 기존 목록을 보존한다.
+
+  --premium PROVIDER=MODEL은 그 호출에서 언급한 Provider의 프리미엄 집합을
+  선언적으로 대체한다. 같은 Provider를 여러 번 쓰면 누적하고 PROVIDER=는
+  비운다. 언급하지 않은 Provider는 바꾸지 않는다. MODEL은 약칭·부분 문자열이
+  아닌 안전한 전체 모델 ID여야 한다. 허용 목록과 정확히 일치하지 않는 선언은
+  목록을 넓히지 않으며 "미적용"으로 표시된다. 프리미엄 집행은 이 명령의
+  범위가 아니다.
+
+예시:
+  $SCRIPT_NAME models .
+  $SCRIPT_NAME models . --refresh
+  $SCRIPT_NAME models . --refresh --apply
+  $SCRIPT_NAME models . --premium claude=claude-fable-5 --apply
+  $SCRIPT_NAME models . --premium agy= --apply
+EOF
+      ;;
     start) cat <<EOF
 구문:
   $SCRIPT_NAME start [PATH]
@@ -225,10 +257,10 @@ EOF
   <provider>_models 공백 구분 허용 목록에 정확히 있어야만 --model로 전달된다.
   목록 밖 값과 플래그처럼 보이는 값은 경고 후 무시하며 Provider 기본값을 쓴다.
 
-  허용 모델은 Provider CLI에서 확인한다: agy는 \`agy models\`, claude는
-  \`claude --help\`, codex는 \`~/.codex/config.toml\`과 \`codex --help\`를 본다.
-  모델명은 코드가 아니라 agent-policy.yaml의 목록에서 관리한다. 실제 선택된
-  모델(또는 Harness 미지정)과 출처는 Attempt·Evidence에 남는다.
+  허용 모델은 \`$SCRIPT_NAME models PATH\`로 확인한다. agy는 실제 목록을
+  조회하고, 조회 경로가 없는 claude·codex는 수동 관리로 안내한다. 모델명은
+  코드가 아니라 agent-policy.yaml의 목록에서 관리한다. 실제 선택된 모델
+  (또는 Harness 미지정)과 출처는 Attempt·Evidence에 남는다.
 
 역할(ROLE): worker | reviewer
 

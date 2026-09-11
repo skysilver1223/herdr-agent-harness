@@ -184,15 +184,30 @@ Worker와 Reviewer 필드를 나눈 것은 역할마다 다른 모델을 고를 
 결함을 같은 방식으로 놓치는 상관관계를 줄이기 위해서다. 난이도와 비용 판단은
 Task 기안자의 몫이며 Bash는 추측하지 않는다. 실제 선택과 출처(Task 지정/정책
 기본값/Provider 기본값)는 Attempt·Evidence와 runtime meta에 남아 `observe` 뒤에도
-정본 요약에서 유지된다. 허용 목록은 `agy models`, `claude --help`, codex의
-`~/.codex/config.toml`·`codex --help`로 확인하며 Provider 변화는 코드가 아니라
-정책 표에 반영한다. 승인 표의 `_runtime_agent_arg_allowlist`는 그대로 닫혀 있어
-승인 인수 칸의 `--model opus`는 계속 거부된다.
+정본 요약에서 유지된다. `models PATH`는 `agy models`의 비대화형 조회 결과와
+정책 허용 목록을 대조한다. codex·claude에는 안전한 목록 조회 경로가 없으므로
+조회·추측하지 않고 수동 관리로 표시한다. Provider 변화는 코드가 아니라 정책
+표에 반영한다. 승인 표의 `_runtime_agent_arg_allowlist`는 그대로 닫혀 있어 승인
+인수 칸의 `--model opus`는 계속 거부된다.
+
+`models PATH [--refresh] [--premium PROVIDER=MODEL]... [--apply]`는 모델 정책의
+별도 관리 표면이다. 기본 실행과 `--refresh`는 diff 미리보기이며 `--apply`가 있을
+때만 쓴다. 조회 성공 시 agy의 추가·삭제·유지를 모두 계산하고 `agy_models` 바로
+위에 마지막 적용 조회 시각을 주석으로 둔다. 비정상 종료와 빈 목록은 실패로
+취급해 삭제를 계산하지 않는다. 조회 함수는 분리되어 자체 테스트에서는 스텁으로
+대체되므로 Agent CLI·네트워크를 사용하지 않는다. 실제 정책 쓰기는 대상 모델 키와
+조회 주석만 원자적으로 바꾸므로 승인 정책·다른 Provider 값·사용자 주석은 보존된다.
+
+`<provider>_premium_models`는 공백 구분 프리미엄 선언이다. 한 호출에 같은
+Provider를 여러 번 지정하면 누적되고, 빈 값은 비우며, 언급하지 않은 Provider는
+보존한다. 이 선언은 `<provider>_models`를 넓히지 않고 정확히 같은 전체 모델 ID가
+있을 때만 적용 상태다. 그 외에는 `미적용`으로 명시한다. 이 단계는 선언·표시만
+하며 런타임 승인 게이트는 넣지 않는다.
 
 `agent-policy.yaml` 정본은 `templates/`에 있고 `sync-templates`는 기존 정책 값을
-템플릿에 재주입한 뒤 새 모델 키를 전파하므로, 사용자가 조정한 승인·모델 값은
-초기값으로 되돌리지 않는다. 신규 프로젝트의 모든 모델 목록과 기본값은 비어
-있어 Provider CLI 기본값으로 시작한다.
+템플릿에 재주입한 뒤 새 모델·프리미엄 키를 전파하므로, 사용자가 조정한 승인·모델
+값은 초기값으로 되돌리지 않는다. 신규 프로젝트의 모든 모델 목록·기본값·
+프리미엄 선언은 비어 있어 Provider CLI 기본값으로 시작한다.
 
 ## 8. 실패와 쿼터
 
