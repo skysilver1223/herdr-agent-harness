@@ -297,9 +297,11 @@ herdr-harness doctor
 - Claude Code
 - Codex CLI
 - Antigravity CLI
+- jq (선택 — 없으면 `models --refresh`의 codex 모델 조회가 안 됩니다)
 - Herdr Integration 상태
 
-Herdr와 Git은 필수입니다. 설치하지 않은 선택 Provider는 `MISSING`으로 표시될 수 있습니다.
+Herdr와 Git은 필수입니다. 설치하지 않은 선택 Provider와 jq는 각각 `MISSING`·
+`OPTION`으로 표시될 수 있습니다.
 
 ### 10. 쿼터 없는 자체 테스트
 
@@ -332,7 +334,8 @@ PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무
 PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)
 PASS: 모델 등급 (Task·역할 기본 등급 해석/우선순위 5단계/목록순서 무관/미정의·허용목록불일치·오타 거부·키 명시/프리미엄 합집합/격리 유지/codex 고정키·claude --effort·agy 흡수 속도/-c 승인통로 차단/models 표시)
 PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)
-PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존)
+PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존·--refresh 미지정 시 조회 미호출·Provider별 조회 시각 주석 개별 기록)
+PASS: Provider 목록 조회 (codex JSON visibility·supported_in_api·ID 유효성 필터/claude 별칭 참고 표시 전용·허용 목록 미반영·잔존 값 노출/agy·codex 독립 실패 보존/Agent 호출 없음)
 PASS: 모델 격리 (codex·claude 식별/agy·무관 실패·미지정 비격리/정책 보존/재선택 경고·수동 해제/강등 기록·누출 차단/조회 사전 경고)
 PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)
 PASS: Agent 호출 없음
@@ -346,6 +349,7 @@ PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approv
 PASS: sync-templates (dry-run/apply·멱등, agent-policy 모델·프리미엄 키 전파·사용자 값 보존, AGENTS.md/STATE.md 비침범, .gitignore 보충)
 PASS: README 기대 출력 ↔ 실제 test 출력 정합
 PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)
+PASS: 의존성 선언 (doctor jq 선택 의존성·codex 모델 조회 영향 안내, install.sh jq 부재 감지·설치 안내·특권 동작 없음)
 ```
 
 이 테스트는 실제 Claude, Codex, AGY를 호출하지 않으므로 Agent 쿼터를 사용하지 않습니다.
@@ -712,10 +716,13 @@ agent_policy:
   `모델`, `승인: yes`가 현재 dispatch와 모두 일치할 때만 사용합니다. 없거나
   불일치하면 경고 후 위 규칙의 비프리미엄 모델로 강등합니다. 승인은 Attempt가
   아니라 Task+역할+모델 범위라 같은 Task의 재시도에서는 유지됩니다.
-- 목록 조회와 갱신은 `herdr-harness models PATH`를 사용합니다. `agy`는 실제
-  `agy models` 결과와 정책의 추가·삭제·유지를 보여 주지만, 비대화형 조회 경로가
-  없는 `codex`·`claude`는 `조회 경로 없음 — 수동 관리`로 표시하고 값을 추측하지
-  않습니다.
+- 목록 조회와 갱신은 `herdr-harness models PATH --refresh`를 사용합니다.
+  `--refresh` 없이는 Provider CLI를 부르지 않습니다. `agy`(`agy models`)와
+  `codex`(`codex debug models`, jq 필요)는 실제 목록과 정책의 추가·삭제·유지를
+  Provider별로 각각 보여 줍니다. `claude`(`claude -p "/model"`)는 별칭을 참고
+  출력으로만 보여 주고 `claude_models`에는 쓰지 않습니다 — 별칭이 가리키는
+  실제 모델이 계정·설정마다 달라 값을 추측하지 않고 계속 사람이 전체 모델
+  ID로 관리합니다.
 - 승인용 `*_auto`/`*_bypass` 표는 모델 통로가 아닙니다. 그 표의 `--model opus`는
   계속 거부되며, `-c ...`도 계속 거부됩니다. codex 속도는 별도 고정 경로가 오직
   `-c model_reasoning_effort="low|medium|high"`만 조립합니다. claude는
@@ -725,11 +732,12 @@ agent_policy:
   거부 사유를 기록합니다. 승인 파일의 모델 값은 비교에만 쓰고 argv에는 허용
   목록에서 꺼낸 token만 전달합니다.
 
-`dispatch`는 조회 경로가 있는 Provider(현재 `agy`)에 한해 Pane을 만들기 전에
-실제 목록과 `*_models` 정책 전체를 비교합니다. 차이가 있으면 `models --refresh`로
-확인하라는 경고를 내지만 정책 파일은 고치지 않습니다. 조회 실패는 모델 삭제로
-해석하지 않습니다. `codex`·`claude`는 안전한 목록 조회 경로가 없어 이 사전 비교를
-할 수 없습니다.
+`dispatch`의 Pane 생성 전 사전 비교는 아직 `agy`에만 연결되어 있습니다. 차이가
+있으면 `models --refresh`로 확인하라는 경고를 내지만 정책 파일은 고치지
+않습니다. 조회 실패는 모델 삭제로 해석하지 않습니다. `codex`도 `models`
+명령으로는 조회할 수 있지만(`codex debug models`), 이 dispatch 사전 비교에는
+아직 연결되지 않았습니다. `claude`는 별칭만 참고 조회되므로 이 사전 비교
+대상이 아닙니다.
 
 Harness가 `--model`로 명시 전달한 모델을 Provider가 거부한 경우에는 출력에서
 실측으로 확인한 좁은 신호만 찾습니다. 현재 `codex`의 400

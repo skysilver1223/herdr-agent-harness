@@ -140,6 +140,14 @@ if [[ "$WITH_HERDR_SKILL" -eq 1 ]]; then
   fi
 fi
 
+if ! command -v jq >/dev/null 2>&1; then
+  printf '\n선택 의존성 jq가 없습니다 — codex 모델 조회(models --refresh)가 안 됩니다.\n'
+  printf '설치는 사용자가 직접 합니다(이 설치기는 sudo·패키지 관리자를 호출하지 않습니다).\n'
+  printf '  sudo apt install -y jq   # Debian/Ubuntu\n'
+  printf '  sudo dnf install -y jq   # Fedora\n'
+  printf '  brew install jq          # macOS\n'
+fi
+
 printf '\n확인:\n'
 printf '  herdr-harness doctor\n'
 printf '  herdr-harness test\n'

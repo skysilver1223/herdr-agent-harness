@@ -217,10 +217,14 @@ Worker와 Reviewer 필드를 나눈 것은 역할마다 다른 모델을 고를 
 결함을 같은 방식으로 놓치는 상관관계를 줄이기 위해서다. 난이도와 비용 판단은
 Task 기안자의 몫이며 Bash는 추측하지 않는다. 실제 선택과 출처(Task 지정/정책
 기본값/Provider 기본값)는 Attempt·Evidence와 runtime meta에 남아 `observe` 뒤에도
-정본 요약에서 유지된다. `models PATH`는 `agy models`의 비대화형 조회 결과와
-정책 허용 목록을 대조한다. codex·claude에는 안전한 목록 조회 경로가 없으므로
-조회·추측하지 않고 수동 관리로 표시한다. Provider 변화는 코드가 아니라 정책
-표에 반영한다. 승인 표의 `_runtime_agent_arg_allowlist`는 그대로 닫혀 있어 승인
+정본 요약에서 유지된다. `models PATH --refresh`는 조회 가능한 각 Provider의
+비대화형 조회 결과와 정책 허용 목록을 대조한다. `agy`(`agy models`)와
+`codex`(`codex debug models`, jq로 파싱)는 실제 목록을 정책에 반영할 수 있고,
+`claude`(`claude -p "/model"`)는 별칭을 참고 출력으로만 보여 주고
+`claude_models`에는 쓰지 않는다 — 별칭이 가리키는 실제 모델이 계정·설정마다
+달라 추측하지 않고 계속 사람이 전체 모델 ID로 관리한다. Provider 변화는
+코드가 아니라 정책 표에 반영한다. 승인 표의 `_runtime_agent_arg_allowlist`는
+그대로 닫혀 있어 승인
 인수 칸의 `--model opus`는 계속 거부된다.
 
 속도도 역할별 `worker_effort`/`reviewer_effort` → 정책의
@@ -234,12 +238,20 @@ agy는 속도가 등급별 모델 ID에 포함되므로 별도 effort 인수를 
 Attempt·Evidence·runtime meta에 남는다.
 
 `models PATH [--refresh] [--premium PROVIDER=MODEL]... [--apply]`는 모델 정책의
-별도 관리 표면이다. 기본 실행과 `--refresh`는 diff 미리보기이며 `--apply`가 있을
-때만 쓴다. 조회 성공 시 agy의 추가·삭제·유지를 모두 계산하고 `agy_models` 바로
-위에 마지막 적용 조회 시각을 주석으로 둔다. 비정상 종료와 빈 목록은 실패로
-취급해 삭제를 계산하지 않는다. 조회 함수는 분리되어 자체 테스트에서는 스텁으로
-대체되므로 Agent CLI·네트워크를 사용하지 않는다. 실제 정책 쓰기는 대상 모델 키와
-조회 주석만 원자적으로 바꾸므로 승인 정책·다른 Provider 값·사용자 주석은 보존된다.
+별도 관리 표면이다. `--refresh`가 없으면 Provider CLI를 전혀 부르지 않는다 —
+그렇지 않으면 `--premium`만 주거나 인수 없이 부른 호출에서도 매번 조회가 돌아
+"조회가 --refresh와 무관하게 실행된다"는 오인을 낳는다(task-013 제보). 기본
+실행과 `--refresh`는 diff 미리보기이며 `--apply`가 있을 때만 쓴다. 조회 성공
+시 agy·codex 각각의 추가·삭제·유지를 계산하고 각자의 `<provider>_models` 바로
+위에 그 Provider 자신의 마지막 적용 조회 시각을 주석으로 둔다 — 조회 가능한
+Provider가 둘 이상이어도 한쪽이 멱등이면 그쪽 주석은 그대로 두고 바뀐 쪽만
+갱신한다. claude는 별칭을 참고 출력으로만 보여 주며 `claude_models`는 쓰지
+않는다(정책이 넓어지지도 좁아지지도 않는다). 비정상 종료·빈 목록·jq 부재(codex)는
+실패로 취급해 그 Provider의 삭제를 계산하지 않는다 — Provider마다 독립적으로
+판단하므로 한쪽 실패가 다른 쪽 갱신을 막지 않는다. 조회 함수는 분리되어
+자체 테스트에서는 스텁으로 대체되므로 Agent CLI·네트워크를 사용하지 않는다.
+실제 정책 쓰기는 대상 모델 키와 조회 주석만 원자적으로 바꾸므로 승인 정책·
+다른 Provider 값·사용자 주석은 보존된다.
 
 `<provider>_premium_models`는 공백 구분 프리미엄 선언이다. 한 호출에 같은
 Provider를 여러 번 지정하면 누적되고, 빈 값은 비우며, 언급하지 않은 Provider는
@@ -248,11 +260,12 @@ Provider를 여러 번 지정하면 누적되고, 빈 값은 비우며, 언급�
 상태를 fail-open하지 않고 거부한다. `models` 명령은 선언·표시를 담당하고 실제
 승인 집행과 누출 차단은 `_runtime_select_model`이 담당한다.
 
-dispatch 직전의 모델 사전 검증도 조회 능력에 따라 제한한다. 조회 패턴이 정의된
-Provider(현재 `agy`)는 task-008의 `agy models` 파서로 실제 목록과 정책 목록
-전체를 비교하고 차이를 경고한다. 조회 실패는 "모델 없음"으로 바꾸지 않으며,
-이 경로는 정책 파일을 쓰지 않는다. `codex`·`claude`는 비대화형 조회 경로가 없어
-사전 검증을 추측으로 대체하지 않는다.
+dispatch 직전의 모델 사전 검증은 아직 `agy`에만 연결되어 있다(task-008의
+`agy models` 파서로 실제 목록과 정책 목록 전체를 비교하고 차이를 경고한다).
+조회 실패는 "모델 없음"으로 바꾸지 않으며, 이 경로는 정책 파일을 쓰지 않는다.
+`codex`는 `models` 명령으로는 조회 경로가 있지만(task-013) 이 dispatch 사전
+검증에는 아직 연결되지 않았다. `claude`는 별칭만 참고 조회되므로 애초에 이
+사전 비교의 대상이 아니다.
 
 사전 조회가 불가능한 경우의 두 번째 방어선은 Agent 출력 스캔이다. 이 판정은
 `_runtime_normalize_state`에 섞지 않고 `_runtime_scan_model_failure`가 맡는다.

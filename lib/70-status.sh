@@ -142,6 +142,16 @@ cmd_doctor() {
     fi
   done
 
+  # jq는 이미 lib/50-runtime.sh·lib/70-status.sh 자기 자신·lib/52-models.sh가
+  # 쓰는 선택 의존성이다. 없어도 doctor는 실패시키지 않되, 없을 때 안 되는
+  # 동작(codex 모델 조회)을 구체적으로 알린다 — 조용히 빈 목록만 나오는 것이
+  # 가장 나쁜 결과다.
+  if command -v jq >/dev/null 2>&1; then
+    printf '[OK]      %-8s %s\n' jq "$(command -v jq)"
+  else
+    printf '[OPTION]  %-8s (없으면 codex 모델 조회(models --refresh)가 안 됨)\n' jq
+  fi
+
   # 원격 실행 모드용 도구는 옵션이다 — 없다고 doctor를 실패시키지 않는다.
   # 프로젝트별 연결 진단은 `herdr-harness remote [PATH] doctor`가 한다.
   for command_name in ssh sshfs sshpass; do

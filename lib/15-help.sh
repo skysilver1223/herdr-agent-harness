@@ -132,15 +132,20 @@ EOF
   Provider별 현재 <provider>_models 허용 목록, light|standard|premium 등급의
   모델 해석 결과, 역할 기본 등급·속도, 프리미엄 선언과 적용 여부를 표시한다.
   미설정과 허용 목록 밖 매핑은 각각 (미설정), (해석 불가)로 드러낸다.
-  agy는 \`agy models\`의 실제 목록과 정책 diff를 함께 보여 주며,
-  codex·claude는 비대화형 목록 조회 경로가 없어 추측하지 않고 수동 관리로
-  표시한다. 이 명령은 Agent를 띄우지 않는다.
+  agy(\`agy models\`)와 codex(\`codex debug models\`, jq 필요)는 실제 목록과
+  정책 diff를 함께 보여 준다. claude(\`claude -p "/model"\`)는 별칭만 참고로
+  보여줄 뿐 claude_models 허용 목록에는 쓰지 않는다 — 별칭이 가리키는 실제
+  모델이 계정·설정마다 달라 어느 모델이 돌았는지 복원할 수 없기 때문이다.
+  claude_models는 계속 사람이 전체 모델 ID로 관리한다. 이 명령은 Agent를
+  띄우지 않는다.
 
 쓰기 규약:
-  기본은 sync-templates와 같은 미리보기다. --refresh는 조회된 agy 목록을
+  기본은 sync-templates와 같은 미리보기이며 --refresh 없이는 Provider CLI를
+  전혀 부르지 않는다. --refresh는 조회 가능한 각 Provider(agy·codex) 목록을
   추가·삭제·유지로 나누어 보여 주고, --apply를 함께 줬을 때만 허용 목록과
-  마지막 조회 시각 주석을 정책 파일에 쓴다. 조회 실패나 빈 결과는 삭제로
-  계산하지 않고 기존 목록을 보존한다.
+  각 Provider 자신의 마지막 조회 시각 주석을 정책 파일에 쓴다. 조회 실패나
+  빈 결과, jq 부재는 삭제로 계산하지 않고 그 Provider의 기존 목록만 보존한다
+  (다른 Provider는 각자 독립적으로 갱신된다).
 
   --premium PROVIDER=MODEL은 그 호출에서 언급한 Provider의 프리미엄 집합을
   선언적으로 대체한다. 같은 Provider를 여러 번 쓰면 누적하고 PROVIDER=는
@@ -287,9 +292,10 @@ EOF
   않는다. 선택 모델·출처·승인 또는 거부 근거는 Attempt·Evidence에 남는다.
   프리미엄 목록이 비어 있으면 이 게이트와 명시 고정은 발동하지 않는다.
 
-  허용 모델은 \`$SCRIPT_NAME models PATH\`로 확인한다. agy는 실제 목록을
-  조회하고, 조회 경로가 없는 claude·codex는 수동 관리로 안내한다. 모델명은
-  코드가 아니라 agent-policy.yaml의 목록에서 관리한다.
+  허용 모델은 \`$SCRIPT_NAME models PATH\`로 확인한다. agy·codex는 실제
+  목록을 조회하고, claude는 별칭 참고 표시만 하며 claude_models는 계속
+  사람이 관리한다. 모델명은 코드가 아니라 agent-policy.yaml의 목록에서
+  관리한다.
 
 역할(ROLE): worker | reviewer
 

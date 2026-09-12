@@ -3,10 +3,13 @@
 # ---------------------------------------------------------------------------
 # 모델 정책 조회·갱신
 #
-# Provider 목록 조회와 정책 파일 편집을 분리한다. 특히 _models_query_agy는
+# Provider 목록 조회와 정책 파일 편집을 분리한다. _models_query_* 3종은
 # self-test가 함수 스텁으로 바꿀 수 있어, 테스트 중 Agent CLI·네트워크를 전혀
-# 사용하지 않는다. codex·claude는 비대화형 목록 조회 경로가 없으므로 호출하지
-# 않고 수동 관리 안내만 출력한다.
+# 사용하지 않는다. 조회는 --refresh일 때만 호출한다. agy·codex의 조회 결과는
+# _runtime_model_id_valid를 통과한 값만 *_models 허용 목록에 쓴다. claude의
+# 조회 결과(별칭)는 참고 출력 전용이며 claude_models에는 쓰지 않는다 — 별칭이
+# 가리키는 실제 모델이 계정·설정에 따라 달라 Attempt에서 어느 모델이 돌았는지
+# 복원할 수 없기 때문이다(task-013 결정).
 # ---------------------------------------------------------------------------
 
 _models_query_agy() {
@@ -14,6 +17,19 @@ _models_query_agy() {
   # 나가지 않게 한다. models 자체 검사는 이 함수를 로컬 스텁으로 덮어쓴다.
   [[ "${HH_HARNESS_SELFTEST:-0}" != 1 ]] || return 125
   command agy models
+}
+
+_models_query_codex() {
+  [[ "${HH_HARNESS_SELFTEST:-0}" != 1 ]] || return 125
+  # jq는 선택 의존성이다(lib/50-runtime.sh·lib/70-status.sh 선례). 없으면
+  # codex CLI조차 부르지 않고 127로 조회 실패와 같은 갈래로 떨어뜨린다.
+  command -v jq >/dev/null 2>&1 || return 127
+  command codex debug models
+}
+
+_models_query_claude() {
+  [[ "${HH_HARNESS_SELFTEST:-0}" != 1 ]] || return 125
+  command claude -p "/model"
 }
 
 _models_now_utc() {
@@ -120,6 +136,44 @@ _models_parse_agy_output() {
   done | LC_ALL=C sort
 }
 
+# codex debug models는 순수 JSON 카탈로그를 낸다(실측: {"models":[{"slug":...,
+# "visibility":...,"supported_in_api":...}, ...]}). visibility가 "list"가
+# 아니거나 supported_in_api가 false인 항목(예: gpt-reserve, codex-auto-review)은
+# 계정에 보이지 않거나 API로 못 쓰는 모델이라 제외한다.
+_models_parse_codex_output() {
+  local slug
+  jq -r '
+    .models[]? |
+    select(.visibility == "list" and .supported_in_api == true) |
+    .slug // empty
+  ' 2>/dev/null |
+  while IFS= read -r slug; do
+    _runtime_model_id_valid "$slug" || continue
+    printf '%s\n' "$slug"
+  done | LC_ALL=C sort
+}
+
+# claude -p "/model"은 "Available: a, b, c, or a full model ID." 줄에 별칭
+# 목록을 낸다. 참고 출력 전용이라 _runtime_model_id_valid로 거르지 않는다 —
+# `sonnet[1m]` 같은 별칭은 대괄호 때문에 그 검사를 통과 못 하지만, 정책에
+# 쓰지 않으므로 걸러서 정보를 숨길 이유가 없다.
+_models_parse_claude_output() {
+  local line rest token
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line//$'\r'/}"
+    case "$line" in
+      *Available:*)
+        rest="${line#*Available: }"
+        rest="${rest%%, or a full model ID.*}"
+        rest="${rest//,/ }"
+        for token in $rest; do
+          printf '%s\n' "$token"
+        done
+        ;;
+    esac
+  done
+}
+
 _models_last_refresh() {
   local policy="$1" provider="$2"
   awk -v key="${provider}_models:" -v suffix="(${provider} models)" '
@@ -185,16 +239,18 @@ _models_rewrite_refresh_comment() {
 
 # MODELS_WRITE_VALUES/KEYS와 선택적 MODELS_WRITE_REFRESH_*를 한 임시 파일에
 # 모두 반영한 뒤 한 번만 교체한다. 중간 실패가 정책 파일의 일부만 바꾸지 않는다.
+# MODELS_WRITE_REFRESH_PROVIDER는 배열이다 — 조회 가능한 Provider가 둘 이상
+# 이어도(agy·codex) 각자의 _models 키 위에 각자의 조회 시각 주석을 남긴다.
 _models_write_policy() {
-  local policy="$1" temporary key
+  local policy="$1" temporary key provider
   temporary="$(mktemp "$(dirname "$policy")/.agent-policy.models.XXXXXX")"
   cp -p -- "$policy" "$temporary"
   for key in "${MODELS_WRITE_KEYS[@]}"; do
     _models_rewrite_key "$temporary" "$key" "${MODELS_WRITE_VALUES[$key]}"
   done
-  if [[ -n "${MODELS_WRITE_REFRESH_PROVIDER:-}" ]]; then
-    _models_rewrite_refresh_comment "$temporary" "$MODELS_WRITE_REFRESH_PROVIDER" "$MODELS_WRITE_REFRESH_TIME"
-  fi
+  for provider in "${MODELS_WRITE_REFRESH_PROVIDER[@]}"; do
+    _models_rewrite_refresh_comment "$temporary" "$provider" "${MODELS_WRITE_REFRESH_TIME[$provider]}"
+  done
   if cmp -s "$temporary" "$policy"; then
     rm -f -- "$temporary"
     return 1
@@ -284,12 +340,13 @@ _models_print_diff() {
 
 cmd_models() {
   local root_arg="" refresh=0 apply=0 premium_spec provider model previous
-  local root policy query_output="" query_time="" query_ok=0 query_status=0
-  local current_refresh
-  local -a providers=(claude codex agy) actual_agy=() parsed=()
+  local root policy current_refresh query_output=""
+  local -a providers=(claude codex agy) list_providers=(agy codex)
+  local -a actual_agy=() actual_codex=() actual_claude=() parsed=()
   local -A premium_seen=() premium_requested=()
   local -A current_models=() current_premium=() invalid_models=() invalid_premium=()
   local -A current_tier=() current_default=()
+  local -A query_ok=() query_status=() query_time=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -367,18 +424,44 @@ cmd_models() {
     fi
   done
 
-  # 상태 표시만 해도 조회 가능한 실제 목록을 함께 보여 준다. 실패 출력 원문은
-  # 인증 정보가 섞일 수 있어 버리고, 정책 보존 경고만 낸다.
-  if query_output="$(_models_query_agy 2>/dev/null)"; then
-    mapfile -t actual_agy < <(_models_parse_agy_output <<<"$query_output")
-    if (( ${#actual_agy[@]} > 0 )); then
-      query_ok=1
-      query_time="$(_models_now_utc)"
+  # 실제 조회는 --refresh일 때만 한다. 그렇지 않으면 --premium만 주거나
+  # 인수 없이 부른 호출에서도 매번 agy·codex·claude CLI를 때려 조회를 오인하게
+  # 만든다(task-013 제보). 실패 출력 원문은 인증 정보가 섞일 수 있어 버리고,
+  # 정책 보존 경고만 낸다.
+  if [[ "$refresh" -eq 1 ]]; then
+    for provider in "${list_providers[@]}"; do
+      local -n actual_ref="actual_$provider"
+      actual_ref=()
+      query_output=""
+      if query_output="$("_models_query_$provider" 2>/dev/null)"; then
+        mapfile -t actual_ref < <("_models_parse_${provider}_output" <<<"$query_output")
+        if (( ${#actual_ref[@]} > 0 )); then
+          query_ok[$provider]=1
+          query_time[$provider]="$(_models_now_utc)"
+        else
+          query_ok[$provider]=0
+          query_status[$provider]=1
+        fi
+      else
+        query_status[$provider]=$?
+        query_ok[$provider]=0
+      fi
+    done
+
+    query_output=""
+    if query_output="$(_models_query_claude 2>/dev/null)"; then
+      mapfile -t actual_claude < <(_models_parse_claude_output <<<"$query_output")
+      if (( ${#actual_claude[@]} > 0 )); then
+        query_ok[claude]=1
+        query_time[claude]="$(_models_now_utc)"
+      else
+        query_ok[claude]=0
+        query_status[claude]=1
+      fi
     else
-      query_status=1
+      query_status[claude]=$?
+      query_ok[claude]=0
     fi
-  else
-    query_status=$?
   fi
 
   printf '\n역할 기본 선언\n'
@@ -407,15 +490,16 @@ cmd_models() {
     fi
   fi
 
-  local shown_models shown_premium actual_value last_refresh item
+  local shown_models shown_premium last_refresh item
   local -a allowed_items=() old_premium_items=() new_premium_items=()
   for provider in "${providers[@]}"; do
+    local -n actual_ref="actual_$provider"
     printf '\n%s' "$provider"
-    if [[ "$provider" == agy ]]; then
-      last_refresh="$(_models_last_refresh "$policy" agy)"
-      printf '   마지막 조회: %s\n' "${last_refresh:-기록 없음}"
+    if [[ "$provider" == claude ]]; then
+      printf '   참고 조회 전용(별칭) — claude_models는 계속 사람이 관리합니다\n'
     else
-      printf '   조회 경로 없음 — 수동 관리\n'
+      last_refresh="$(_models_last_refresh "$policy" "$provider")"
+      printf '   마지막 조회: %s\n' "${last_refresh:-기록 없음}"
     fi
 
     if [[ "${invalid_models[$provider]}" -eq 1 ]]; then
@@ -436,8 +520,8 @@ cmd_models() {
 
     shown_models="${current_models[$provider]}"
     shown_premium="${current_premium[$provider]}"
-    if [[ "$provider" == agy && "$refresh" -eq 1 && "$query_ok" -eq 1 ]]; then
-      shown_models="$(_models_join "${actual_agy[@]}")"
+    if [[ "$provider" != claude && "$refresh" -eq 1 && "${query_ok[$provider]:-0}" -eq 1 ]]; then
+      shown_models="$(_models_join "${actual_ref[@]}")"
     fi
     if [[ -n "${premium_seen[$provider]+x}" ]]; then
       shown_premium="${premium_requested[$provider]}"
@@ -460,46 +544,68 @@ cmd_models() {
       fi
     fi
 
-    if [[ "$provider" == agy ]]; then
-      if [[ "$query_ok" -eq 1 ]]; then
-        printf '  이번 조회: %s (agy models)\n' "$query_time"
-        _models_print_values "조회된 적용 가능 모델" "$(_models_join "${actual_agy[@]}")"
-        _models_print_diff "${current_models[agy]}" actual_agy "$shown_premium"
-      else
-        printf '  경고: agy models 조회 실패(상태 %s 또는 빈 목록) — 삭제를 계산하지 않고 기존 정책을 보존합니다.\n' "$query_status"
+    if [[ "$provider" == claude ]]; then
+      if [[ "$refresh" -eq 1 ]]; then
+        if [[ "${query_ok[claude]:-0}" -eq 1 ]]; then
+          printf '  참고 조회: %s (claude /model, 허용 목록에는 반영하지 않음)\n' "${query_time[claude]}"
+          _models_print_values "참고: 조회된 별칭" "$(_models_join "${actual_claude[@]}")"
+          if [[ -n "${current_models[claude]}" ]]; then
+            read -r -a allowed_items <<<"${current_models[claude]}"
+            for item in "${allowed_items[@]}"; do
+              _models_list_contains "$item" "${actual_claude[@]}" ||
+                printf '  참고: claude_models의 %s가 이번 별칭 목록에 없습니다(참고용 비교 — 허용 목록은 바뀌지 않음)\n' "$item"
+            done
+          fi
+        else
+          printf '  참고: claude 별칭 조회 실패(상태 %s) — claude_models는 항상 사람이 관리하므로 영향 없습니다.\n' "${query_status[claude]:-}"
+        fi
       fi
     else
-      printf '  확인 방법: Provider 문서와 CLI 도움말에서 전체 모델 ID를 확인한 뒤 정책을 수동 관리하세요.\n'
+      if [[ "$refresh" -eq 1 ]]; then
+        if [[ "${query_ok[$provider]:-0}" -eq 1 ]]; then
+          printf '  이번 조회: %s (%s models)\n' "${query_time[$provider]}" "$provider"
+          _models_print_values "조회된 적용 가능 모델" "$(_models_join "${actual_ref[@]}")"
+          _models_print_diff "${current_models[$provider]}" "actual_$provider" "$shown_premium"
+        elif [[ "$provider" == codex && "${query_status[codex]:-}" -eq 127 ]]; then
+          printf '  경고: jq가 없어 codex 모델을 조회하지 못했습니다 — 삭제를 계산하지 않고 기존 정책을 보존합니다. jq 설치 후 --refresh를 다시 실행하세요.\n'
+        else
+          printf '  경고: %s models 조회 실패(상태 %s 또는 빈 목록) — 삭제를 계산하지 않고 기존 정책을 보존합니다.\n' "$provider" "${query_status[$provider]:-}"
+        fi
+      fi
     fi
     _models_print_premium_status "$shown_premium" "$shown_models"
   done
 
   MODELS_WRITE_KEYS=()
   declare -gA MODELS_WRITE_VALUES=()
-  MODELS_WRITE_REFRESH_PROVIDER=""
-  MODELS_WRITE_REFRESH_TIME=""
+  MODELS_WRITE_REFRESH_PROVIDER=()
+  declare -gA MODELS_WRITE_REFRESH_TIME=()
   local proposed_changes=0 desired_models existing_value
 
   if [[ "$refresh" -eq 1 ]]; then
-    if [[ "$query_ok" -eq 1 ]]; then
-      desired_models="$(_models_join "${actual_agy[@]}")"
-      if [[ "${invalid_models[agy]}" -eq 1 || "${current_models[agy]}" != "$desired_models" ]] ||
-         ! _models_policy_key_exists "$policy" agy_models; then
-        MODELS_WRITE_KEYS+=(agy_models)
-        MODELS_WRITE_VALUES[agy_models]="$desired_models"
-        proposed_changes=$((proposed_changes + 1))
+    for provider in "${list_providers[@]}"; do
+      local -n actual_ref="actual_$provider"
+      if [[ "${query_ok[$provider]:-0}" -eq 1 ]]; then
+        desired_models="$(_models_join "${actual_ref[@]}")"
+        if [[ "${invalid_models[$provider]}" -eq 1 || "${current_models[$provider]}" != "$desired_models" ]] ||
+           ! _models_policy_key_exists "$policy" "${provider}_models"; then
+          MODELS_WRITE_KEYS+=("${provider}_models")
+          MODELS_WRITE_VALUES["${provider}_models"]="$desired_models"
+          proposed_changes=$((proposed_changes + 1))
+        fi
+        current_refresh="$(_models_last_refresh "$policy" "$provider")"
+        # 동일 목록의 연속 적용은 byte-for-byte 멱등이다. 조회 주석은 목록이 실제로
+        # 바뀌거나 아직 없을 때만 갱신한다. Provider가 둘 이상이어도 각자 독립
+        # 판단이다 — codex가 멱등이어도 agy가 바뀌었으면 agy 주석만 갱신한다.
+        if [[ -z "$current_refresh" || "${current_models[$provider]}" != "$desired_models" || "${invalid_models[$provider]}" -eq 1 ]]; then
+          MODELS_WRITE_REFRESH_PROVIDER+=("$provider")
+          MODELS_WRITE_REFRESH_TIME[$provider]="${query_time[$provider]}"
+          proposed_changes=$((proposed_changes + 1))
+        fi
+      else
+        info "경고: $provider --refresh를 적용하지 않았습니다. 조회 실패는 모델 삭제로 바꾸지 않습니다."
       fi
-      current_refresh="$(_models_last_refresh "$policy" agy)"
-      # 동일 목록의 연속 적용은 byte-for-byte 멱등이다. 조회 주석은 목록이 실제로
-      # 바뀌거나 아직 없을 때만 갱신한다.
-      if [[ -z "$current_refresh" || "${current_models[agy]}" != "$desired_models" || "${invalid_models[agy]}" -eq 1 ]]; then
-        MODELS_WRITE_REFRESH_PROVIDER=agy
-        MODELS_WRITE_REFRESH_TIME="$query_time"
-        proposed_changes=$((proposed_changes + 1))
-      fi
-    else
-      info "경고: --refresh를 적용하지 않았습니다. 조회 실패는 모델 삭제로 바꾸지 않습니다."
-    fi
+    done
   fi
 
   for provider in "${providers[@]}"; do

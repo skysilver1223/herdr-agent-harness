@@ -27,6 +27,21 @@ printf 'agy %s\n' "$*" >>"${HH_PROVIDER_STUB_LOG:?}"
 exit 125
 PROVIDER_STUB
   chmod +x "$provider_stub_dir/agy"
+  # task-013: 조회 경로가 agy 하나였던 시절의 안전망을 codex·claude에도
+  # 똑같이 둔다 — _models_query_codex/_models_query_claude가 함수 스텁을
+  # 벗어나도 실제 CLI를 시작하지 않는다.
+  cat >"$provider_stub_dir/codex" <<'PROVIDER_STUB'
+#!/usr/bin/env bash
+printf 'codex %s\n' "$*" >>"${HH_PROVIDER_STUB_LOG:?}"
+exit 125
+PROVIDER_STUB
+  chmod +x "$provider_stub_dir/codex"
+  cat >"$provider_stub_dir/claude" <<'PROVIDER_STUB'
+#!/usr/bin/env bash
+printf 'claude %s\n' "$*" >>"${HH_PROVIDER_STUB_LOG:?}"
+exit 125
+PROVIDER_STUB
+  chmod +x "$provider_stub_dir/claude"
   export HH_PROVIDER_STUB_LOG="$provider_stub_log"
   export PATH="$provider_stub_dir:$PATH"
 
@@ -1061,6 +1076,7 @@ PREMIUM_HERDR_STUB
   # --- models: 실제 Provider 호출 없이 목록 diff·정책 갱신·보존 검증 ------
   local models_project="$test_root/models-command-project" models_policy models_out
   local models_before="$test_root/models-before.yaml" models_once="$test_root/models-once.yaml"
+  local models_query_log="$test_root/models-query-calls.log"
   cp -a "$test_project" "$models_project"
   models_policy="$models_project/.harness/policies/agent-policy.yaml"
   sed -i \
@@ -1074,18 +1090,35 @@ PREMIUM_HERDR_STUB
   sed -i '/^  approval_mode:/i\  # 사용자 정책 주석 — models가 보존해야 함' "$models_policy"
 
   _models_query_agy() {
+    printf 'agy\n' >>"$models_query_log"
     printf '%s\n' \
       'MODEL DISPLAY NAME' \
       'agy-new New model' \
       'agy-keep Kept model'
   }
+  _models_query_codex() {
+    printf 'codex\n' >>"$models_query_log"
+    printf '%s\n' '{"models":[
+      {"slug":"gpt-5.6-sol","visibility":"list","supported_in_api":true},
+      {"slug":"gpt-new-codex","visibility":"list","supported_in_api":true}
+    ]}'
+  }
+  _models_query_claude() {
+    printf 'claude\n' >>"$models_query_log"
+    printf 'Available: sonnet, opus, or a full model ID.\n'
+  }
   _models_now_utc() { printf '2026-09-11T07:00:00Z'; }
 
-  # 기본 표시, --apply만, --refresh dry-run은 모두 정책 파일을 쓰지 않는다.
+  # 기본 표시, --apply만은 정책 파일을 쓰지 않고 --refresh 없이는 Provider
+  # 조회 함수를 아예 부르지 않는다(AC-005) — --refresh 유무와 무관하게 매번
+  # agy를 때려 "refresh가 안 먹는다"는 오인을 낳던 task-013 제보의 직접 원인.
+  : >"$models_query_log"
   cp "$models_policy" "$models_before"
   models_out="$(cmd_models "$models_project")"
   cmp -s "$models_policy" "$models_before" ||
     die "models 기본 표시가 정책 파일을 변경했습니다."
+  [[ ! -s "$models_query_log" ]] ||
+    die "models 기본 호출(--refresh 없음)이 Provider 조회 함수를 불렀습니다: $(tr '\n' ' ' <"$models_query_log")"
   printf '%s' "$models_out" | grep -q 'light: 기계적 변경 — 문자열 치환, 문서 재배치, 정해진 패턴 적용' ||
     die "models 등급 기준표에 light 기준이 없습니다."
   printf '%s' "$models_out" | grep -q 'standard: 일반 구현 — 설계는 정해졌고 코드로 옮기는 작업' ||
@@ -1099,12 +1132,11 @@ PREMIUM_HERDR_STUB
   if printf '%s' "$models_out" | grep -q 'Reviewer 등급은 Worker 이상'; then
     die "models가 Reviewer 등급 상향을 규칙처럼 설명합니다."
   fi
-  printf '%s' "$models_out" | grep -q 'claude.*조회 경로 없음 — 수동 관리' ||
-    die "models가 조회 불가 Provider를 수동 관리로 안내하지 않았습니다."
-  printf '%s' "$models_out" | grep -q 'agy-new (추가)' ||
-    die "models 기본 표시에 실제 목록과 정책의 추가 diff가 없습니다."
-  printf '%s' "$models_out" | grep -q 'agy-remove (조회 결과에 없음 — 삭제)' ||
-    die "models 기본 표시에 실제 목록에서 사라진 모델의 삭제 diff가 없습니다."
+  printf '%s' "$models_out" | grep -q 'claude   참고 조회 전용(별칭) — claude_models는 계속 사람이 관리합니다' ||
+    die "models가 claude를 참고 조회 전용으로 안내하지 않았습니다."
+  if printf '%s' "$models_out" | grep -qE '이번 조회|조회된 적용 가능 모델|참고 조회:'; then
+    die "models 기본 표시(--refresh 없음)가 조회 diff를 보여줬습니다 — --refresh 게이팅이 깨졌습니다."
+  fi
   printf '%s' "$models_out" | grep -q 'fable (미적용 — 허용 목록에 정확히 일치하는 값 없음)' ||
     die "models가 약칭 프리미엄을 전체 모델 이름과 부분 일치시켰습니다."
   if printf '%s' "$models_out" | grep -q 'fable (적용)'; then
@@ -1114,20 +1146,44 @@ PREMIUM_HERDR_STUB
   cmd_models "$models_project" --apply >/dev/null
   cmp -s "$models_policy" "$models_before" ||
     die "models --apply만으로 정책 파일이 변경됐습니다."
+  [[ ! -s "$models_query_log" ]] ||
+    die "models --apply만(--refresh 없음)으로도 Provider 조회 함수를 불렀습니다."
+
   models_out="$(cmd_models "$models_project" --refresh)"
   cmp -s "$models_policy" "$models_before" ||
     die "models --refresh dry-run이 정책 파일을 변경했습니다."
+  grep -qx agy "$models_query_log" || die "models --refresh가 agy를 조회하지 않았습니다."
+  grep -qx codex "$models_query_log" || die "models --refresh가 codex를 조회하지 않았습니다."
+  grep -qx claude "$models_query_log" || die "models --refresh가 claude를 조회하지 않았습니다."
+  printf '%s' "$models_out" | grep -q 'agy-new (추가)' ||
+    die "models --refresh가 실제 목록과 정책의 추가 diff를 보여주지 않았습니다."
+  printf '%s' "$models_out" | grep -q 'agy-remove (조회 결과에 없음 — 삭제)' ||
+    die "models --refresh가 실제 목록에서 사라진 모델의 삭제 diff를 보여주지 않았습니다."
   printf '%s' "$models_out" | grep -q 'agy-keep (유지)' ||
     die "models --refresh가 유지 모델을 구분하지 않았습니다."
   printf '%s' "$models_out" | LC_ALL=C grep -q 'agy-premium-removed.*프리미엄 선언도 미적용 예정' ||
     die "models --refresh가 삭제될 프리미엄 모델을 특별 표시하지 않았습니다."
+  printf '%s' "$models_out" | grep -q '참고: 조회된 별칭: sonnet opus' ||
+    die "models --refresh가 claude 별칭을 참고 출력으로 보여주지 않았습니다."
+  printf '%s' "$models_out" | grep -q "claude_models의 claude-fable-5가 이번 별칭 목록에 없습니다" ||
+    die "models --refresh가 별칭에 없는 claude_models 값을 드러내지 않았습니다(AC-007)."
 
-  # --refresh --apply는 추가·삭제 전체와 조회 시각을 반영한다.
+  # --refresh --apply는 조회 가능한 각 Provider(agy·codex)의 추가·삭제 전체와
+  # 각자의 조회 시각 주석을 반영한다(AC-004). claude_models는 참고 전용이라
+  # 절대 쓰지 않는다(AC-006).
   cmd_models "$models_project" --refresh --apply >/dev/null
   grep -q "^  agy_models: 'agy-keep agy-new' # 사용자 모델 주석$" "$models_policy" ||
     die "models --refresh --apply가 agy_models를 조회 결과 전체로 교체하지 않았습니다."
   grep -q '^  # 마지막 조회: 2026-09-11T07:00:00Z (agy models)$' "$models_policy" ||
     die "models --refresh --apply가 agy_models 바로 위에 조회 시각을 남기지 않았습니다."
+  grep -q "^  codex_models: 'gpt-5.6-sol gpt-new-codex'$" "$models_policy" ||
+    die "models --refresh --apply가 codex_models를 조회 결과 전체로 교체하지 않았습니다."
+  grep -q '^  # 마지막 조회: 2026-09-11T07:00:00Z (codex models)$' "$models_policy" ||
+    die "models --refresh --apply가 codex_models 바로 위에 조회 시각을 남기지 않았습니다."
+  [[ "$(grep -c '^  # 마지막 조회: ' "$models_policy")" -eq 2 ]] ||
+    die "models --refresh --apply가 Provider별 조회 시각 주석을 정확히 2개 남기지 않았습니다(agy·codex 각각)."
+  grep -q "^  claude_models: 'claude-fable-5 claude-opus-4-6'$" "$models_policy" ||
+    die "models --refresh --apply가 참고 전용 claude_models를 건드렸습니다."
   grep -q '^  # 사용자 정책 주석 — models가 보존해야 함$' "$models_policy" ||
     die "models 갱신이 사용자 주석을 삭제했습니다."
   grep -q "^  approval_mode: 'auto'$" "$models_policy" ||
@@ -1150,6 +1206,25 @@ PREMIUM_HERDR_STUB
     die "agy models 빈 출력이 기존 모델 정책을 변경했습니다."
   printf '%s' "$models_out" | grep -q '삭제를 계산하지 않고 기존 정책을 보존' ||
     die "agy models 빈 출력 시 보존 경고가 없습니다."
+
+  # codex가 jq 부재(127)로 실패해도 agy는 같은 호출에서 독립적으로 갱신된다
+  # (Provider별 실패 격리 — AC-003).
+  _models_query_agy() { printf '%s\n' 'agy-keep Kept' 'agy-new-2 New'; }
+  _models_query_codex() { return 127; }
+  models_out="$(cmd_models "$models_project" --refresh --apply)"
+  grep -q "^  agy_models: 'agy-keep agy-new-2'" "$models_policy" ||
+    die "codex 조회 실패가 같은 호출의 agy 갱신까지 막았습니다(Provider 독립성 위반)."
+  grep -q "^  codex_models: 'gpt-5.6-sol gpt-new-codex'$" "$models_policy" ||
+    die "codex의 jq 부재(127) 실패가 codex_models 기존 값을 건드렸습니다."
+  printf '%s' "$models_out" | grep -q 'jq가 없어 codex 모델을 조회하지 못했습니다' ||
+    die "jq 부재로 인한 codex 조회 실패에 jq 관련 안내가 없습니다."
+  _models_query_codex() {
+    printf 'codex\n' >>"$models_query_log"
+    printf '%s\n' '{"models":[
+      {"slug":"gpt-5.6-sol","visibility":"list","supported_in_api":true},
+      {"slug":"gpt-new-codex","visibility":"list","supported_in_api":true}
+    ]}'
+  }
 
   # --premium은 Provider별 set 의미이며, 같은 Provider의 반복은 누적하고 다른
   # Provider는 보존한다. 빈 값은 그 Provider의 집합을 비운다.
@@ -1199,6 +1274,124 @@ PREMIUM_HERDR_STUB
   models_out="$(bash "$SELF_PATH" help models)"
   printf '%s' "$models_out" | grep -q '`agy models`' ||
     die "help models에 agy 조회 경로 설명이 없습니다."
+  printf '%s' "$models_out" | grep -q '`codex debug models`' ||
+    die "help models에 codex 조회 경로 설명이 없습니다(AC-010)."
+  printf '%s' "$models_out" | grep -q 'claude_models는 계속 사람이' ||
+    die "help models가 claude_models 수동 관리 원칙을 설명하지 않습니다(AC-010)."
+
+  # --- Provider 목록 조회: codex JSON 필터링·claude 별칭 참고·Provider별
+  #     실패 격리 ------------------------------------------------------------
+  #     실측 스키마(2026-09-12): codex debug models →
+  #     {"models":[{"slug":...,"visibility":...,"supported_in_api":...}, ...]}.
+  #     jq가 있을 때만 실 파서로 필터 로직을 검증한다(PyYAML과 같은 선택
+  #     의존성 skip 관례) — 없어도 self-test 전체는 계속 통과해야 한다.
+  if command -v jq >/dev/null 2>&1; then
+    local codex_fixture codex_parsed
+    codex_fixture='{"models":[
+      {"slug":"gpt-6-astra","visibility":"list","supported_in_api":true},
+      {"slug":"gpt-reserve","visibility":"hide","supported_in_api":true},
+      {"slug":"gpt-noapi","visibility":"list","supported_in_api":false},
+      {"slug":"bad slug!","visibility":"list","supported_in_api":true}
+    ]}'
+    codex_parsed="$(_models_parse_codex_output <<<"$codex_fixture")"
+    [[ "$codex_parsed" == "gpt-6-astra" ]] ||
+      die "_models_parse_codex_output이 visibility·supported_in_api·ID 유효성 필터를 지키지 않았습니다: $codex_parsed (AC-001·AC-002)"
+  else
+    info "jq가 없어 codex JSON 파서 실측 필터 검증은 건너뜁니다."
+  fi
+
+  local claude_parsed claude_expected
+  claude_parsed="$(_models_parse_claude_output <<<'Current model: `Opus 5` (effort: medium)
+Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.')"
+  claude_expected="$(printf '%s\n' sonnet opus haiku fable best 'sonnet[1m]' 'opus[1m]' 'fable[1m]' opusplan default)"
+  [[ "$claude_parsed" == "$claude_expected" ]] ||
+    die "_models_parse_claude_output이 별칭 목록을 온전히 뽑지 못했습니다: $claude_parsed"
+
+  local query_project="$test_root/provider-query-project" query_policy query_before query_out
+  cp -a "$test_project" "$query_project"
+  query_policy="$query_project/.harness/policies/agent-policy.yaml"
+  query_before="$test_root/query-before.yaml"
+  sed -i \
+    -e "s|^  claude_models:.*|  claude_models: 'sonnet claude-legacy-9'|" \
+    -e "s|^  codex_models:.*|  codex_models: 'gpt-old-a gpt-old-b'|" \
+    -e "s|^  agy_models:.*|  agy_models: 'agy-old-a agy-old-b'|" \
+    "$query_policy"
+
+  # agy는 비정상 종료로, codex는 성공+빈 출력으로 실패한다 — 서로 다른 실패
+  # 형태이며 서로 다른 Provider다. 둘 다 삭제로 계산되지 않고 서로에게도
+  # 번지지 않아야 한다(AC-003).
+  _models_query_agy() { return 1; }
+  _models_query_codex() { :; }
+  _models_query_claude() { printf 'Available: sonnet, opus, or a full model ID.\n'; }
+  _models_now_utc() { printf '2026-09-12T00:00:00Z'; }
+  cp "$query_policy" "$query_before"
+  query_out="$(cmd_models "$query_project" --refresh --apply)"
+  cmp -s "$query_policy" "$query_before" ||
+    die "agy 비정상 종료·codex 빈 출력이 같은 호출에서 정책을 바꿨습니다(AC-003)."
+  printf '%s' "$query_out" | grep -q 'agy models 조회 실패' ||
+    die "agy 조회 실패(비정상 종료) 보존 경고가 없습니다."
+  printf '%s' "$query_out" | grep -q 'codex models 조회 실패' ||
+    die "codex 성공+빈 출력이 조회 실패와 동일하게 다뤄지지 않았습니다(AC-003)."
+  printf '%s' "$query_out" | grep -q '참고: 조회된 별칭: sonnet opus' ||
+    die "claude 참고 조회가 별칭을 보여주지 않았습니다(AC-006)."
+  printf '%s' "$query_out" | grep -q 'claude_models의 claude-legacy-9가 이번 별칭 목록에 없습니다' ||
+    die "claude_models의 별칭 미제공 값을 드러내지 않았습니다(AC-007)."
+  if printf '%s' "$query_out" | grep -q 'claude_models의 sonnet가 이번 별칭 목록에 없습니다'; then
+    die "별칭에 실제로 있는 claude_models 값을 잘못 미제공으로 표시했습니다(AC-007 오탐)."
+  fi
+  grep -q "^  claude_models: 'sonnet claude-legacy-9'$" "$query_policy" ||
+    die "claude_models가 참고 조회만으로 바뀌었습니다(AC-006)."
+  if grep -q '(claude models)' "$query_policy"; then
+    die "claude에 정책 조회 시각 주석이 남았습니다 — claude는 정책을 쓰지 않아야 합니다(AC-006)."
+  fi
+
+  if [[ -s "$provider_stub_log" ]]; then
+    die "Provider 목록 조회 검사가 함수 스텁 밖에서 Provider CLI를 호출했습니다: $(tr '\n' ' ' <"$provider_stub_log")"
+  fi
+
+  # --- 의존성 선언: jq는 doctor 선택 의존성, install.sh는 안내만(무권한) ---
+  #     jq를 실제로 PATH에서 숨기는 조작은 다른 필수 도구까지 깨뜨릴 위험이
+  #     있어 하지 않는다. 이 환경에 실제로 있는 분기는 실행해서, 없는 환경의
+  #     분기는 소스의 메시지 문구로 고정한다(AC-012·013).
+  local doctor_out install_sh_dep
+  doctor_out="$(
+    herdr() { printf '1.0.0\n'; }
+    cmd_doctor
+  )"
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$doctor_out" | grep -qE '^\[OK\][[:space:]]+jq[[:space:]]' ||
+      die "doctor가 설치된 jq를 OK로 표시하지 않았습니다."
+  else
+    printf '%s' "$doctor_out" | grep -q '\[OPTION\][[:space:]]*jq.*codex 모델 조회' ||
+      die "doctor가 jq 부재 시 codex 모델 조회 영향을 알리지 않았습니다(AC-012)."
+  fi
+  grep -q 'codex 모델 조회' "$HARNESS_LIB_DIR/70-status.sh" ||
+    die "doctor 구현에 jq 부재가 codex 모델 조회에 미치는 영향 설명이 없습니다(AC-012)."
+  if grep -qE '^[[:space:]]*(sudo|apt|apt-get|dnf|yum|pacman|brew)[[:space:]]' "$HARNESS_LIB_DIR/70-status.sh"; then
+    die "doctor 구현이 특권 동작(sudo·패키지 관리자)을 직접 실행합니다."
+  fi
+
+  install_sh_dep="$(dirname "$SELF_PATH")/install.sh"
+  if [[ -f "$install_sh_dep" ]]; then
+    grep -q 'command -v jq' "$install_sh_dep" ||
+      die "install.sh가 jq 부재를 감지하지 않습니다(AC-013)."
+    if grep -qE '^[[:space:]]*(sudo|apt|apt-get|dnf|yum|pacman|brew)[[:space:]]' "$install_sh_dep"; then
+      die "install.sh가 특권 동작(sudo·패키지 관리자)을 직접 실행하는 줄이 있습니다(AC-013)."
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+      local fake_home_jq="$test_root/fake-home-jq" install_no_jq_out
+      mkdir -p "$fake_home_jq"
+      install_no_jq_out="$(HOME="$fake_home_jq" XDG_DATA_HOME="$fake_home_jq/.local/share" \
+        bash "$install_sh_dep" 2>&1)"
+      printf '%s' "$install_no_jq_out" | grep -q 'jq' ||
+        die "install.sh가 jq 부재 환경에서 안내를 출력하지 않았습니다(AC-013)."
+      rm -rf "$fake_home_jq"
+    else
+      info "이 환경에는 jq가 있어 install.sh의 jq 부재 안내 실행 경로는 건너뜁니다."
+    fi
+  else
+    info "install.sh가 없어(설치본) jq 의존성 안내 테스트는 건너뜁니다."
+  fi
 
   # --- 모델 격리: 실 Provider를 띄우지 않고 실측 문자열 표본만 사용 --------
   local quarantine_project="$test_root/model-quarantine-project"
@@ -2187,7 +2380,8 @@ STUB
     'PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)'
     'PASS: 모델 등급 (Task·역할 기본 등급 해석/우선순위 5단계/목록순서 무관/미정의·허용목록불일치·오타 거부·키 명시/프리미엄 합집합/격리 유지/codex 고정키·claude --effort·agy 흡수 속도/-c 승인통로 차단/models 표시)'
     'PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)'
-    'PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존)'
+    'PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존·--refresh 미지정 시 조회 미호출·Provider별 조회 시각 주석 개별 기록)'
+    'PASS: Provider 목록 조회 (codex JSON visibility·supported_in_api·ID 유효성 필터/claude 별칭 참고 표시 전용·허용 목록 미반영·잔존 값 노출/agy·codex 독립 실패 보존/Agent 호출 없음)'
     'PASS: 모델 격리 (codex·claude 식별/agy·무관 실패·미지정 비격리/정책 보존/재선택 경고·수동 해제/강등 기록·누출 차단/조회 사전 경고)'
     'PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)'
     'PASS: Agent 호출 없음'
@@ -2201,6 +2395,7 @@ STUB
     'PASS: sync-templates (dry-run/apply·멱등, agent-policy 모델·프리미엄 키 전파·사용자 값 보존, AGENTS.md/STATE.md 비침범, .gitignore 보충)'
     'PASS: README 기대 출력 ↔ 실제 test 출력 정합'
     'PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)'
+    'PASS: 의존성 선언 (doctor jq 선택 의존성·codex 모델 조회 영향 안내, install.sh jq 부재 감지·설치 안내·특권 동작 없음)'
   )
   local harness_root readme_path readme_passes readme_check_ran pass_line
   harness_root="$(dirname "$(readlink -f "$SELF_PATH")")"
