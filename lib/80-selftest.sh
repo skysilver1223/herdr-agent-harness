@@ -1296,6 +1296,163 @@ PREMIUM_HERDR_STUB
   printf '%s' "$models_out" | grep -q 'claude_models는 계속 사람이' ||
     die "help models가 claude_models 수동 관리 원칙을 설명하지 않습니다(AC-010)."
 
+  # --- 모델 정책 setter(--tier): refresh 허용 목록 경계·claude 최소 추가·
+  #     원자적 쓰기·멱등·Secret 거부·refresh 이후 요약과 후속 안내(task-014) ---
+  #     기존 --refresh --apply의 자동 등록·실패 보존과 --premium 하위 호환은
+  #     위 "models 명령" 섹션이 이미 고정한다. 이 섹션은 그 위에 얹은 --tier
+  #     경로만 검증한다.
+  local tier_setter_project="$test_root/models-tier-project" tier_setter_policy
+  local tier_setter_before="$test_root/models-tier-before.yaml"
+  local tier_setter_once="$test_root/models-tier-once.yaml" tier_setter_out
+  cp -a "$test_project" "$tier_setter_project"
+  tier_setter_policy="$tier_setter_project/.harness/policies/agent-policy.yaml"
+  sed -i \
+    -e "s|^  agy_models:.*|  agy_models: 'agy-fast agy-strong' # 사용자 모델 주석|" \
+    -e "s|^  codex_models:.*|  codex_models: 'gpt-5.6-sol'|" \
+    "$tier_setter_policy"
+  cp "$tier_setter_policy" "$tier_setter_before"
+
+  # AC-004: agy·codex는 그 시점 허용 목록에 정확히 있는 모델만 --tier로 받는다.
+  # --premium처럼 "미적용"으로 보여주고 넘어가지 않고 즉시 거부한다 — dispatch가
+  # 등급 값을 그대로 해석해 쓰므로 잘못된 값을 정책에 남기면 안 된다.
+  set +e
+  tier_setter_out="$(cmd_models "$tier_setter_project" --tier agy:standard=agy-unknown 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] ||
+    die "models --tier가 허용 목록 밖 agy 모델을 거부하지 않았습니다."
+  printf '%s' "$tier_setter_out" | grep -q '허용 목록에 정확히 없습니다' ||
+    die "models --tier 거부 메시지가 원인(허용 목록 불일치)을 설명하지 않습니다."
+  cmp -s "$tier_setter_policy" "$tier_setter_before" ||
+    die "models --tier 거부가 정책 파일을 변경했습니다."
+
+  # 형식 오류(PROVIDER:TIER=MODEL이 아님)와 등급 오타도 즉시 거부한다.
+  set +e
+  ( cmd_models "$tier_setter_project" --tier agy=standard-agy-fast ) >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] ||
+    die "models --tier가 PROVIDER:TIER=MODEL 형식 오류를 거부하지 않았습니다."
+  set +e
+  ( cmd_models "$tier_setter_project" --tier agy:medium=agy-fast ) >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] ||
+    die "models --tier가 light|standard|premium 밖의 등급을 거부하지 않았습니다."
+
+  # AC-006: Secret 형태 문자열은 _runtime_model_id_valid 경계에서 거부된다.
+  set +e
+  ( cmd_models "$tier_setter_project" --tier claude:standard=sk-aaaaaaaaaaaaaaaaaaaaaaaa ) >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] ||
+    die "models --tier가 Secret 형태 모델 ID를 거부하지 않았습니다."
+
+  # AC-005: 미리보기는 --apply 없이 정책을 바꾸지 않고, 지정 요청 diff를 보여준다.
+  tier_setter_out="$(cmd_models "$tier_setter_project" --tier agy:standard=agy-fast)"
+  cmp -s "$tier_setter_policy" "$tier_setter_before" ||
+    die "models --tier 미리보기가 --apply 없이 정책을 바꿨습니다."
+  printf '%s' "$tier_setter_out" | grep -q 'agy_tier_standard 지정 요청: (미설정) → agy-fast' ||
+    die "models --tier 미리보기가 지정 요청 diff를 보여주지 않았습니다."
+
+  cmd_models "$tier_setter_project" --tier agy:standard=agy-fast --apply >/dev/null
+  grep -q "^  agy_tier_standard: 'agy-fast'$" "$tier_setter_policy" ||
+    die "models --tier --apply가 agy_tier_standard를 쓰지 않았습니다."
+  grep -q "^  agy_models: 'agy-fast agy-strong' # 사용자 모델 주석$" "$tier_setter_policy" ||
+    die "models --tier --apply가 agy_models 허용 목록이나 사용자 주석을 건드렸습니다(AC-004)."
+
+  # AC-005: 같은 값의 연속 적용은 byte-for-byte 멱등이다.
+  cp "$tier_setter_policy" "$tier_setter_once"
+  cmd_models "$tier_setter_project" --tier agy:standard=agy-fast --apply >/dev/null
+  cmp -s "$tier_setter_policy" "$tier_setter_once" ||
+    die "models --tier --apply가 연속 실행에서 멱등이 아닙니다."
+
+  # AC-004: claude는 조회 불가능성을 명시하고, 지정한 값만 claude_models에
+  # 허용 목록 검사 없이 최소 추가한다 — 두 번째 --tier도 기존 값을 지우지
+  # 않고 누적한다.
+  tier_setter_out="$(cmd_models "$tier_setter_project" --tier claude:standard=claude-sonnet-5)"
+  printf '%s' "$tier_setter_out" | grep -q '전체 ID 자동 조회 불가' ||
+    die "models --tier 미리보기가 claude의 자동 조회 불가 사실을 명시하지 않았습니다."
+  cmd_models "$tier_setter_project" --tier claude:standard=claude-sonnet-5 --apply >/dev/null
+  grep -q "^  claude_models: 'claude-sonnet-5'$" "$tier_setter_policy" ||
+    die "models --tier --apply가 claude_models에 최소 추가하지 않았습니다."
+  grep -q "^  claude_tier_standard: 'claude-sonnet-5'$" "$tier_setter_policy" ||
+    die "models --tier --apply가 claude_tier_standard를 쓰지 않았습니다."
+  cmd_models "$tier_setter_project" --tier claude:premium=claude-opus-5 --apply >/dev/null
+  grep -q "^  claude_models: 'claude-sonnet-5 claude-opus-5'$" "$tier_setter_policy" ||
+    die "models --tier --apply가 claude_models 기존 값을 지우고 다시 썼습니다(최소 추가 위반)."
+  grep -q "^  claude_tier_premium: 'claude-opus-5'$" "$tier_setter_policy" ||
+    die "models --tier --apply가 claude_tier_premium을 쓰지 않았습니다."
+
+  # --refresh와 결합하면 그 호출의 조회 결과를 허용 목록으로 쓴다 — refresh로
+  # 사라진 모델은 그 자리에서 즉시 거부된다(허용 목록을 --tier가 넓히거나
+  # 좁히지 않는다, AC-004).
+  _models_query_agy() { printf '%s\n' 'agy-fast Fast' 'agy-new New'; }
+  _models_query_codex() { printf '%s\n' '{"models":[
+    {"slug":"gpt-5.6-sol","visibility":"list","supported_in_api":true},
+    {"slug":"gpt-new-codex","visibility":"list","supported_in_api":true}
+  ]}'; }
+  _models_query_claude() { printf 'Available: sonnet, opus, or a full model ID.\n'; }
+  _models_now_utc() { printf '2026-09-13T00:00:00Z'; }
+
+  cp "$tier_setter_policy" "$tier_setter_before"
+  set +e
+  tier_setter_out="$(cmd_models "$tier_setter_project" --refresh --tier agy:light=agy-strong 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] ||
+    die "models --tier가 이번 refresh 결과에서 빠진 모델을 거부하지 않았습니다."
+  cmp -s "$tier_setter_policy" "$tier_setter_before" ||
+    die "models --tier(refresh 결합) 거부가 정책 파일을 변경했습니다."
+
+  tier_setter_out="$(cmd_models "$tier_setter_project" --refresh --tier agy:premium=agy-new --apply)"
+  grep -q "^  agy_tier_premium: 'agy-new'$" "$tier_setter_policy" ||
+    die "models --tier가 같은 호출의 refresh 결과를 허용 목록으로 쓰지 않았습니다."
+  grep -q "^  agy_models: 'agy-fast agy-new' # 사용자 모델 주석$" "$tier_setter_policy" ||
+    die "models --refresh --tier 결합 호출이 agy_models 갱신을 건드렸습니다."
+
+  # AC-002: --refresh --apply가 실제로 갱신하면 Provider별 결과 요약과
+  # standard·premium 후속 --tier 명령을 안내한다.
+  printf '%s' "$tier_setter_out" | grep -q '^refresh 적용 결과$' ||
+    die "models --refresh --apply가 결과 요약 제목을 출력하지 않았습니다."
+  printf '%s' "$tier_setter_out" | grep -q '  agy: 자동 등록 완료' ||
+    die "models --refresh --apply가 agy 자동 등록 완료를 요약하지 않았습니다."
+  printf '%s' "$tier_setter_out" | grep -q '  claude: 자동 조회 불가' ||
+    die "models --refresh --apply가 claude 조회 불가 사실을 요약에 명시하지 않았습니다."
+  printf '%s' "$tier_setter_out" | grep -q -- '--tier codex:standard=MODEL --apply' ||
+    die "models --refresh --apply가 standard 설정 명령을 안내하지 않았습니다."
+  printf '%s' "$tier_setter_out" | grep -q -- '--tier codex:premium=MODEL --apply' ||
+    die "models --refresh --apply가 premium 설정 명령을 안내하지 않았습니다."
+
+  tier_setter_out="$(cmd_models "$tier_setter_project" --refresh --apply)"
+  printf '%s' "$tier_setter_out" | grep -q '  agy: 동일 목록 확인' ||
+    die "models --refresh --apply가 변경 없는 재실행을 동일 목록 확인으로 요약하지 않았습니다."
+
+  # --refresh 실패 시(agy 조회 실패)에도 기존 목록은 보존되고 실패로 요약된다.
+  _models_query_agy() { return 17; }
+  tier_setter_out="$(cmd_models "$tier_setter_project" --refresh --apply)"
+  printf '%s' "$tier_setter_out" | grep -q '  agy: 조회 실패 — 기존 목록 보존' ||
+    die "models --refresh --apply가 조회 실패를 실패 보존으로 요약하지 않았습니다."
+
+  # --refresh 없이 호출하면 요약·안내를 보여 주지 않는다(AC-002 게이팅).
+  tier_setter_out="$(cmd_models "$tier_setter_project" --tier agy:standard=agy-fast --apply)"
+  if printf '%s' "$tier_setter_out" | grep -q 'refresh 적용 결과'; then
+    die "models --tier만(--refresh 없음)으로도 refresh 결과 요약을 출력했습니다."
+  fi
+
+  if [[ -s "$provider_stub_log" ]]; then
+    die "models --tier 검사가 함수 스텁 밖에서 Provider CLI를 호출했습니다: $(tr '\n' ' ' <"$provider_stub_log")"
+  fi
+
+  tier_setter_out="$(bash "$SELF_PATH" help models)"
+  printf '%s' "$tier_setter_out" | grep -q -- '--tier PROVIDER:TIER=MODEL' ||
+    die "help models에 --tier 구문 설명이 없습니다(AC-008)."
+  printf '%s' "$tier_setter_out" | grep -q '전체 모델 ID를 자동 조회할 수 없다' ||
+    die "help models가 claude --tier의 자동 조회 불가 제약을 설명하지 않습니다(AC-008)."
+  tier_setter_out="$(bash "$SELF_PATH" completion bash)"
+  printf '%s' "$tier_setter_out" | grep -q -- '"--tier::' ||
+    die "탭 완성 설명 목록에 --tier가 없습니다(AC-008)."
+
   # --- Provider 목록 조회: codex JSON 필터링·claude 별칭 참고·Provider별
   #     실패 격리 ------------------------------------------------------------
   #     실측 스키마(2026-09-12): codex debug models →
@@ -2396,6 +2553,7 @@ STUB
     'PASS: 모델 등급 (Task·역할 기본 등급 해석/우선순위 5단계/목록순서 무관/미정의·허용목록불일치·오타 거부·키 명시/프리미엄 합집합/격리 유지/codex 고정키·claude --effort·agy 흡수 속도/-c 승인통로 차단/models 표시)'
     'PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)'
     'PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존·--refresh 미지정 시 조회 미호출·Provider별 조회 시각 주석 개별 기록)'
+    'PASS: 모델 정책 setter (--tier PROVIDER:TIER=MODEL 미리보기/apply·agy·codex 허용 목록 경계 즉시 거부·refresh 결합 허용 목록 반영·claude 최소 추가·멱등·Secret 거부·refresh 적용 결과 요약과 standard·premium 후속 안내·help·탭 완성 정합)'
     'PASS: Provider 목록 조회 (codex JSON visibility·supported_in_api·ID 유효성 필터/claude 별칭 참고 표시 전용·허용 목록 미반영·교차 비교 없음/agy·codex 독립 실패 보존·원인별 진단/Agent 호출 없음)'
     'PASS: 모델 격리 (codex·claude 식별/agy·무관 실패·미지정 비격리/정책 보존/재선택 경고·수동 해제/강등 기록·누출 차단/조회 사전 경고)'
     'PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)'

@@ -335,6 +335,7 @@ PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목
 PASS: 모델 등급 (Task·역할 기본 등급 해석/우선순위 5단계/목록순서 무관/미정의·허용목록불일치·오타 거부·키 명시/프리미엄 합집합/격리 유지/codex 고정키·claude --effort·agy 흡수 속도/-c 승인통로 차단/models 표시)
 PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)
 PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존·--refresh 미지정 시 조회 미호출·Provider별 조회 시각 주석 개별 기록)
+PASS: 모델 정책 setter (--tier PROVIDER:TIER=MODEL 미리보기/apply·agy·codex 허용 목록 경계 즉시 거부·refresh 결합 허용 목록 반영·claude 최소 추가·멱등·Secret 거부·refresh 적용 결과 요약과 standard·premium 후속 안내·help·탭 완성 정합)
 PASS: Provider 목록 조회 (codex JSON visibility·supported_in_api·ID 유효성 필터/claude 별칭 참고 표시 전용·허용 목록 미반영·교차 비교 없음/agy·codex 독립 실패 보존·원인별 진단/Agent 호출 없음)
 PASS: 모델 격리 (codex·claude 식별/agy·무관 실패·미지정 비격리/정책 보존/재선택 경고·수동 해제/강등 기록·누출 차단/조회 사전 경고)
 PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)
@@ -724,7 +725,18 @@ agent_policy:
   출력으로만 보여 주고 `claude_models`에는 쓰지 않습니다 — 별칭이 가리키는
   실제 모델이 계정·설정마다 달라 값을 추측하지 않고 계속 사람이 전체 모델
   ID로 관리합니다. 별칭과 `claude_models`를 교차 비교하거나 잔존 값 경고를
-  만들지도 않습니다.
+  만들지도 않습니다. `--refresh --apply`가 실제로 정책을 바꾸면 Provider별
+  자동 등록 완료·동일 목록 확인·조회 실패 보존 결과를 요약하고, 이어서 주력
+  (`standard`)·프리미엄(`premium`) 모델을 지정하는 `--tier` 명령을 안내합니다.
+- 주력·프리미엄 모델은 `herdr-harness models PATH --tier PROVIDER:TIER=MODEL
+  --apply`로 지정합니다(TIER는 `light|standard|premium`). agy·codex는 그
+  시점의 `<provider>_models` 허용 목록에 정확히 있는 모델만 받고, 없으면
+  `--premium`처럼 "미적용"으로 넘어가지 않고 그 자리에서 거부합니다 — 범용
+  허용 목록 setter(`--allow`류)는 없으며 agy·codex 허용 목록은 `--refresh`가
+  관리합니다. claude는 전체 모델 ID를 자동 조회할 수 없다는 사실을 출력에
+  명시하고, 지정한 안전한 전체 ID만 `claude_models`에 최소 추가합니다(기존
+  값은 지우지 않고 누적). `--tier`도 미리보기 기본·`--apply` 반영·원자적
+  쓰기·byte-for-byte 멱등이라는 같은 규약을 따릅니다.
 - 승인용 `*_auto`/`*_bypass` 표는 모델 통로가 아닙니다. 그 표의 `--model opus`는
   계속 거부되며, `-c ...`도 계속 거부됩니다. codex 속도는 별도 고정 경로가 오직
   `-c model_reasoning_effort="low|medium|high"`만 조립합니다. claude는
@@ -781,12 +793,20 @@ herdr-harness models . \
   --premium claude=claude-fable-5 \
   --premium claude=claude-opus-4-6 --apply
 herdr-harness models . --premium agy= --apply
+
+# refresh로 등록된 허용 목록 안에서 주력·프리미엄 모델 지정
+herdr-harness models . --tier codex:standard=gpt-5.6-sol --apply
+herdr-harness models . --tier codex:premium=gpt-6-astra --apply
+
+# claude는 조회 불가 — 지정한 전체 ID만 claude_models에 최소 추가
+herdr-harness models . --tier claude:standard=claude-sonnet-5 --apply
 ```
 
 `--apply`가 없으면 정책 파일을 쓰지 않습니다. 조회가 비정상 종료하거나 빈 목록을
 돌려주면 삭제를 계산하지 않고 기존 값과 조회 시각을 보존합니다. 프리미엄 선언은
 그 호출에서 언급한 Provider에만 set 의미로 적용되며, 다른 Provider의 선언과
-`approval_mode`·`*_auto`·`*_bypass`·사용자 주석은 그대로 남습니다.
+`approval_mode`·`*_auto`·`*_bypass`·사용자 주석은 그대로 남습니다. `--tier`가
+허용 목록 밖 agy·codex 모델을 지정하면 정책을 바꾸지 않고 그 자리에서 거부합니다.
 
 ### Acceptance Criteria 게이트 — `transition ... submitted`가 직접 검증한다
 

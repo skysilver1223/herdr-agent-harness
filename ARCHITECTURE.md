@@ -238,8 +238,8 @@ agy는 속도가 등급별 모델 ID에 포함되므로 별도 effort 인수를 
 속도 미지정이면 세 Provider 모두 관련 인수를 추가하지 않는다. 선택 속도와 출처는
 Attempt·Evidence·runtime meta에 남는다.
 
-`models PATH [--refresh] [--premium PROVIDER=MODEL]... [--apply]`는 모델 정책의
-별도 관리 표면이다. `--refresh`가 없으면 Provider CLI를 전혀 부르지 않는다 —
+`models PATH [--refresh] [--premium PROVIDER=MODEL]... [--tier PROVIDER:TIER=MODEL]...
+[--apply]`는 모델 정책의 별도 관리 표면이다. `--refresh`가 없으면 Provider CLI를 전혀 부르지 않는다 —
 그렇지 않으면 `--premium`만 주거나 인수 없이 부른 호출에서도 매번 조회가 돌아
 "조회가 --refresh와 무관하게 실행된다"는 오인을 낳는다(task-013 제보). 기본
 실행과 `--refresh`는 diff 미리보기이며 `--apply`가 있을 때만 쓴다. 조회 성공
@@ -255,7 +255,11 @@ Provider의 삭제를 계산하지 않는다 — Provider마다 독립적으로 
 조회 함수는 분리되어
 자체 테스트에서는 스텁으로 대체되므로 Agent CLI·네트워크를 사용하지 않는다.
 실제 정책 쓰기는 대상 모델 키와 조회 주석만 원자적으로 바꾸므로 승인 정책·
-다른 Provider 값·사용자 주석은 보존된다.
+다른 Provider 값·사용자 주석은 보존된다. `--refresh --apply`가 실제로 정책을
+바꾸면 Provider별로 자동 등록 완료·동일 목록 확인(변경 없음)·조회 실패 보존
+중 무엇이었는지 요약하고, 이어서 주력(`standard`)·프리미엄(`premium`) 등급을
+`--tier`로 잇는 다음 설정 명령을 안내한다(task-014) — `--refresh`가 없거나
+정책이 실제로 바뀌지 않았으면 이 요약·안내는 나오지 않는다.
 
 `<provider>_premium_models`는 공백 구분 프리미엄 선언이다. 한 호출에 같은
 Provider를 여러 번 지정하면 누적되고, 빈 값은 비우며, 언급하지 않은 Provider는
@@ -263,6 +267,23 @@ Provider를 여러 번 지정하면 누적되고, 빈 값은 비우며, 언급�
 있을 때만 적용 상태다. 그 외에는 `미적용`으로 명시하며, 런타임 dispatch는 그
 상태를 fail-open하지 않고 거부한다. `models` 명령은 선언·표시를 담당하고 실제
 승인 집행과 누출 차단은 `_runtime_select_model`이 담당한다.
+
+`--tier PROVIDER:TIER=MODEL`은 `<provider>_tier_<light|standard|premium>`을
+직접 설정한다(task-014). refresh 자동 등록이 채우는 것은 Provider별 허용
+목록뿐이고, 그중 무엇을 평소 주력으로 쓰고 무엇을 정교한 작업에 프리미엄으로
+쓸지는 사람의 선택이라 별도 setter가 필요했다 — 손으로 `agent-policy.yaml`을
+고치면 provider id와 카탈로그 id를 혼동하는 실수가 났다(2026-09-12 실측).
+agy·codex는 그 시점의 허용 목록(같은 호출에 `--refresh`가 있으면 이번 조회
+결과, 없으면 기존 `<provider>_models`)에 정확히 있는 모델만 받고, 없으면
+`--premium`처럼 "미적용"으로 넘어가지 않고 그 자리에서 거부한다 — dispatch가
+등급 값을 그대로 해석해 쓰므로 잘못된 값을 정책에 남기면 안 되기 때문이다.
+claude는 전체 모델 ID를 자동 조회할 수 없다는 사실을 출력에 명시하고, 지정한
+안전한 전체 ID만 `claude_models`에 최소 추가한다(기존 값은 지우지 않고
+누적) — 범용 `--allow`류 허용 목록 setter는 두지 않는다. 값은 `--premium`과
+같은 미리보기/`--apply` 규약, 원자적 단일 쓰기, byte-for-byte 멱등을 따르고
+`_runtime_model_id_valid` 경계(Secret 형태 거부 포함)를 우회하지 않는다.
+프리미엄 실행 여부는 여전히 Bash가 자동 선택하지 않는다 — Task 기안 시 Agent가
+근거와 함께 권장하고 사용자가 Task별로 승인한다(task-012 절차 유지).
 
 dispatch 직전의 모델 사전 검증은 아직 `agy`에만 연결되어 있다(task-008의
 `agy models` 파서로 실제 목록과 정책 목록 전체를 비교하고 차이를 경고한다).

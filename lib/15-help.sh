@@ -126,7 +126,8 @@ EOF
       ;;
     models) cat <<EOF
 구문:
-  $SCRIPT_NAME models PATH [--refresh] [--premium PROVIDER=MODEL]... [--apply]
+  $SCRIPT_NAME models PATH [--refresh] [--premium PROVIDER=MODEL]...
+                    [--tier PROVIDER:TIER=MODEL]... [--apply]
 
 무엇을 하나:
   Provider별 현재 <provider>_models 허용 목록, light|standard|premium 등급의
@@ -147,7 +148,9 @@ EOF
   각 Provider 자신의 마지막 조회 시각 주석을 정책 파일에 쓴다. 조회 실패나
   빈 결과, jq 부재는 삭제로 계산하지 않고 그 Provider의 기존 목록만 보존한다
   (다른 Provider는 각자 독립적으로 갱신된다). codex 조회 실패는 jq 부재와
-  codex CLI 실행 파일 부재를 구분해 안내한다.
+  codex CLI 실행 파일 부재를 구분해 안내한다. --refresh --apply가 실제로
+  정책을 갱신하면 Provider별 자동 등록 완료·동일 목록 확인·조회 실패 보존
+  결과를 요약하고, 이어서 --tier standard·premium 설정 명령을 안내한다.
 
   --premium PROVIDER=MODEL은 그 호출에서 언급한 Provider의 프리미엄 집합을
   선언적으로 대체한다. 같은 Provider를 여러 번 쓰면 누적하고 PROVIDER=는
@@ -156,12 +159,25 @@ EOF
   목록을 넓히지 않으며 "미적용"으로 표시된다. 프리미엄 집행은 이 명령의
   범위가 아니다.
 
+  --tier PROVIDER:TIER=MODEL은 <provider>_tier_<tier>(light|standard|premium)
+  을 설정한다. agy·codex는 그 시점의 허용 목록(--refresh를 같이 주면 이번
+  조회 결과, 아니면 기존 <provider>_models)에 정확히 있는 모델만 받고,
+  없으면 즉시 거부한다 — refresh가 등록한 허용 목록을 --tier가 넓히거나
+  좁히지 않는다. claude는 전체 모델 ID를 자동 조회할 수 없다는 사실을
+  출력에 명시하고, 지정한 안전한 전체 ID만 claude_models에 최소 추가한다.
+  범용 허용 목록 setter(--allow류)는 두지 않는다 — agy·codex는 refresh가,
+  claude는 사람이 계속 claude_models를 관리한다. 평소 주력 모델은 standard,
+  아주 정교한 작업에 권장할 모델은 premium으로 지정한다(premium 실행 여부는
+  Task 기안 시 Agent가 근거와 함께 권장하고 사용자가 승인한다).
+
 예시:
   $SCRIPT_NAME models .
   $SCRIPT_NAME models . --refresh
   $SCRIPT_NAME models . --refresh --apply
   $SCRIPT_NAME models . --premium claude=claude-fable-5 --apply
   $SCRIPT_NAME models . --premium agy= --apply
+  $SCRIPT_NAME models . --tier codex:standard=gpt-5.6-sol --apply
+  $SCRIPT_NAME models . --tier codex:premium=gpt-6-astra --apply
 EOF
       ;;
     start) cat <<EOF

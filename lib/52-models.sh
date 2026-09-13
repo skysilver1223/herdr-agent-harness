@@ -342,10 +342,12 @@ _models_print_diff() {
 
 cmd_models() {
   local root_arg="" refresh=0 apply=0 premium_spec provider model previous
+  local tier_spec tier_provider tier_tier tier_model tier_rest
   local root policy current_refresh query_output=""
   local -a providers=(claude codex agy) list_providers=(agy codex)
   local -a actual_agy=() actual_codex=() actual_claude=() parsed=()
   local -A premium_seen=() premium_requested=()
+  local -A tier_seen=() tier_requested=()
   local -A current_models=() current_premium=() invalid_models=() invalid_premium=()
   local -A current_tier=() current_default=()
   local -A query_ok=() query_status=() query_time=()
@@ -371,8 +373,24 @@ cmd_models() {
           premium_requested[$provider]="$(_models_append_unique "$previous" "$model")"
         fi
         ;;
+      --tier)
+        [[ $# -ge 2 ]] || die "--tier 값(PROVIDER:TIER=MODEL)이 필요합니다."
+        tier_spec="$2"; shift 2
+        [[ "$tier_spec" == *:*=* ]] || die "--tier는 PROVIDER:TIER=MODEL 형식이어야 합니다."
+        tier_provider="${tier_spec%%:*}"
+        tier_rest="${tier_spec#*:}"
+        tier_tier="${tier_rest%%=*}"
+        tier_model="${tier_rest#*=}"
+        valid_provider "$tier_provider" || die "지원하지 않는 --tier Provider입니다: $tier_provider"
+        _runtime_model_tier_valid "$tier_tier" ||
+          die "지원하지 않는 --tier 등급입니다: $tier_tier (light|standard|premium 중 하나)"
+        [[ -n "$tier_model" ]] || die "--tier 값에는 모델 ID가 필요합니다: $tier_spec"
+        _runtime_model_id_valid "$tier_model" || die "--tier 모델은 안전한 전체 모델 ID 한 개여야 합니다."
+        tier_seen["$tier_provider:$tier_tier"]=1
+        tier_requested["$tier_provider:$tier_tier"]="$tier_model"
+        ;;
       -h|--help)
-        printf '사용법: %s models PATH [--refresh] [--premium PROVIDER=MODEL]... [--apply]\n' "$SCRIPT_NAME"
+        printf '사용법: %s models PATH [--refresh] [--premium PROVIDER=MODEL]... [--tier PROVIDER:TIER=MODEL]... [--apply]\n' "$SCRIPT_NAME"
         printf '기본은 조회·diff 미리보기뿐이다. 실제 정책 갱신은 --apply를 함께 준다.\n'
         return 0
         ;;
@@ -466,6 +484,48 @@ cmd_models() {
     fi
   fi
 
+  # --tier는 refresh가 갱신한(또는 없으면 기존) 허용 목록을 기준으로 검증한다.
+  # agy·codex는 그 목록에 정확히 있는 모델만 받아 허용 목록을 넓히지 않고,
+  # claude는 전체 ID를 자동 조회할 수 없으므로 지정한 값만 claude_models에
+  # 최소 추가한다(task-014 결정). 유효하지 않은 agy·codex 지정은 미리보기로
+  # 넘기지 않고 즉시 거부한다 — dispatch가 그 값을 그대로 해석해 쓰기 때문에
+  # premium처럼 "미적용" 표시로 넘어가면 조용히 깨진 정책을 쓰게 된다.
+  local -A effective_models=()
+  local -a claude_pending_add=() tier_order=(light standard premium)
+  local claude_effective_models
+  for provider in "${providers[@]}"; do
+    effective_models[$provider]="${current_models[$provider]}"
+  done
+  if [[ "$refresh" -eq 1 ]]; then
+    for provider in "${list_providers[@]}"; do
+      if [[ "${query_ok[$provider]:-0}" -eq 1 ]]; then
+        local -n _models_actual_ptr="actual_$provider"
+        effective_models[$provider]="$(_models_join "${_models_actual_ptr[@]}")"
+      fi
+    done
+  fi
+  claude_effective_models="${effective_models[claude]}"
+  for provider in "${providers[@]}"; do
+    for tier in "${tier_order[@]}"; do
+      [[ -n "${tier_seen["$provider:$tier"]+x}" ]] || continue
+      model="${tier_requested["$provider:$tier"]}"
+      if [[ "$provider" == claude ]]; then
+        local -a claude_effective_items=()
+        [[ -n "$claude_effective_models" ]] && read -r -a claude_effective_items <<<"$claude_effective_models"
+        if ! _models_list_contains "$model" "${claude_effective_items[@]}"; then
+          claude_effective_models="$(_models_append_unique "$claude_effective_models" "$model")"
+          claude_pending_add+=("$model")
+        fi
+      else
+        local -a provider_effective_items=()
+        [[ -n "${effective_models[$provider]}" ]] && read -r -a provider_effective_items <<<"${effective_models[$provider]}"
+        _models_list_contains "$model" "${provider_effective_items[@]}" ||
+          die "--tier $provider:$tier=$model 거부 — $model 이(가) ${provider}_models 허용 목록에 정확히 없습니다. 먼저 models --refresh --apply로 목록을 갱신하거나 정확한 모델 ID를 확인하세요."
+      fi
+    done
+  done
+  effective_models[claude]="$claude_effective_models"
+
   printf '\n역할 기본 선언\n'
   for role in worker reviewer; do
     role_tier="$(_models_policy_scalar "$policy" "${role}_default_tier")"
@@ -499,6 +559,10 @@ cmd_models() {
     printf '\n%s' "$provider"
     if [[ "$provider" == claude ]]; then
       printf '   참고 조회 전용(별칭) — claude_models는 계속 사람이 관리합니다\n'
+      if [[ "${#claude_pending_add[@]}" -gt 0 ]]; then
+        printf '  claude_models 최소 추가 예정(전체 ID 자동 조회 불가): %s\n' \
+          "$(_models_join "${claude_pending_add[@]}")"
+      fi
     else
       last_refresh="$(_models_last_refresh "$policy" "$provider")"
       printf '   마지막 조회: %s\n' "${last_refresh:-기록 없음}"
@@ -513,6 +577,10 @@ cmd_models() {
     for tier in light standard premium; do
       _models_print_tier_status "$provider" "$tier" \
         "${current_tier["$provider:$tier"]}" "${current_models[$provider]}"
+      if [[ -n "${tier_seen["$provider:$tier"]+x}" ]]; then
+        printf '  %s_tier_%s 지정 요청: %s → %s (적용하려면 --apply)\n' \
+          "$provider" "$tier" "${current_tier["$provider:$tier"]:-(미설정)}" "${tier_requested["$provider:$tier"]}"
+      fi
     done
     if [[ "${invalid_premium[$provider]}" -eq 1 ]]; then
       printf '  현재 %s_premium_models: (정책 값 오류 — 안전한 모델 ID 목록이 아님)\n' "$provider"
@@ -617,6 +685,29 @@ cmd_models() {
     fi
   done
 
+  for provider in "${providers[@]}"; do
+    for tier in "${tier_order[@]}"; do
+      [[ -n "${tier_seen["$provider:$tier"]+x}" ]] || continue
+      key="${provider}_tier_${tier}"
+      existing_value="${current_tier["$provider:$tier"]}"
+      if [[ "$existing_value" != "${tier_requested["$provider:$tier"]}" ]] ||
+         ! _models_policy_key_exists "$policy" "$key"; then
+        MODELS_WRITE_KEYS+=("$key")
+        MODELS_WRITE_VALUES[$key]="${tier_requested["$provider:$tier"]}"
+        proposed_changes=$((proposed_changes + 1))
+      fi
+    done
+  done
+  if [[ "${#claude_pending_add[@]}" -gt 0 ]]; then
+    key="claude_models"
+    if [[ "${current_models[claude]}" != "$claude_effective_models" ]] ||
+       ! _models_policy_key_exists "$policy" "$key"; then
+      MODELS_WRITE_KEYS+=("$key")
+      MODELS_WRITE_VALUES[$key]="$claude_effective_models"
+      proposed_changes=$((proposed_changes + 1))
+    fi
+  fi
+
   if [[ "$apply" -eq 1 && "$proposed_changes" -gt 0 ]]; then
     if _models_write_policy "$policy"; then
       info "모델 정책을 적용했습니다: $policy"
@@ -627,5 +718,28 @@ cmd_models() {
     info "적용할 모델 정책 변경이 없습니다."
   elif [[ "$proposed_changes" -gt 0 ]]; then
     info "요약: 변경 $proposed_changes · 미리보기뿐이라 실제로는 안 바뀜(적용하려면 --apply)"
+  fi
+
+  if [[ "$refresh" -eq 1 && "$apply" -eq 1 ]]; then
+    printf '\nrefresh 적용 결과\n'
+    for provider in "${list_providers[@]}"; do
+      if [[ "${query_ok[$provider]:-0}" -eq 1 ]]; then
+        if _models_list_contains "${provider}_models" "${MODELS_WRITE_KEYS[@]}"; then
+          printf '  %s: 자동 등록 완료\n' "$provider"
+        else
+          printf '  %s: 동일 목록 확인(변경 없음)\n' "$provider"
+        fi
+      else
+        printf '  %s: 조회 실패 — 기존 목록 보존\n' "$provider"
+      fi
+    done
+    printf '  claude: 자동 조회 불가 — claude_models는 계속 사람이 관리\n'
+    printf '\n후속 설정(주력·프리미엄)\n'
+    printf '  작업 시 주로 쓸 모델(standard): %s models %s --tier codex:standard=MODEL --apply\n' \
+      "$SCRIPT_NAME" "$root_arg"
+    printf '  정교한 작업에 권장할 모델(premium): %s models %s --tier codex:premium=MODEL --apply\n' \
+      "$SCRIPT_NAME" "$root_arg"
+    printf '  agy도 같은 문법: --tier agy:standard=MODEL, --tier agy:premium=MODEL\n'
+    printf '  claude는 전체 모델 ID를 자동 조회할 수 없다 — 안전한 전체 ID를 알고 있다면: --tier claude:standard=MODEL\n'
   fi
 }

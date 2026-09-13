@@ -385,16 +385,25 @@ _herdr_harness_completions() {
           "claude=::Claude 전체 모델 ID (반복 지정 가능)" \
           "codex=::Codex 전체 모델 ID (반복 지정 가능)" \
           "agy=::agy 전체 모델 ID (빈 값은 프리미엄 비우기)"
+      elif [[ "$prev" == --tier ]]; then
+        _herdr_harness_describe "$cur" \
+          "claude:standard=::주력 모델 (전체 ID, claude_models에 최소 추가)" \
+          "claude:premium=::정교한 작업 권장 모델 (전체 ID, claude_models에 최소 추가)" \
+          "codex:standard=::주력 모델 (codex_models 허용 목록 안 값만)" \
+          "codex:premium=::정교한 작업 권장 모델 (codex_models 허용 목록 안 값만)" \
+          "agy:standard=::주력 모델 (agy_models 허용 목록 안 값만)" \
+          "agy:premium=::정교한 작업 권장 모델 (agy_models 허용 목록 안 값만)"
       elif (( COMP_CWORD == 2 )); then
         COMPREPLY=($(compgen -d -- "$cur"))
         _herdr_harness_note "$cur" \
-          "구문::herdr-harness models PATH [--refresh] [--premium PROVIDER=MODEL]... [--apply]" \
+          "구문::herdr-harness models PATH [--refresh] [--premium PROVIDER=MODEL]... [--tier PROVIDER:TIER=MODEL]... [--apply]" \
           "PATH::Harness 프로젝트 디렉터리 (필수)" \
           "help::herdr-harness help models"
       else
         _herdr_harness_describe "$cur" \
           "--refresh::조회 가능한 Provider의 허용 목록 전체 갱신을 미리보기" \
           "--premium::Provider의 프리미엄 집합을 선언적으로 대체" \
+          "--tier::PROVIDER의 등급(light|standard|premium)에 모델 지정" \
           "--apply::미리 본 모델 정책 변경을 실제로 적용"
       fi
       ;;
