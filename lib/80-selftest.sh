@@ -1165,8 +1165,9 @@ PREMIUM_HERDR_STUB
     die "models --refresh가 삭제될 프리미엄 모델을 특별 표시하지 않았습니다."
   printf '%s' "$models_out" | grep -q '참고: 조회된 별칭: sonnet opus' ||
     die "models --refresh가 claude 별칭을 참고 출력으로 보여주지 않았습니다."
-  printf '%s' "$models_out" | grep -q "claude_models의 claude-fable-5가 이번 별칭 목록에 없습니다" ||
-    die "models --refresh가 별칭에 없는 claude_models 값을 드러내지 않았습니다(AC-007)."
+  if printf '%s' "$models_out" | grep -q 'claude_models의'; then
+    die "models --refresh가 claude 별칭과 claude_models를 교차 비교했습니다(AC-007)."
+  fi
 
   # --refresh --apply는 조회 가능한 각 Provider(agy·codex)의 추가·삭제 전체와
   # 각자의 조회 시각 주석을 반영한다(AC-004). claude_models는 참고 전용이라
@@ -1207,17 +1208,33 @@ PREMIUM_HERDR_STUB
   printf '%s' "$models_out" | grep -q '삭제를 계산하지 않고 기존 정책을 보존' ||
     die "agy models 빈 출력 시 보존 경고가 없습니다."
 
-  # codex가 jq 부재(127)로 실패해도 agy는 같은 호출에서 독립적으로 갱신된다
-  # (Provider별 실패 격리 — AC-003).
+  # codex가 jq 부재(전용 상태 200)로 실패해도 agy는 같은 호출에서 독립적으로
+  # 갱신된다(Provider별 실패 격리 — AC-003). jq 부재는 셸의 command-not-found
+  # 127과 구분하고, 실제 codex 실행 파일 부재에는 별도의 정확한 진단을 낸다.
   _models_query_agy() { printf '%s\n' 'agy-keep Kept' 'agy-new-2 New'; }
-  _models_query_codex() { return 127; }
+  _models_query_codex() { return 200; }
   models_out="$(cmd_models "$models_project" --refresh --apply)"
   grep -q "^  agy_models: 'agy-keep agy-new-2'" "$models_policy" ||
     die "codex 조회 실패가 같은 호출의 agy 갱신까지 막았습니다(Provider 독립성 위반)."
   grep -q "^  codex_models: 'gpt-5.6-sol gpt-new-codex'$" "$models_policy" ||
-    die "codex의 jq 부재(127) 실패가 codex_models 기존 값을 건드렸습니다."
+    die "codex의 jq 부재(200) 실패가 codex_models 기존 값을 건드렸습니다."
   printf '%s' "$models_out" | grep -q 'jq가 없어 codex 모델을 조회하지 못했습니다' ||
     die "jq 부재로 인한 codex 조회 실패에 jq 관련 안내가 없습니다."
+  if printf '%s' "$models_out" | grep -q 'codex CLI 실행 파일을 찾지 못해'; then
+    die "jq 부재를 codex CLI 실행 파일 부재로 잘못 진단했습니다."
+  fi
+
+  _models_query_codex() { return 127; }
+  models_out="$(cmd_models "$models_project" --refresh --apply)"
+  grep -q "^  agy_models: 'agy-keep agy-new-2'" "$models_policy" ||
+    die "codex 실행 파일 부재가 같은 호출의 agy 정책을 변경했습니다."
+  grep -q "^  codex_models: 'gpt-5.6-sol gpt-new-codex'$" "$models_policy" ||
+    die "codex 실행 파일 부재가 codex_models 기존 값을 건드렸습니다."
+  printf '%s' "$models_out" | grep -q 'codex CLI 실행 파일을 찾지 못해' ||
+    die "codex 실행 파일 부재에 정확한 진단이 없습니다."
+  if printf '%s' "$models_out" | grep -q 'jq가 없어'; then
+    die "codex 실행 파일 부재를 jq 부재로 잘못 진단했습니다."
+  fi
   _models_query_codex() {
     printf 'codex\n' >>"$models_query_log"
     printf '%s\n' '{"models":[
@@ -1334,10 +1351,8 @@ Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, sonnet[1m], o
     die "codex 성공+빈 출력이 조회 실패와 동일하게 다뤄지지 않았습니다(AC-003)."
   printf '%s' "$query_out" | grep -q '참고: 조회된 별칭: sonnet opus' ||
     die "claude 참고 조회가 별칭을 보여주지 않았습니다(AC-006)."
-  printf '%s' "$query_out" | grep -q 'claude_models의 claude-legacy-9가 이번 별칭 목록에 없습니다' ||
-    die "claude_models의 별칭 미제공 값을 드러내지 않았습니다(AC-007)."
-  if printf '%s' "$query_out" | grep -q 'claude_models의 sonnet가 이번 별칭 목록에 없습니다'; then
-    die "별칭에 실제로 있는 claude_models 값을 잘못 미제공으로 표시했습니다(AC-007 오탐)."
+  if printf '%s' "$query_out" | grep -qE 'claude_models의|별칭 목록에 없습니다'; then
+    die "claude 참고 조회가 별칭과 claude_models를 교차 비교하거나 잔존 값 경고를 만들었습니다(AC-007)."
   fi
   grep -q "^  claude_models: 'sonnet claude-legacy-9'$" "$query_policy" ||
     die "claude_models가 참고 조회만으로 바뀌었습니다(AC-006)."
@@ -2381,7 +2396,7 @@ STUB
     'PASS: 모델 등급 (Task·역할 기본 등급 해석/우선순위 5단계/목록순서 무관/미정의·허용목록불일치·오타 거부·키 명시/프리미엄 합집합/격리 유지/codex 고정키·claude --effort·agy 흡수 속도/-c 승인통로 차단/models 표시)'
     'PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)'
     'PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존·--refresh 미지정 시 조회 미호출·Provider별 조회 시각 주석 개별 기록)'
-    'PASS: Provider 목록 조회 (codex JSON visibility·supported_in_api·ID 유효성 필터/claude 별칭 참고 표시 전용·허용 목록 미반영·잔존 값 노출/agy·codex 독립 실패 보존/Agent 호출 없음)'
+    'PASS: Provider 목록 조회 (codex JSON visibility·supported_in_api·ID 유효성 필터/claude 별칭 참고 표시 전용·허용 목록 미반영·교차 비교 없음/agy·codex 독립 실패 보존·원인별 진단/Agent 호출 없음)'
     'PASS: 모델 격리 (codex·claude 식별/agy·무관 실패·미지정 비격리/정책 보존/재선택 경고·수동 해제/강등 기록·누출 차단/조회 사전 경고)'
     'PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)'
     'PASS: Agent 호출 없음'

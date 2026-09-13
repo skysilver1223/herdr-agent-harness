@@ -22,8 +22,10 @@ _models_query_agy() {
 _models_query_codex() {
   [[ "${HH_HARNESS_SELFTEST:-0}" != 1 ]] || return 125
   # jq는 선택 의존성이다(lib/50-runtime.sh·lib/70-status.sh 선례). 없으면
-  # codex CLI조차 부르지 않고 127로 조회 실패와 같은 갈래로 떨어뜨린다.
-  command -v jq >/dev/null 2>&1 || return 127
+  # codex CLI조차 부르지 않는다. 127은 실제 codex 실행 파일 부재에 남겨 두고,
+  # jq 부재는 별도 상태로 돌려 원인이 뒤바뀐 진단을 막는다.
+  command -v jq >/dev/null 2>&1 || return 200
+  command -v codex >/dev/null 2>&1 || return 127
   command codex debug models
 }
 
@@ -312,17 +314,17 @@ _models_print_selection_guide() {
 
 _models_print_diff() {
   local current="$1" actual_name="$2" premium="$3" item suffix
-  local -n actual_ref="$actual_name"
+  local -n _models_diff_actual_ptr="$actual_name"
   local -a current_items=() premium_items=()
   [[ -n "$current" ]] && read -r -a current_items <<<"$current"
   [[ -n "$premium" ]] && read -r -a premium_items <<<"$premium"
-  for item in "${actual_ref[@]}"; do
+  for item in "${_models_diff_actual_ptr[@]}"; do
     if ! _models_list_contains "$item" "${current_items[@]}"; then
       printf '  + %s (추가)\n' "$item"
     fi
   done
   for item in "${current_items[@]}"; do
-    if ! _models_list_contains "$item" "${actual_ref[@]}"; then
+    if ! _models_list_contains "$item" "${_models_diff_actual_ptr[@]}"; then
       suffix=""
       if _models_list_contains "$item" "${premium_items[@]}"; then
         suffix=" — 프리미엄 선언도 미적용 예정"
@@ -330,7 +332,7 @@ _models_print_diff() {
       printf '  - %s (조회 결과에 없음 — 삭제%s)\n' "$item" "$suffix"
     fi
   done
-  for item in "${actual_ref[@]}"; do
+  for item in "${_models_diff_actual_ptr[@]}"; do
     if _models_list_contains "$item" "${current_items[@]}"; then
       printf '    %s (유지)\n' "$item"
     fi
@@ -430,12 +432,12 @@ cmd_models() {
   # 정책 보존 경고만 낸다.
   if [[ "$refresh" -eq 1 ]]; then
     for provider in "${list_providers[@]}"; do
-      local -n actual_ref="actual_$provider"
-      actual_ref=()
+      local -n _models_actual_ptr="actual_$provider"
+      _models_actual_ptr=()
       query_output=""
       if query_output="$("_models_query_$provider" 2>/dev/null)"; then
-        mapfile -t actual_ref < <("_models_parse_${provider}_output" <<<"$query_output")
-        if (( ${#actual_ref[@]} > 0 )); then
+        mapfile -t _models_actual_ptr < <("_models_parse_${provider}_output" <<<"$query_output")
+        if (( ${#_models_actual_ptr[@]} > 0 )); then
           query_ok[$provider]=1
           query_time[$provider]="$(_models_now_utc)"
         else
@@ -491,9 +493,9 @@ cmd_models() {
   fi
 
   local shown_models shown_premium last_refresh item
-  local -a allowed_items=() old_premium_items=() new_premium_items=()
+  local -a old_premium_items=() new_premium_items=()
   for provider in "${providers[@]}"; do
-    local -n actual_ref="actual_$provider"
+    local -n _models_actual_ptr="actual_$provider"
     printf '\n%s' "$provider"
     if [[ "$provider" == claude ]]; then
       printf '   참고 조회 전용(별칭) — claude_models는 계속 사람이 관리합니다\n'
@@ -521,7 +523,7 @@ cmd_models() {
     shown_models="${current_models[$provider]}"
     shown_premium="${current_premium[$provider]}"
     if [[ "$provider" != claude && "$refresh" -eq 1 && "${query_ok[$provider]:-0}" -eq 1 ]]; then
-      shown_models="$(_models_join "${actual_ref[@]}")"
+      shown_models="$(_models_join "${_models_actual_ptr[@]}")"
     fi
     if [[ -n "${premium_seen[$provider]+x}" ]]; then
       shown_premium="${premium_requested[$provider]}"
@@ -549,13 +551,6 @@ cmd_models() {
         if [[ "${query_ok[claude]:-0}" -eq 1 ]]; then
           printf '  참고 조회: %s (claude /model, 허용 목록에는 반영하지 않음)\n' "${query_time[claude]}"
           _models_print_values "참고: 조회된 별칭" "$(_models_join "${actual_claude[@]}")"
-          if [[ -n "${current_models[claude]}" ]]; then
-            read -r -a allowed_items <<<"${current_models[claude]}"
-            for item in "${allowed_items[@]}"; do
-              _models_list_contains "$item" "${actual_claude[@]}" ||
-                printf '  참고: claude_models의 %s가 이번 별칭 목록에 없습니다(참고용 비교 — 허용 목록은 바뀌지 않음)\n' "$item"
-            done
-          fi
         else
           printf '  참고: claude 별칭 조회 실패(상태 %s) — claude_models는 항상 사람이 관리하므로 영향 없습니다.\n' "${query_status[claude]:-}"
         fi
@@ -564,10 +559,12 @@ cmd_models() {
       if [[ "$refresh" -eq 1 ]]; then
         if [[ "${query_ok[$provider]:-0}" -eq 1 ]]; then
           printf '  이번 조회: %s (%s models)\n' "${query_time[$provider]}" "$provider"
-          _models_print_values "조회된 적용 가능 모델" "$(_models_join "${actual_ref[@]}")"
+          _models_print_values "조회된 적용 가능 모델" "$(_models_join "${_models_actual_ptr[@]}")"
           _models_print_diff "${current_models[$provider]}" "actual_$provider" "$shown_premium"
-        elif [[ "$provider" == codex && "${query_status[codex]:-}" -eq 127 ]]; then
+        elif [[ "$provider" == codex && "${query_status[codex]:-}" -eq 200 ]]; then
           printf '  경고: jq가 없어 codex 모델을 조회하지 못했습니다 — 삭제를 계산하지 않고 기존 정책을 보존합니다. jq 설치 후 --refresh를 다시 실행하세요.\n'
+        elif [[ "$provider" == codex && "${query_status[codex]:-}" -eq 127 ]]; then
+          printf '  경고: codex CLI 실행 파일을 찾지 못해 모델을 조회하지 못했습니다 — 삭제를 계산하지 않고 기존 정책을 보존합니다. codex 설치와 PATH를 확인하세요.\n'
         else
           printf '  경고: %s models 조회 실패(상태 %s 또는 빈 목록) — 삭제를 계산하지 않고 기존 정책을 보존합니다.\n' "$provider" "${query_status[$provider]:-}"
         fi
@@ -584,9 +581,9 @@ cmd_models() {
 
   if [[ "$refresh" -eq 1 ]]; then
     for provider in "${list_providers[@]}"; do
-      local -n actual_ref="actual_$provider"
+      local -n _models_actual_ptr="actual_$provider"
       if [[ "${query_ok[$provider]:-0}" -eq 1 ]]; then
-        desired_models="$(_models_join "${actual_ref[@]}")"
+        desired_models="$(_models_join "${_models_actual_ptr[@]}")"
         if [[ "${invalid_models[$provider]}" -eq 1 || "${current_models[$provider]}" != "$desired_models" ]] ||
            ! _models_policy_key_exists "$policy" "${provider}_models"; then
           MODELS_WRITE_KEYS+=("${provider}_models")

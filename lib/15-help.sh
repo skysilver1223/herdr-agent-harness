@@ -136,8 +136,9 @@ EOF
   정책 diff를 함께 보여 준다. claude(\`claude -p "/model"\`)는 별칭만 참고로
   보여줄 뿐 claude_models 허용 목록에는 쓰지 않는다 — 별칭이 가리키는 실제
   모델이 계정·설정마다 달라 어느 모델이 돌았는지 복원할 수 없기 때문이다.
-  claude_models는 계속 사람이 전체 모델 ID로 관리한다. 이 명령은 Agent를
-  띄우지 않는다.
+  별칭과 claude_models를 교차 비교하거나 잔존 값 경고를 만들지도 않는다.
+  claude_models는 계속 사람이 전체 모델 ID로 관리한다. 이 명령은 Agent를 띄우지
+  않는다.
 
 쓰기 규약:
   기본은 sync-templates와 같은 미리보기이며 --refresh 없이는 Provider CLI를
@@ -145,7 +146,8 @@ EOF
   추가·삭제·유지로 나누어 보여 주고, --apply를 함께 줬을 때만 허용 목록과
   각 Provider 자신의 마지막 조회 시각 주석을 정책 파일에 쓴다. 조회 실패나
   빈 결과, jq 부재는 삭제로 계산하지 않고 그 Provider의 기존 목록만 보존한다
-  (다른 Provider는 각자 독립적으로 갱신된다).
+  (다른 Provider는 각자 독립적으로 갱신된다). codex 조회 실패는 jq 부재와
+  codex CLI 실행 파일 부재를 구분해 안내한다.
 
   --premium PROVIDER=MODEL은 그 호출에서 언급한 Provider의 프리미엄 집합을
   선언적으로 대체한다. 같은 Provider를 여러 번 쓰면 누적하고 PROVIDER=는

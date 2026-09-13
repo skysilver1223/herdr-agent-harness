@@ -335,7 +335,7 @@ PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목
 PASS: 모델 등급 (Task·역할 기본 등급 해석/우선순위 5단계/목록순서 무관/미정의·허용목록불일치·오타 거부·키 명시/프리미엄 합집합/격리 유지/codex 고정키·claude --effort·agy 흡수 속도/-c 승인통로 차단/models 표시)
 PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)
 PASS: models 명령 (dry-run/apply·전체 refresh·실패 보존·프리미엄 set/비우기/정확 일치·멱등·구버전 정책·사용자 값 보존·--refresh 미지정 시 조회 미호출·Provider별 조회 시각 주석 개별 기록)
-PASS: Provider 목록 조회 (codex JSON visibility·supported_in_api·ID 유효성 필터/claude 별칭 참고 표시 전용·허용 목록 미반영·잔존 값 노출/agy·codex 독립 실패 보존/Agent 호출 없음)
+PASS: Provider 목록 조회 (codex JSON visibility·supported_in_api·ID 유효성 필터/claude 별칭 참고 표시 전용·허용 목록 미반영·교차 비교 없음/agy·codex 독립 실패 보존·원인별 진단/Agent 호출 없음)
 PASS: 모델 격리 (codex·claude 식별/agy·무관 실패·미지정 비격리/정책 보존/재선택 경고·수동 해제/강등 기록·누출 차단/조회 사전 경고)
 PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane 비침범)
 PASS: Agent 호출 없음
@@ -719,10 +719,12 @@ agent_policy:
 - 목록 조회와 갱신은 `herdr-harness models PATH --refresh`를 사용합니다.
   `--refresh` 없이는 Provider CLI를 부르지 않습니다. `agy`(`agy models`)와
   `codex`(`codex debug models`, jq 필요)는 실제 목록과 정책의 추가·삭제·유지를
-  Provider별로 각각 보여 줍니다. `claude`(`claude -p "/model"`)는 별칭을 참고
+  Provider별로 각각 보여 줍니다. codex 조회 실패 시 jq 부재와 codex CLI 실행
+  파일 부재를 구분해 안내합니다. `claude`(`claude -p "/model"`)는 별칭을 참고
   출력으로만 보여 주고 `claude_models`에는 쓰지 않습니다 — 별칭이 가리키는
   실제 모델이 계정·설정마다 달라 값을 추측하지 않고 계속 사람이 전체 모델
-  ID로 관리합니다.
+  ID로 관리합니다. 별칭과 `claude_models`를 교차 비교하거나 잔존 값 경고를
+  만들지도 않습니다.
 - 승인용 `*_auto`/`*_bypass` 표는 모델 통로가 아닙니다. 그 표의 `--model opus`는
   계속 거부되며, `-c ...`도 계속 거부됩니다. codex 속도는 별도 고정 경로가 오직
   `-c model_reasoning_effort="low|medium|high"`만 조립합니다. claude는
