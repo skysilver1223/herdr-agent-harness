@@ -740,6 +740,96 @@ STARTFAIL_HERDR_STUB
   grep -q 'Pane 정리 회수 실패' "$startfail_evidence_yaml2" ||
     die "회수 실패가 Evidence YAML 요약에 기록되지 않았습니다(AC-003·AC-004)."
 
+  # --- task-005 AC-001: dispatch·observe·quota-check 직접 호출도 events.tsv에
+  # 남는다(자동화 경로의 auto_step_turn과 구분되는 event 이름). 위에서 이미
+  # 재현한 agent start 실패 두 번(task-startfail attempt 1·2)을 그대로 써서
+  # dispatch 이벤트를 확인한다 — 이 검사만을 위한 추가 Agent/Herdr 호출 없음
+  # (NFR-01).
+  local startfail_events="$startfail_project/.harness/evidence/events.tsv"
+  grep -q $'\tdispatch\ttask-startfail\tworker\terror\t' "$startfail_events" ||
+    die "dispatch 실행이 events.tsv에 기록되지 않았습니다(task-005 AC-001)."
+  [[ "$(grep -c $'\tdispatch\ttask-startfail\t' "$startfail_events")" -ge 2 ]] ||
+    die "dispatch 실패 두 번이 각각 events.tsv에 기록되지 않았습니다(task-005 AC-001)."
+  grep $'\tdispatch\ttask-startfail\t' "$startfail_events" | grep -q 'provider=.*pane=.*attempt=' ||
+    die "dispatch 이벤트 detail에 provider/pane/attempt 식별자가 없습니다(task-005 AC-003)."
+  grep $'\tdispatch\t' "$startfail_events" | grep -qi 'internal_error\|agent start rejected' &&
+    die "dispatch 이벤트 detail에 Provider 실패 원문이 노출됐습니다(task-005 AC-003)."
+
+  # observe 직접 호출 이벤트 기록 — 실제 Herdr 대신 agent get/read만 응답하는
+  # herdr 스텁을 쓴다(NFR-01, Agent 호출 없음). dispatch를 거치지 않고 미리
+  # meta 파일을 심어 observe만 단독으로 검증한다.
+  local observe_project="$test_root/observe-project"
+  cp -a "$test_project" "$observe_project"
+  sed -e 's/^task_id: .*/task_id: task-observe-events/' \
+      -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+      "$observe_project/.harness/tasks/TEMPLATE.yaml" >"$observe_project/.harness/tasks/task-observe-events.yaml"
+  mkdir -p "$observe_project/.harness/runtime"
+  {
+    printf 'task_id=task-observe-events\n'
+    printf 'role=worker\n'
+    printf 'agent_name=hh-observe-w-1\n'
+    printf 'pane_id=wOBSERVE:p1\n'
+    printf 'provider=claude\n'
+    printf 'attempt=1\n'
+    printf 'adopted=0\n'
+    printf 'model=\n'
+    printf 'model_source=\n'
+    printf 'model_approval=\n'
+    printf 'model_degradation=\n'
+    printf 'effort=\n'
+    printf 'effort_source=\n'
+  } >"$observe_project/.harness/runtime/task-observe-events-worker.meta"
+  local observe_stub_dir="$test_root/observe-herdr-stub"
+  mkdir -p "$observe_stub_dir"
+  cat >"$observe_stub_dir/herdr" <<'OBSERVE_HERDR_STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == agent && "${2:-}" == get ]]; then
+  printf '{"agent_status":"done","revision":2,"state_change_seq":8}\n'
+  exit 0
+fi
+if [[ "${1:-}" == agent && "${2:-}" == read ]]; then
+  printf 'observe self-test stub output\n'
+  exit 0
+fi
+exit 125
+OBSERVE_HERDR_STUB
+  chmod +x "$observe_stub_dir/herdr"
+  local observe_output
+  set +e
+  observe_output="$(PATH="$observe_stub_dir:$PATH" bash "$SELF_PATH" observe "$observe_project" task-observe-events worker 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -eq 0 ]] || die "observe stub 호출이 실패했습니다(task-005 AC-001): $observe_output"
+  grep -q $'\tobserve\ttask-observe-events\tworker\t' \
+    "$observe_project/.harness/evidence/events.tsv" ||
+    die "observe 실행이 events.tsv에 기록되지 않았습니다(task-005 AC-001)."
+
+  # quota-check 직접 호출 이벤트 기록 — agy --print "/usage"만 함수 스텁으로
+  # 대체한다(NFR-01, 실제 Provider 미호출). 쿼터 잔여 수치는 detail에 남지
+  # 않아야 한다(task-005-decisions-02).
+  local quota_stub_dir="$test_root/quota-agy-stub"
+  mkdir -p "$quota_stub_dir"
+  cat >"$quota_stub_dir/agy" <<'QUOTA_AGY_STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == --print && "${2:-}" == "/usage" ]]; then
+  printf 'sonnet\tdaily\t80%%\t2026-09-14T00:00:00Z\n'
+  exit 0
+fi
+exit 125
+QUOTA_AGY_STUB
+  chmod +x "$quota_stub_dir/agy"
+  local quota_output
+  set +e
+  quota_output="$(PATH="$quota_stub_dir:$PATH" bash "$SELF_PATH" quota-check "$test_project" --provider agy 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -eq 0 ]] || die "quota-check stub 호출이 실패했습니다(task-005 AC-001): $quota_output"
+  local quota_events="$test_project/.harness/evidence/events.tsv"
+  grep -q $'\tquota_check\t-\t-\tok\tprovider=agy$' "$quota_events" ||
+    die "quota-check 실행이 events.tsv에 식별자만으로 기록되지 않았습니다(task-005 AC-001·AC-003)."
+  grep $'\tquota_check\t' "$quota_events" | cut -f6 | grep -qE '80|25' &&
+    die "quota-check 이벤트 detail에 쿼터 수치가 노출됐습니다(task-005 AC-003, decisions-02 위반)."
+
   # AC-003(경계): adopt로 등록한 Pane은 이 자동 회수 대상이 아니다 — close-agent의
   # 기존 --force 게이트(위에서 검증됨)와 별개로, dispatch의 agent start 실패
   # 분기는 자신이 이번 호출에서 만든 pane_id만 다룬다는 것을 소스에서 고정한다.
@@ -2708,7 +2798,7 @@ STUB
     'PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)'
     'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)'
     'PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)'
-    'PASS: 이벤트 로그 기록'
+    'PASS: 이벤트 로그 기록 (전이·sync-templates·quota-retry·auto-step·lock-reclaim·adopt 9곳 + dispatch·observe·quota-check 직접 호출 event, 쿼터 수치 미노출)'
     'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)'
     'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)'
     'PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)'

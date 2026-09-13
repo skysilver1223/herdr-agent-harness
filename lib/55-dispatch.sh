@@ -71,6 +71,7 @@ cmd_dispatch() {
   context="$runtime_dir/$task_id-context-$role.md"
   if ! _runtime_context_packet "$root" "$task_id" "$role" "$task_file" "$context" "$extra_prompt"; then
     _runtime_write_result "$root" "$task_id" "$role" error
+    append_event "$root" dispatch "$task_id" "$role" error "stage=context_packet"
     printf '경고: Context Packet에서 Secret 의심 패턴이 발견되어 저장하거나 전송하지 않았습니다.\n' >&2
     printf 'dispatch_result=error\n'
     return 1
@@ -185,6 +186,7 @@ cmd_dispatch() {
   set -e
   if (( pane_status != 0 )); then
     _runtime_write_result "$root" "$task_id" "$role" error
+    append_event "$root" dispatch "$task_id" "$role" error "provider=$provider stage=pane_split attempt=$attempt"
     printf '%s\n' "$pane_output" >&2
     printf 'dispatch_result=error\n'
     return 1
@@ -344,6 +346,7 @@ cmd_dispatch() {
   _runtime_write_evidence_yaml "$root" "$task_id" "$role" "$attempt" "$result" \
     "$evidence_summary" 0
   _runtime_write_result "$root" "$task_id" "$role" "$result"
+  append_event "$root" dispatch "$task_id" "$role" "$result" "provider=$provider pane=$pane_id attempt=$attempt"
   printf 'dispatch_result=%s\n' "$result"
   [[ "$result" == settled || "$result" == blocked ]]
 }
@@ -496,6 +499,7 @@ cmd_observe() {
   _runtime_write_evidence_yaml "$root" "$task_id" "$role" "$attempt" "$result" \
     "observe 결과 $result.$model_summary 원문은 raw 참조." "$((observations + 1))"
   _runtime_write_result "$root" "$task_id" "$role" "$result"
+  append_event "$root" observe "$task_id" "$role" "$result" "pane=$pane_id attempt=$attempt"
   printf 'observe_result=%s\n' "$result"
 }
 
@@ -679,6 +683,11 @@ cmd_quota_check() {
   } >"$addition"
   _runtime_append_evidence "$evidence_file" "$addition"
   rm -f -- "$addition"
+
+  # AC-003(task-005): 쿼터 수치·원문은 detail에 넣지 않는다 — provider와
+  # status_word(ok/low/unknown) 같은 식별자만 남긴다. 원문·수치는 evidence
+  # 파일에만 남는다(.harness/decisions/task-005-decisions-02.md).
+  append_event "$root" quota_check "${task_id:--}" "${role:--}" "$status_word" "provider=$provider"
 
   printf 'quota_check: provider=%s status=%s detail=%s\n' "$provider" "$status_word" "$detail"
 }

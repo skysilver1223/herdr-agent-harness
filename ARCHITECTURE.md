@@ -461,7 +461,7 @@ Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않�
 
 ### 선택적 고도화
 
-- Event Log와 Replay — `append_event`로 상태 전이(`transition`, `approve`가 호출한 완료 전이 포함), `sync-templates`, `adopt`, `quota-retry`/`auto-step`, Task Lock 회수 이벤트는 `.harness/evidence/events.tsv`에 남지만, `dispatch`/`observe`/`quota-check` 자체는 아직 기록하지 않고 Replay 도구도 없습니다 — 부분 구현.
+- Event Log와 Replay — `append_event`로 상태 전이(`transition`, `approve`가 호출한 완료 전이 포함), `sync-templates`, `adopt`, `quota-retry`/`auto-step`, Task Lock 회수 이벤트뿐 아니라 `dispatch`/`observe`/`quota-check` 직접 호출(자동화 경로의 `auto_step_turn`과 구분되는 `dispatch`/`observe`/`quota_check` event, 매 호출 그대로 기록·빈도 제한 없음)도 `.harness/evidence/events.tsv`에 남습니다(task-005). `quota_check`의 detail에는 쿼터 잔여 수치를 넣지 않고 provider·판정(ok/low/unknown) 같은 식별자만 남깁니다. 다만 이 로그를 읽어 재구성하는 Replay 도구는 여전히 없습니다 — 기록만 있고 Replay는 없는 상태.
 - SQLite Lease와 Controller Epoch
 - Fencing Token — §8.1/§8.2의 Task Lock(`mkdir` 기반)이 최소 버전으로 구현되어 있습니다. PID 생존 확인과 stale 회수까지만 하는 권고적 잠금이며, SQLite Lease/Epoch 수준의 완전한 Fencing Token은 아닙니다.
 - Atomic Outbox
