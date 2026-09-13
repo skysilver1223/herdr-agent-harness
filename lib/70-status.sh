@@ -11,6 +11,58 @@ _runtime_json_escape() {
   printf '%s' "$value"
 }
 
+# herdr agent list의 최상위 Agent 객체를 한 줄씩 낸다. jq는 선택 의존성이므로
+# 없을 때도 문자열 escape와 객체·배열 깊이를 세어 agents 배열의 객체 경계를
+# 복원한다. 이 방식은 result/type의 필드 순서나 agents 뒤의 wrapper suffix에
+# 의존하지 않고, 빈 배열과 agent_session 같은 중첩 객체도 안전하게 처리한다.
+_status_agent_objects() {
+  local input="$1"
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$input" | jq -c '.result.agents[]?' 2>/dev/null || true
+    return
+  fi
+  printf '%s' "$input" | awk '
+    { json = json $0 }
+    END {
+      if (!match(json, /"agents"[[:space:]]*:[[:space:]]*\[/)) exit
+      array_depth = 1
+      object_depth = 0
+      object_start = 0
+      in_string = 0
+      escaped = 0
+      start = RSTART + RLENGTH
+      for (i = start; i <= length(json); i++) {
+        char = substr(json, i, 1)
+        if (in_string) {
+          if (escaped) escaped = 0
+          else if (char == "\\") escaped = 1
+          else if (char == "\"") in_string = 0
+          continue
+        }
+        if (char == "\"") { in_string = 1; continue }
+        if (char == "[") { array_depth++; continue }
+        if (char == "]") {
+          if (array_depth == 1) break
+          array_depth--
+          continue
+        }
+        if (char == "{") {
+          if (array_depth == 1 && object_depth == 0) object_start = i
+          object_depth++
+          continue
+        }
+        if (char == "}") {
+          object_depth--
+          if (array_depth == 1 && object_depth == 0 && object_start > 0) {
+            print substr(json, object_start, i - object_start + 1)
+            object_start = 0
+          }
+        }
+      }
+    }
+  '
+}
+
 cmd_status_live() {
   local path="${1:-.}" json=0
   if [[ "$path" == --json ]]; then json=1; path=.; shift; else shift || true; fi
@@ -18,8 +70,8 @@ cmd_status_live() {
     case "$1" in --json) json=1 ;; *) die "알 수 없는 status --live 옵션: $1" ;; esac
     shift
   done
-  local root agent_list agent_status git_status records_file pending_file meta task role agent_name pane_id
-  local task_path document_status herdr_status verdict matched_object approval first
+  local root agent_list agent_status git_status records_file pending_file agents_file meta task role agent_name pane_id
+  local task_path document_status herdr_status verdict matched_object approval first agent_object agent_cwd foreground_cwd
   root="$(project_root "$path")"
   set +e
   agent_list="$(herdr agent list 2>&1)"
@@ -29,7 +81,11 @@ cmd_status_live() {
   mkdir -p "$root/.harness/runtime"
   records_file="$(mktemp "$root/.harness/runtime/.status-records.XXXXXX")"
   pending_file="$(mktemp "$root/.harness/runtime/.status-pending.XXXXXX")"
-  trap "rm -f -- '$records_file' '$pending_file'" RETURN
+  agents_file="$(mktemp "$root/.harness/runtime/.status-agents.XXXXXX")"
+  trap "rm -f -- '$records_file' '$pending_file' '$agents_file'" RETURN
+  if (( agent_status == 0 )); then
+    _status_agent_objects "$agent_list" >"$agents_file"
+  fi
 
   shopt -s nullglob
   for meta in "$root"/.harness/runtime/*.meta; do
@@ -48,12 +104,8 @@ cmd_status_live() {
 
     herdr_status=missing
     if (( agent_status == 0 )); then
-      if command -v jq >/dev/null 2>&1; then
-        herdr_status="$(printf '%s' "$agent_list" | jq -r --arg name "$agent_name" --arg pane "$pane_id" '.result.agents[]? | select(.name == $name and .pane_id == $pane) | .agent_status' 2>/dev/null | head -n 1 || true)"
-      else
-        matched_object="$(printf '%s' "$agent_list" | sed 's/},{/}\n{/g' | grep -F "\"name\":\"$agent_name\"" | grep -F "\"pane_id\":\"$pane_id\"" | head -n 1 || true)"
-        [[ -z "$matched_object" ]] || herdr_status="$(_runtime_json_field "$matched_object" agent_status)"
-      fi
+      matched_object="$(grep -F "\"name\":\"$agent_name\"" "$agents_file" | grep -F "\"pane_id\":\"$pane_id\"" | head -n 1 || true)"
+      [[ -z "$matched_object" ]] || herdr_status="$(_runtime_json_field "$matched_object" agent_status)"
       herdr_status="${herdr_status:-missing}"
     else
       herdr_status=unavailable
@@ -70,6 +122,29 @@ cmd_status_live() {
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$task" "$role" "$document_status" "$agent_name" "$pane_id" "$herdr_status" "$verdict" >>"$records_file"
   done
+
+  # meta에서 시작하면 덮어쓰기로 추적을 잃은 이전 Agent는 순회 대상 자체가
+  # 되지 않는다. Herdr 목록도 반대 방향으로 대조하되, 이 프로젝트 cwd에
+  # 속하고 Harness 명명 규칙(hh-*)을 쓰는 Agent만 ORPHAN 사실로 표시한다.
+  if (( agent_status == 0 )); then
+    while IFS= read -r agent_object; do
+      [[ -n "$agent_object" ]] || continue
+      agent_name="$(_runtime_json_field "$agent_object" name)"
+      [[ "$agent_name" == hh-* ]] || continue
+      pane_id="$(_runtime_json_field "$agent_object" pane_id)"
+      [[ -n "$pane_id" ]] || continue
+      agent_cwd="$(_runtime_json_field "$agent_object" cwd)"
+      foreground_cwd="$(_runtime_json_field "$agent_object" foreground_cwd)"
+      [[ "$agent_cwd" == "$root" || "$foreground_cwd" == "$root" ]] || continue
+      if awk -F'\t' -v name="$agent_name" -v pane="$pane_id" \
+          '$4 == name && $5 == pane { found=1 } END { exit !found }' "$records_file"; then
+        continue
+      fi
+      herdr_status="$(_runtime_json_field "$agent_object" agent_status)"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        - - untracked "$agent_name" "$pane_id" "${herdr_status:-unknown}" ORPHAN >>"$records_file"
+    done <"$agents_file"
+  fi
 
   while IFS= read -r task; do
     [[ -n "$task" ]] || continue
@@ -128,7 +203,7 @@ cmd_status_live() {
       printf -- '- 없음\n'
     fi
   fi
-  rm -f -- "$records_file" "$pending_file"
+  rm -f -- "$records_file" "$pending_file" "$agents_file"
 }
 
 cmd_doctor() {

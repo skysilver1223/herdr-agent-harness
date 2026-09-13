@@ -68,6 +68,30 @@ cmd_dispatch() {
 
   runtime_dir="$root/.harness/runtime"
   mkdir -p "$runtime_dir" "$root/.harness/attempts" "$root/.harness/evidence"
+
+  # 같은 Task·역할의 meta를 조용히 덮어쓰면, 살아 있는 이전 Agent와 Pane은
+  # close-agent/status --live 양쪽 추적에서 사라진다. print-only는 meta도 Pane도
+  # 쓰지 않으므로 제외하고, 실제 dispatch만 기존 Agent 생존을 먼저 확인한다.
+  # adopted=1도 똑같이 막되 정리는 기존 close-agent의 --force 규칙에 맡긴다.
+  local existing_meta existing_agent existing_pane existing_adopted
+  local existing_get_output existing_get_status quoted_close_path
+  existing_meta="$runtime_dir/$task_id-$role.meta"
+  if (( print_only == 0 )) && [[ -f "$existing_meta" ]]; then
+    existing_agent="$(_runtime_meta_value "$existing_meta" agent_name)"
+    existing_pane="$(_runtime_meta_value "$existing_meta" pane_id)"
+    existing_adopted="$(_runtime_meta_value "$existing_meta" adopted)"
+    if [[ -n "$existing_agent" ]]; then
+      set +e
+      existing_get_output="$(herdr agent get "$existing_agent" 2>&1)"
+      existing_get_status=$?
+      set -e
+      if (( existing_get_status == 0 )); then
+        printf -v quoted_close_path '%q' "$path"
+        die "재dispatch를 거부합니다: 같은 Task·역할의 기존 Agent가 살아 있습니다 (agent_name=$existing_agent, pane_id=${existing_pane:-(미기록)}). 먼저 '$SCRIPT_NAME close-agent $quoted_close_path $task_id $role'로 정리하세요. Agent가 working 상태이거나 adopted=${existing_adopted:-0}이면 상태를 확인한 뒤 --force를 명시해야 합니다."
+      fi
+    fi
+  fi
+
   context="$runtime_dir/$task_id-context-$role.md"
   if ! _runtime_context_packet "$root" "$task_id" "$role" "$task_file" "$context" "$extra_prompt"; then
     _runtime_write_result "$root" "$task_id" "$role" error

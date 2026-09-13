@@ -138,6 +138,18 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 
 기본은 `dispatch`입니다. 취향이 아니라 구조 때문입니다 — `transition` 게이트가 Attempt·Evidence의 존재를 요구하므로, Agent 생성을 사람 손에 넘기면 그 게이트가 헐거워집니다. `dispatch`에서만 `pane_id`·`agent_name`·baseline commit·승인 모드·모델과 출처가 자동 기록되고, `observe`·`close-agent`·`quota-check`·`auto-step`이 그 Agent를 찾을 수 있습니다.
 
+`dispatch`는 같은 Task·역할의 runtime meta를 쓰기 전에 기존 `agent_name`을
+`herdr agent get`으로 확인합니다. Agent가 살아 있으면 이전 `agent_name`·
+`pane_id`와 `close-agent` 사용법을 내고 Pane 생성 전에 거부합니다. 자동 종료나
+우회 플래그는 없으며, 기존 Agent 조회가 실패하거나 meta가 없을 때만 새 Pane으로
+진행합니다. 이 생존 검사는 `adopted=1`에도 같지만 adopt Pane과 working Agent의
+정리는 기존 `close-agent --force` 불변식을 그대로 따릅니다.
+
+`status --live`는 runtime meta → Herdr 목록 대조 뒤 Herdr 목록 → meta 역대조도
+수행합니다. 프로젝트 root와 `cwd` 또는 `foreground_cwd`가 같고 이름이 `hh-*`인
+Agent 중 meta의 `agent_name`·`pane_id` 쌍에 없는 항목을 `ORPHAN`으로 표시합니다.
+다른 프로젝트 cwd의 Agent는 제외하며, 사실을 표시할 뿐 자동으로 닫지 않습니다.
+
 `--timeout`은 Herdr `agent start`가 실제로 받는 상한(300000ms)까지만 허용합니다.
 그보다 큰 값은 인수 파싱 단계에서, 즉 Pane을 만들기 전에 거부합니다(사용자
 실측 2026-09-13: `--timeout 1800000`·`900000` 모두 `invalid_agent_timeout`으로

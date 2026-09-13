@@ -516,6 +516,139 @@ AC_PY
     die "사람 Pane인데 호출자 게이트에 걸렸습니다."
   rm -f "$test_project/.harness/runtime/task-001-worker.meta"
 
+  # --- 재dispatch 고아 Pane 방지 + status --live 전수 탐지 ---------------
+  # 실측(task-005 Attempt 2): 살아 있는 hh-task-005-w-1의 meta가 같은
+  # Task·역할 재dispatch로 hh-task-005-w-2에 덮어써져 close-agent와
+  # status --live 양쪽 시야에서 사라졌다. 실제 Herdr·Provider·네트워크 대신
+  # PATH의 herdr 스텁으로 생존/사망/목록 응답을 고정한다(AC-001~005).
+  local redispatch_project="$test_root/redispatch-project"
+  local redispatch_stub_dir="$test_root/redispatch-herdr-stub"
+  local redispatch_log="$test_root/redispatch-herdr-calls.log"
+  local redispatch_task redispatch_meta redispatch_output
+  local redispatch_fallback_bin redispatch_fallback_output redispatch_fallback_expected
+  cp -a "$test_project" "$redispatch_project"
+  redispatch_task="$redispatch_project/.harness/tasks/task-redispatch.yaml"
+  redispatch_meta="$redispatch_project/.harness/runtime/task-redispatch-worker.meta"
+  sed -e 's/^task_id: .*/task_id: task-redispatch/' \
+      -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+      -e 's/^status: .*/status: active/' \
+      "$redispatch_project/.harness/tasks/TEMPLATE.yaml" >"$redispatch_task"
+  mkdir -p "$redispatch_stub_dir"
+  cat >"$redispatch_stub_dir/herdr" <<'REDISPATCH_HERDR_STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${REDISPATCH_HERDR_LOG:?}"
+if [[ "${1:-}" == agent && "${2:-}" == get ]]; then
+  case "${3:-}" in
+    hh-task-redispatch-w-live|hh-task-redispatch-w-adopted)
+      printf '{"result":{"name":"%s","pane_id":"%s","agent_status":"working"}}\n' \
+        "$3" "${REDISPATCH_LIVE_PANE:-wREDISPATCH:p1}"
+      exit 0
+      ;;
+    *) exit 1 ;;
+  esac
+fi
+if [[ "${1:-}" == agent && "${2:-}" == list ]]; then
+  printf '{"result":{"agents":[{"agent":"codex","agent_status":"working","cwd":"%s","foreground_cwd":"%s","name":"hh-task-redispatch-w-live","pane_id":"wREDISPATCH:p1"},{"agent":"codex","agent_status":"idle","cwd":"%s","foreground_cwd":"%s","name":"hh-task-redispatch-w-orphan","pane_id":"wREDISPATCH:p0"},{"agent":"codex","agent_status":"working","cwd":"/other/project","foreground_cwd":"/other/project","name":"hh-foreign-w-1","pane_id":"wFOREIGN:p1"}]},"type":"agent_list"}\n' \
+    "${REDISPATCH_PROJECT:?}" "${REDISPATCH_PROJECT:?}" \
+    "${REDISPATCH_PROJECT:?}" "${REDISPATCH_PROJECT:?}"
+  exit 0
+fi
+if [[ "${1:-}" == pane && "${2:-}" == split ]]; then
+  printf '{"pane_id":"wREDISPATCH:p2"}\n'
+  exit 0
+fi
+if [[ "${1:-}" == agent && "${2:-}" == start ]]; then
+  printf '{"type":"error","error":{"type":"internal_error","message":"redispatch selftest stop"}}\n' >&2
+  exit 1
+fi
+if [[ "${1:-}" == pane && "${2:-}" == close ]]; then
+  exit 0
+fi
+exit 125
+REDISPATCH_HERDR_STUB
+  chmod +x "$redispatch_stub_dir/herdr"
+
+  # 이 환경에 jq가 설치돼 있어도 parser fallback을 반드시 직접 실행한다.
+  # awk만 있는 격리 PATH에서 실제 Herdr wrapper suffix, 중첩 객체, 빈 배열,
+  # result/type 필드 순서 변화를 검증해 jq 분기만 통과하고 PASS가 찍히지 않게 한다.
+  redispatch_fallback_bin="$test_root/redispatch-no-jq-bin"
+  mkdir -p "$redispatch_fallback_bin"
+  ln -s "$(command -v awk)" "$redispatch_fallback_bin/awk"
+  redispatch_fallback_expected='{"agent":"codex","agent_session":{"kind":"id"},"name":"hh-task-redispatch-w-live","pane_id":"wREDISPATCH:p1"}
+{"agent":"codex","name":"hh-task-redispatch-w-orphan","pane_id":"wREDISPATCH:p0"}
+{"agent":"codex","name":"hh-foreign-w-1","pane_id":"wFOREIGN:p1"}'
+  redispatch_fallback_output="$(PATH="$redispatch_fallback_bin" _status_agent_objects \
+    '{"result":{"agents":[{"agent":"codex","agent_session":{"kind":"id"},"name":"hh-task-redispatch-w-live","pane_id":"wREDISPATCH:p1"},{"agent":"codex","name":"hh-task-redispatch-w-orphan","pane_id":"wREDISPATCH:p0"},{"agent":"codex","name":"hh-foreign-w-1","pane_id":"wFOREIGN:p1"}]},"type":"agent_list"}')"
+  [[ "$redispatch_fallback_output" == "$redispatch_fallback_expected" ]] ||
+    die "jq 없는 status Agent 파서가 객체 경계/suffix를 잘못 처리했습니다(AC-004): $redispatch_fallback_output"
+  redispatch_fallback_output="$(PATH="$redispatch_fallback_bin" _status_agent_objects \
+    '{"type":"agent_list","result":{"agents":[],"extra":"필드 순서 검사"},"id":"cli:agent:list"}')"
+  [[ -z "$redispatch_fallback_output" ]] ||
+    die "jq 없는 status Agent 파서가 빈 agents 배열에서 객체를 만들었습니다(AC-004): $redispatch_fallback_output"
+
+  # 살아 있는 기존 Agent는 meta의 adopted 값과 무관하게 Pane 생성 전에 막고,
+  # 사람이 판단할 수 있도록 정확한 Agent/Pane과 close-agent 사용법을 낸다.
+  printf 'task_id=task-redispatch\nrole=worker\nagent_name=hh-task-redispatch-w-live\npane_id=wREDISPATCH:p1\nprovider=codex\nattempt=1\nadopted=0\n' >"$redispatch_meta"
+  : >"$redispatch_log"
+  set +e
+  redispatch_output="$(PATH="$redispatch_stub_dir:$PATH" REDISPATCH_HERDR_LOG="$redispatch_log" \
+    REDISPATCH_PROJECT="$redispatch_project" HERDR_ENV=1 \
+    bash "$SELF_PATH" dispatch "$redispatch_project" task-redispatch worker 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "살아 있는 Agent의 meta를 재dispatch가 덮어썼습니다(AC-001)."
+  [[ "$redispatch_output" == *'hh-task-redispatch-w-live'* && "$redispatch_output" == *'wREDISPATCH:p1'* ]] ||
+    die "재dispatch 거부 메시지에 기존 agent_name·pane_id가 없습니다(AC-001): $redispatch_output"
+  printf '%s' "$redispatch_output" | grep -q 'close-agent' ||
+    die "재dispatch 거부 메시지에 close-agent 사용법이 없습니다(AC-001)."
+  ! grep -q '^pane split ' "$redispatch_log" ||
+    die "살아 있는 Agent를 거부하기 전에 Pane을 만들었습니다(AC-001)."
+  grep -q '^agent_name=hh-task-redispatch-w-live$' "$redispatch_meta" ||
+    die "거부된 재dispatch가 기존 meta를 덮어썼습니다(AC-001)."
+
+  sed -i 's/^agent_name=.*/agent_name=hh-task-redispatch-w-adopted/; s/^pane_id=.*/pane_id=wREDISPATCH:pADOPT/; s/^adopted=.*/adopted=1/' "$redispatch_meta"
+  : >"$redispatch_log"
+  set +e
+  redispatch_output="$(PATH="$redispatch_stub_dir:$PATH" REDISPATCH_HERDR_LOG="$redispatch_log" \
+    REDISPATCH_PROJECT="$redispatch_project" REDISPATCH_LIVE_PANE=wREDISPATCH:pADOPT HERDR_ENV=1 \
+    bash "$SELF_PATH" dispatch "$redispatch_project" task-redispatch worker 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 && "$redispatch_output" == *'close-agent'* ]] ||
+    die "adopt로 등록한 살아 있는 Agent에 재dispatch 거부가 적용되지 않았습니다(AC-003)."
+  ! grep -q '^pane split ' "$redispatch_log" ||
+    die "adopt로 등록한 Agent를 거부하기 전에 Pane을 만들었습니다(AC-003)."
+
+  # 조회 실패(죽은 Agent)와 meta 없음은 기존처럼 Pane 생성 단계까지 진행한다.
+  printf 'task_id=task-redispatch\nrole=worker\nagent_name=hh-task-redispatch-w-dead\npane_id=wREDISPATCH:pDEAD\nprovider=codex\nattempt=1\nadopted=0\n' >"$redispatch_meta"
+  : >"$redispatch_log"
+  PATH="$redispatch_stub_dir:$PATH" REDISPATCH_HERDR_LOG="$redispatch_log" \
+    REDISPATCH_PROJECT="$redispatch_project" HERDR_ENV=1 \
+    bash "$SELF_PATH" dispatch "$redispatch_project" task-redispatch worker >/dev/null 2>&1 || true
+  grep -q '^agent get hh-task-redispatch-w-dead$' "$redispatch_log" ||
+    die "재dispatch가 기존 Agent의 생존을 확인하지 않았습니다(AC-002)."
+  grep -q '^pane split ' "$redispatch_log" ||
+    die "죽은 이전 Agent 때문에 정상 재dispatch가 막혔습니다(AC-002)."
+
+  rm -f "$redispatch_meta"
+  : >"$redispatch_log"
+  PATH="$redispatch_stub_dir:$PATH" REDISPATCH_HERDR_LOG="$redispatch_log" \
+    REDISPATCH_PROJECT="$redispatch_project" HERDR_ENV=1 \
+    bash "$SELF_PATH" dispatch "$redispatch_project" task-redispatch worker >/dev/null 2>&1 || true
+  grep -q '^pane split ' "$redispatch_log" ||
+    die "meta가 없는 최초 dispatch가 막혔습니다(AC-002)."
+
+  # 등록된 Agent와 같은 cwd의 이름 있는 hh-*만 전수 대조한다. meta에 없는
+  # 항목은 ORPHAN, 다른 프로젝트 cwd의 hh-*는 범위 밖이어야 한다(결정 02).
+  printf 'task_id=task-redispatch\nrole=worker\nagent_name=hh-task-redispatch-w-live\npane_id=wREDISPATCH:p1\nprovider=codex\nattempt=1\nadopted=0\n' >"$redispatch_meta"
+  redispatch_output="$(PATH="$redispatch_stub_dir:$PATH" REDISPATCH_HERDR_LOG="$redispatch_log" \
+    REDISPATCH_PROJECT="$redispatch_project" \
+    bash "$SELF_PATH" status "$redispatch_project" --live --json)"
+  [[ "$redispatch_output" == *'"agent":"hh-task-redispatch-w-orphan"'* && "$redispatch_output" == *'"verdict":"ORPHAN"'* ]] ||
+    die "status --live가 동일 프로젝트 cwd의 meta 미등록 hh-* Agent를 ORPHAN으로 표시하지 않았습니다(AC-004)."
+  [[ "$redispatch_output" != *'hh-foreign-w-1'* ]] ||
+    die "status --live가 다른 프로젝트 cwd의 hh-* Agent를 ORPHAN으로 오탐했습니다(결정 02)."
+
   # --- --print-only 출력은 붙여 넣어도 안전하게 인용돼 있어야 한다 ----------
   local tricky_project="$test_root/tricky dir; touch INJECTED"
   bash "$SELF_PATH" init "$tricky_project" --name tricky --goal "인용 검사" >/dev/null
@@ -2803,6 +2936,7 @@ STUB
     'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)'
     'PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)'
     'PASS: dispatch 기동 실패 정리 (timeout 상한 300000 Pane 생성 전 거부/기존값·상한값 통과, agent start 실패 단계·안전한 분류·raw Evidence 경로 표면화/원문 비노출, dispatch가 만든 Pane 자동 회수·회수 실패 표면화, Attempt·Evidence 구조적 기록, Herdr·Provider 미호출)'
+    'PASS: 재dispatch 고아 Pane 방지'
     'PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)'
     'PASS: 모델 등급 (Task·역할 기본 등급 해석/우선순위 5단계/목록순서 무관/미정의·허용목록불일치·오타 거부·키 명시/프리미엄 합집합/격리 유지/codex 고정키·claude --effort·agy 흡수 속도/-c 승인통로 차단/models 표시)'
     'PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)'

@@ -332,6 +332,7 @@ PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
 PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)
 PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)
 PASS: dispatch 기동 실패 정리 (timeout 상한 300000 Pane 생성 전 거부/기존값·상한값 통과, agent start 실패 단계·안전한 분류·raw Evidence 경로 표면화/원문 비노출, dispatch가 만든 Pane 자동 회수·회수 실패 표면화, Attempt·Evidence 구조적 기록, Herdr·Provider 미호출)
+PASS: 재dispatch 고아 Pane 방지
 PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)
 PASS: 모델 등급 (Task·역할 기본 등급 해석/우선순위 5단계/목록순서 무관/미정의·허용목록불일치·오타 거부·키 명시/프리미엄 합집합/격리 유지/codex 고정키·claude --effort·agy 흡수 속도/-c 승인통로 차단/models 표시)
 PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)
@@ -440,7 +441,7 @@ herdr-harness status ~/Projects/snmp-normalizer --live
 herdr-harness status ~/Projects/snmp-normalizer --live --json
 ```
 
-기본 상태 명령은 `STATE.md`를 출력합니다. `--live`는 문서 상태와 Herdr Agent, Git 상태를 함께 대조하여 `DRIFT`와 `ORPHAN`을 표시합니다. 상태를 자동 수정하지는 않습니다.
+기본 상태 명령은 `STATE.md`를 출력합니다. `--live`는 문서 상태와 Herdr Agent, Git 상태를 함께 대조하여 `DRIFT`와 `ORPHAN`을 표시합니다. runtime meta에서 시작하는 대조뿐 아니라 Herdr 목록도 역방향으로 확인해, 이 프로젝트와 같은 `cwd`/`foreground_cwd`에 있으면서 meta에 등록되지 않은 이름 있는 `hh-*` Agent를 `ORPHAN`으로 표시합니다. 다른 프로젝트 cwd의 Agent는 포함하지 않으며 상태를 자동 수정하지도 않습니다.
 
 ## 명령 사용법 찾기
 
@@ -511,7 +512,7 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness validate [PATH] [--wave ID] [--no-git]` | Git 기준선, Task/Wave, Provider, 의존성, 실행 상한과 write scope를 읽기 전용 검증 |
 | `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제. `submitted`로 갈 때는 Acceptance Criteria의 `verified_by` 명령을 직접 실행하고 하나라도 실패하면 거부 |
 | `herdr-harness approve PATH TASK_ID --confirm-user-approval` | 사용자 명시 승인 확인 후 승인 증거를 원자적으로 기록하고 기존 `transition` 게이트로 `completed` 전이 |
-| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS(상한 300000)] [--print-only] [--extra-prompt FILE] [--cwd DIR]` | 역할별 모델을 선택하고 프리미엄 승인·Provider 기본값 누출 차단을 적용한 뒤 Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--timeout`이 300000ms를 넘으면 Pane을 만들기 전에 거부. agent start 실패 시 실패 단계·안전한 분류·raw Evidence 경로를 표면화하고 자신이 만든 Pane을 자동 회수(회수 실패도 표면화). `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
+| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS(상한 300000)] [--print-only] [--extra-prompt FILE] [--cwd DIR]` | 같은 Task·역할의 살아 있는 기존 Agent가 있으면 이름·Pane과 `close-agent` 사용법을 안내하고 Pane 생성 전에 거부. 그 외에는 역할별 모델을 선택하고 프리미엄 승인·Provider 기본값 누출 차단을 적용한 뒤 Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--timeout`이 300000ms를 넘으면 Pane을 만들기 전에 거부. agent start 실패 시 실패 단계·안전한 분류·raw Evidence 경로를 표면화하고 자신이 만든 Pane을 자동 회수(회수 실패도 표면화). `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
 | `herdr-harness observe PATH TASK_ID [worker\|reviewer]` | 기존 Agent를 재조회하고 Evidence에 추가 |
 | `herdr-harness adopt PATH TASK_ID worker\|reviewer --pane PANE --agent NAME [--provider P]` | 사람이 직접 띄운 Agent를 Harness 추적에 등록(`--print-only` 폴백의 마지막 단계) |
 | `herdr-harness close-agent PATH TASK_ID [worker\|reviewer] [--force]` | Harness runtime에 등록된 Pane만 정리 |
@@ -522,6 +523,8 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness auto-step PATH TASK_ID [--max-turns N]` | (opt-in) 유한 턴 동안 dispatch 1회 + observe 반복 |
 
 `dispatch`는 프롬프트 미전달로 확인된 경우의 1회 재전송 외에는 Task 재시도, 상태 전이, blocked 응답 또는 Provider failover를 수행하지 않습니다. Orchestrator는 반환된 `dispatch_result`를 확인한 뒤 사용자 승인 경계를 지키며 다음 스텝을 호출합니다.
+
+같은 Task·역할을 다시 `dispatch`할 때 runtime meta의 기존 Agent가 `herdr agent get`으로 살아 있음이 확인되면, meta를 덮어쓰지 않고 Pane 생성 전에 거부합니다. 출력된 기존 `agent_name`·`pane_id`를 확인한 뒤 `close-agent`로 명시 정리하고 다시 호출해야 하며, 별도 우회 플래그는 없습니다. 기존 Agent가 이미 죽어 조회에 실패하거나 meta가 없으면 기존처럼 진행합니다. 이 검사는 `adopted=1`에도 동일하지만, adopt Pane과 working Agent를 닫을 때 필요한 `close-agent --force` 규칙은 그대로 유지됩니다.
 
 `dispatch`가 `herdr agent get`의 상태를 정규화하는 표는 다음과 같습니다. `idle`과
 `done`은 상태 이름만으로 성공 처리하지 않고, 프롬프트 직전과 이후의 `revision`·
@@ -582,6 +585,7 @@ herdr-harness observe . task-001 worker
 
 - `--print-only`는 **아무 상태도 남기지 않습니다**(Context Packet만 씁니다). 시작하지 않은 시도를 Attempt로 남기면 전이 게이트가 헐거워지기 때문입니다.
 - `adopt`는 등록 전에 `herdr agent get`으로 그 Agent가 실제로 살아 있는지 확인하고, 없으면 거부합니다.
+- 같은 Task·역할의 meta가 이미 살아 있는 Agent를 가리키면 `dispatch`는 덮어쓰지 않고 `close-agent` 선행을 요구합니다. 따라서 이전 Pane이 Harness 시야 밖 고아로 바뀌지 않습니다.
 
 #### Agent를 어디서 띄우는가 — `--cwd`
 

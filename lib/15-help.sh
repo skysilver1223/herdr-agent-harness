@@ -21,7 +21,7 @@ HARNESS_COMMAND_SUMMARIES=(
   "validate:상태를 바꾸지 않고 문서·정책·Git 정합성만 검사한다"
   "transition:Task 상태를 전이표와 게이트에 따라 강제 전이한다"
   "approve:사용자 승인을 기록하고 awaiting_approval을 completed로 만든다"
-  "dispatch:Task의 역할·모델 정책에 맞는 Agent를 Pane에서 한 턴 실행한다"
+  "dispatch:기존 Agent 중복을 막고 Task의 역할·모델 정책에 맞는 Agent를 한 턴 실행한다"
   "observe:이미 실행 중인 Agent의 출력을 다시 읽어 Evidence를 갱신한다"
   "adopt:사람이 직접 띄운 Agent를 Harness 추적에 등록한다"
   "close-agent:Harness가 만든 Agent Pane을 정리한다"
@@ -332,6 +332,14 @@ agent start 실패 처리:
   실패도 숨기지 않고 \`herdr pane close PANE_ID\`로 수동 정리하라고 안내한다).
   adopt로 등록한 Pane·사용자 Pane·기존 등록 Agent는 이 자동 회수 대상이
   아니다.
+
+재dispatch 보호:
+  같은 Task·역할의 runtime meta가 가리키는 Agent가 아직 살아 있으면 기존
+  agent_name·pane_id를 표시하고 Pane을 만들기 전에 거부한다. 먼저
+  \`$SCRIPT_NAME close-agent PATH TASK_ID ROLE\`로 기존 Pane을 정리한 뒤 다시
+  dispatch한다. working Agent나 adopt로 등록한 Pane은 상태를 확인하고
+  close-agent에 --force를 명시해야 한다. 별도 dispatch 우회 플래그는 없다.
+  기존 Agent 조회가 실패하거나 meta가 없으면 종전처럼 정상 진행한다.
 
 역할(ROLE): worker | reviewer
 
