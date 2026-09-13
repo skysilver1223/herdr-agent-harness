@@ -583,6 +583,169 @@ AC_PY
   printf '%s' "$pane_split_lines" | grep -q -- '--cwd "\$root"' &&
     die "pane split이 아직 \$root를 직접 씁니다 — --cwd가 무시됩니다($dispatch_src)."
 
+  # --- dispatch 기동 실패 정리: timeout 상한, agent start 실패 진단, Pane 회수 ---
+  # 사용자 실측(2026-09-13): --timeout 1800000·900000이 Herdr agent start 상한
+  # 300000ms를 넘어 Pane split 뒤에야 invalid_agent_timeout으로 실패했고, 빈
+  # Pane 두 개가 자동 회수되지 않아 수동 herdr pane close가 필요했다. 여기서는
+  # 실제 Herdr·Provider·네트워크를 호출하지 않고 PATH herdr 스텁만으로 같은
+  # 실패·회수 경로를 재현한다(AC-005, 쿼터 비소모).
+  local startfail_project="$test_root/startfail-project"
+  cp -a "$test_project" "$startfail_project"
+  # 별도 Task ID를 쓴다 — task-001은 위(상태 전이표 검사)에서 이미
+  # task-001-attempt-1.md 더미를 심어 뒀고, cp -a로 그대로 복사돼 Attempt 번호가
+  # 1부터 시작하지 않게 된다.
+  sed -e 's/^task_id: .*/task_id: task-startfail/' \
+      -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+      "$startfail_project/.harness/tasks/TEMPLATE.yaml" >"$startfail_project/.harness/tasks/task-startfail.yaml"
+
+  # AC-001: 300000ms 초과는 Pane을 만들기 전에 거부되고, 상한값과 observe 후속
+  # 안내를 메시지에 담는다. --print-only에서도 실패해야 한다(파싱 단계 검증).
+  local timeout_over_error
+  set +e
+  timeout_over_error="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$startfail_project" task-startfail worker --print-only --timeout 1800000 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "--timeout 1800000(사용자 실측값)이 거부되지 않았습니다(AC-001)."
+  printf '%s' "$timeout_over_error" | grep -q '300000' ||
+    die "timeout 상한 거부 메시지에 허용 상한(300000)이 없습니다."
+  printf '%s' "$timeout_over_error" | grep -q 'observe' ||
+    die "timeout 상한 거부 메시지에 observe 후속 관측 안내가 없습니다."
+
+  set +e
+  bash "$SELF_PATH" dispatch "$startfail_project" task-startfail worker --print-only --timeout 900000 \
+    >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "--timeout 900000(사용자 실측값)이 거부되지 않았습니다(AC-001)."
+
+  # 불변식: 기존 기본값 120000과 상한값 300000 자체는 그대로 통과한다.
+  local timeout_boundary_output
+  timeout_boundary_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$startfail_project" task-startfail worker --print-only --timeout 300000 2>&1)"
+  printf '%s' "$timeout_boundary_output" | grep -q '^dispatch_result=print_only$' ||
+    die "상한값 300000ms 자체가 거부됐습니다(불변식 위반)."
+  timeout_boundary_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$startfail_project" task-startfail worker --print-only 2>&1)"
+  printf '%s' "$timeout_boundary_output" | grep -q '^dispatch_result=print_only$' ||
+    die "기존 기본값(미지정 시 120000)이 거부됐습니다(불변식 위반)."
+
+  # Pane split 뒤 agent start를 실패시키고 pane close를 스텁하는 herdr. 종료
+  # 코드는 STARTFAIL_HERDR_CLOSE_EXIT로 시나리오별(회수 성공/실패)로 바꾼다.
+  local startfail_stub_dir="$test_root/startfail-herdr-stub"
+  local startfail_calls_log="$test_root/startfail-herdr-calls.log"
+  mkdir -p "$startfail_stub_dir"
+  cat >"$startfail_stub_dir/herdr" <<'STARTFAIL_HERDR_STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${STARTFAIL_HERDR_LOG:?}"
+if [[ "${1:-}" == pane && "${2:-}" == split ]]; then
+  printf '{"pane_id":"wSTARTFAIL:p1"}\n'
+  exit 0
+fi
+if [[ "${1:-}" == agent && "${2:-}" == start ]]; then
+  printf '{"type":"error","status":500,"error":{"type":"internal_error","message":"agent start rejected (herdr stub simulated failure for task-015 selftest)"}}\n' >&2
+  exit 1
+fi
+if [[ "${1:-}" == pane && "${2:-}" == close ]]; then
+  exit "${STARTFAIL_HERDR_CLOSE_EXIT:-0}"
+fi
+exit 125
+STARTFAIL_HERDR_STUB
+  chmod +x "$startfail_stub_dir/herdr"
+
+  # AC-001(재확인, 실제 경로): 상한 초과 timeout은 herdr를 한 번도 부르지 않고
+  # 거부돼야 한다 — Pane 생성 전 거부가 --print-only의 우연이 아님을 고정한다.
+  : >"$startfail_calls_log"
+  set +e
+  PATH="$startfail_stub_dir:$PATH" STARTFAIL_HERDR_LOG="$startfail_calls_log" HERDR_ENV=1 \
+    bash "$SELF_PATH" dispatch "$startfail_project" task-startfail worker --timeout 1800000 \
+    >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "실제 dispatch 경로에서도 300000ms 초과 timeout이 거부돼야 합니다(AC-001)."
+  [[ ! -s "$startfail_calls_log" ]] ||
+    die "timeout 상한 거부가 Pane 생성 전에 이뤄지지 않았습니다 — herdr가 호출됐습니다(AC-001): $(tr '\n' ' ' <"$startfail_calls_log")"
+
+  # AC-002·003(회수 성공): agent start 실패가 실패 단계·안전한 분류·raw Evidence
+  # 경로를 함께 내고, Provider 원문 전체는 일반 출력에 오르지 않으며, dispatch가
+  # 직접 만든 Pane은 자동 회수된다.
+  local startfail_output
+  : >"$startfail_calls_log"
+  set +e
+  startfail_output="$(PATH="$startfail_stub_dir:$PATH" STARTFAIL_HERDR_LOG="$startfail_calls_log" \
+    STARTFAIL_HERDR_CLOSE_EXIT=0 HERDR_ENV=1 \
+    bash "$SELF_PATH" dispatch "$startfail_project" task-startfail worker --timeout 60000 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "agent start 실패인데 dispatch가 성공으로 끝났습니다."
+  printf '%s' "$startfail_output" | grep -q '^dispatch_result=error$' ||
+    die "agent start 실패가 dispatch_result=error로 보고되지 않았습니다."
+  printf '%s' "$startfail_output" | grep -q '^실패 단계: agent_start$' ||
+    die "실패 단계가 stdout/stderr에 표면화되지 않았습니다(AC-002)."
+  printf '%s' "$startfail_output" | grep -q '^분류: ' ||
+    die "안전한 실패 분류가 표면화되지 않았습니다(AC-002)."
+  printf '%s' "$startfail_output" | grep -q 'internal_error' &&
+    die "agent start 실패 원문 전체가 일반 출력으로 승격됐습니다(NFR-02 위반)."
+  printf '%s' "$startfail_output" | grep -q '^Pane 정리: 회수됨 (pane_id=wSTARTFAIL:p1)$' ||
+    die "Pane 자동 회수 성공이 표면화되지 않았습니다(AC-003)."
+  printf '%s' "$startfail_output" | grep -qF '.harness/evidence/raw/task-startfail-worker-attempt-' ||
+    die "raw Evidence 경로가 표면화되지 않았습니다(AC-002)."
+  grep -q '^pane split ' "$startfail_calls_log" ||
+    die "정상 timeout인데도 pane split이 호출되지 않았습니다."
+  grep -q '^agent start ' "$startfail_calls_log" ||
+    die "agent start가 호출되지 않았습니다."
+  grep -q '^pane close wSTARTFAIL:p1$' "$startfail_calls_log" ||
+    die "agent start 실패 뒤 dispatch가 자신이 만든 Pane을 회수하지 않았습니다(AC-003)."
+
+  # AC-004: 실패 단계·분류·Pane 정리 결과가 Attempt·정본 Evidence YAML·raw
+  # Evidence에 구조적으로 남는다(헤더만 남지 않는다).
+  local startfail_attempt="$startfail_project/.harness/attempts/task-startfail-attempt-1.md"
+  [[ -f "$startfail_attempt" ]] || die "실패 Attempt 파일이 생성되지 않았습니다."
+  grep -q '^- Start failure stage: agent_start$' "$startfail_attempt" ||
+    die "Attempt에 실패 단계가 구조적으로 기록되지 않았습니다(AC-004)."
+  grep -q '^- Pane cleanup: 회수됨' "$startfail_attempt" ||
+    die "Attempt에 Pane 회수 결과가 기록되지 않았습니다(AC-004)."
+
+  local startfail_evidence_yaml="$startfail_project/.harness/evidence/task-startfail-worker-attempt-1.yaml"
+  [[ -f "$startfail_evidence_yaml" ]] || die "실패 Evidence YAML이 생성되지 않았습니다."
+  grep -q '실패 단계 agent_start' "$startfail_evidence_yaml" ||
+    die "Evidence YAML 요약에 실패 단계가 없습니다(AC-004)."
+  grep -q 'Pane 정리 회수됨' "$startfail_evidence_yaml" ||
+    die "Evidence YAML 요약에 Pane 정리 결과가 없습니다(AC-004)."
+
+  local startfail_evidence_raw="$startfail_project/.harness/evidence/raw/task-startfail-worker-attempt-1.md"
+  [[ -f "$startfail_evidence_raw" ]] || die "실패 raw Evidence가 생성되지 않았습니다."
+  grep -q '^- Start failure stage: agent_start$' "$startfail_evidence_raw" ||
+    die "raw Evidence에 실패 단계가 없습니다(AC-004)."
+  grep -q 'internal_error' "$startfail_evidence_raw" ||
+    die "raw Evidence에 agent start 원문이 보존되지 않았습니다 — 원문은 raw에만 남아야 합니다."
+
+  # AC-003(회수 실패도 숨기지 않는다): pane close 자체가 실패하면 그 실패도
+  # 표면화하고 Evidence에 남기며, 수동 정리 명령을 안내한다.
+  local startfail_output2
+  : >"$startfail_calls_log"
+  set +e
+  startfail_output2="$(PATH="$startfail_stub_dir:$PATH" STARTFAIL_HERDR_LOG="$startfail_calls_log" \
+    STARTFAIL_HERDR_CLOSE_EXIT=1 HERDR_ENV=1 \
+    bash "$SELF_PATH" dispatch "$startfail_project" task-startfail worker --timeout 60000 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] || die "두 번째(회수 실패) 시나리오에서도 dispatch는 실패여야 합니다."
+  printf '%s' "$startfail_output2" | grep -q '^Pane 정리: 회수 실패' ||
+    die "Pane 회수 실패가 숨겨지지 않고 표면화돼야 합니다(AC-003)."
+  printf '%s' "$startfail_output2" | grep -qF 'herdr pane close' ||
+    die "Pane 회수 실패 시 수동 정리 명령 안내가 없습니다."
+
+  local startfail_attempt2="$startfail_project/.harness/attempts/task-startfail-attempt-2.md"
+  grep -q '^- Pane cleanup: 회수 실패' "$startfail_attempt2" ||
+    die "회수 실패가 Attempt에 기록되지 않았습니다(AC-003·AC-004)."
+  local startfail_evidence_yaml2="$startfail_project/.harness/evidence/task-startfail-worker-attempt-2.yaml"
+  grep -q 'Pane 정리 회수 실패' "$startfail_evidence_yaml2" ||
+    die "회수 실패가 Evidence YAML 요약에 기록되지 않았습니다(AC-003·AC-004)."
+
+  # AC-003(경계): adopt로 등록한 Pane은 이 자동 회수 대상이 아니다 — close-agent의
+  # 기존 --force 게이트(위에서 검증됨)와 별개로, dispatch의 agent start 실패
+  # 분기는 자신이 이번 호출에서 만든 pane_id만 다룬다는 것을 소스에서 고정한다.
+  grep -q 'adopt한 Pane\|adopt로 등록한' "$dispatch_src" ||
+    die "dispatch 소스에 자동 회수가 adopt Pane을 건드리지 않는다는 근거 주석이 없습니다."
+
   # --- 모델 선택: Task 역할별 지정 → 정책 기본값 → Provider 기본값 ---------
   # 승인 인수 allowlist에는 --model을 절대 열지 않는다. 모델은 별도 정책 목록의
   # 토큰과 정확히 일치할 때만 같은 agent_args 배열에 들어가며, print-only와
@@ -2549,6 +2712,7 @@ STUB
     'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)'
     'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)'
     'PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)'
+    'PASS: dispatch 기동 실패 정리 (timeout 상한 300000 Pane 생성 전 거부/기존값·상한값 통과, agent start 실패 단계·안전한 분류·raw Evidence 경로 표면화/원문 비노출, dispatch가 만든 Pane 자동 회수·회수 실패 표면화, Attempt·Evidence 구조적 기록, Herdr·Provider 미호출)'
     'PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)'
     'PASS: 모델 등급 (Task·역할 기본 등급 해석/우선순위 5단계/목록순서 무관/미정의·허용목록불일치·오타 거부·키 명시/프리미엄 합집합/격리 유지/codex 고정키·claude --effort·agy 흡수 속도/-c 승인통로 차단/models 표시)'
     'PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)'

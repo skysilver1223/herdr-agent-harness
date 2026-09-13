@@ -138,6 +138,24 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 
 기본은 `dispatch`입니다. 취향이 아니라 구조 때문입니다 — `transition` 게이트가 Attempt·Evidence의 존재를 요구하므로, Agent 생성을 사람 손에 넘기면 그 게이트가 헐거워집니다. `dispatch`에서만 `pane_id`·`agent_name`·baseline commit·승인 모드·모델과 출처가 자동 기록되고, `observe`·`close-agent`·`quota-check`·`auto-step`이 그 Agent를 찾을 수 있습니다.
 
+`--timeout`은 Herdr `agent start`가 실제로 받는 상한(300000ms)까지만 허용합니다.
+그보다 큰 값은 인수 파싱 단계에서, 즉 Pane을 만들기 전에 거부합니다(사용자
+실측 2026-09-13: `--timeout 1800000`·`900000` 모두 `invalid_agent_timeout`으로
+Pane split 뒤에야 실패해 빈 Pane 두 개가 남았고, 실제 오류 JSON도 raw
+Evidence에만 있어 일반 출력만으로는 원인을 알 수 없었다). 긴 작업은 timeout을
+늘리는 대신 300000 이하로 dispatch한 뒤 `observe`로 이어서 관측합니다.
+
+Pane split이 성공한 뒤 `agent start`가 실패하면 `dispatch_result=error`만 내지
+않고 실패 단계(`agent_start`)·안전한 분류(`invalid_agent_timeout`·
+`agent_pane_busy`·그 밖은 `unknown`)·raw Evidence 경로를 stdout/stderr에 함께
+냅니다. Provider 원문 전체는 Secret·환경 경로 노출 경계 때문에 raw Evidence에만
+남기고 일반 출력에는 올리지 않습니다. 이 실패 분기는 **지금 이 호출이 방금
+`pane split`으로 만든 Pane**만 다룹니다 — `herdr pane close`로 즉시 회수를
+시도하고, 회수 성공·실패 모두 Attempt·Evidence에 구조적으로 남깁니다(회수
+실패도 숨기지 않고 사람이 `herdr pane close PANE_ID`로 정리하도록 안내합니다).
+`adopt`로 등록한 Pane·사용자 Pane·기존 등록 Agent는 이 자동 회수 대상이 아니며,
+그런 Pane은 여전히 `close-agent`의 `--force` 게이트로만 닫힙니다.
+
 `dispatch`·`observe`가 사용하는 상태 정규화는 Herdr의 실제 `agent_status` 다섯 값을
 기준으로 합니다.
 

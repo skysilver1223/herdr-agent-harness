@@ -315,11 +315,29 @@ EOF
   사람이 관리한다. 모델명은 코드가 아니라 agent-policy.yaml의 목록에서
   관리한다.
 
+--timeout MS (기본 120000, 상한 300000):
+  Herdr agent start가 실제로 받아들이는 상한이 300000ms다. 그보다 큰 값은
+  Pane을 만들기 전에 거부한다(사용자 실측: 1800000·900000 모두
+  invalid_agent_timeout으로 Pane split 뒤에야 실패해 빈 Pane이 남았다).
+  작업이 300000ms보다 오래 걸리면 timeout을 늘리지 말고 300000 이하로
+  dispatch한 뒤 \`$SCRIPT_NAME observe PATH TASK_ID ROLE\`로 이어서 관측한다.
+
+agent start 실패 처리:
+  Pane split 뒤 agent start가 실패하면 dispatch_result=error만 내지 않고
+  실패 단계(agent_start)·안전한 분류(예: invalid_agent_timeout·
+  agent_pane_busy·unknown)·raw Evidence 경로를 stdout/stderr에 함께 낸다.
+  Provider 원문 전체는 Secret·환경 경로 노출 경계 때문에 raw Evidence에만
+  남기고 일반 출력에는 올리지 않는다. 이번 호출에서 직접 만든 Pane은 실패
+  즉시 회수를 시도하며, 회수 성공·실패 모두 Attempt·Evidence에 남는다(회수
+  실패도 숨기지 않고 \`herdr pane close PANE_ID\`로 수동 정리하라고 안내한다).
+  adopt로 등록한 Pane·사용자 Pane·기존 등록 Agent는 이 자동 회수 대상이
+  아니다.
+
 역할(ROLE): worker | reviewer
 
 예시:
   $SCRIPT_NAME dispatch . task-001 worker
-  $SCRIPT_NAME dispatch . task-001 reviewer --timeout 600000
+  $SCRIPT_NAME dispatch . task-001 reviewer --timeout 300000
 
 --print-only:
   Pane을 만들지도 Agent를 띄우지도 않고, Context Packet 경로와 직접 실행할

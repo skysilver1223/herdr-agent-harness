@@ -100,6 +100,23 @@ _runtime_scan_quota_signal() {
   return 1
 }
 
+# agent start 실패 원문을 안전한 한 줄 분류로 좁힌다. 사용자 실측
+# (--timeout 1800000/900000 → invalid_agent_timeout)이 표본이다. 여기서
+# 반환하는 문자열만 stdout/stderr와 Attempt·Evidence 요약에 오르고, 원문
+# 전체는 raw Evidence에만 남는다(NFR-02, Secret·환경 경로 노출 경계).
+_runtime_classify_start_failure() {
+  local text="$1"
+  if printf '%s' "$text" | grep -qi 'invalid_agent_timeout'; then
+    printf 'invalid_agent_timeout(Herdr agent start 허용 timeout 초과)'
+  elif printf '%s' "$text" | grep -qi 'agent_pane_busy'; then
+    printf 'agent_pane_busy(Pane가 준비 대기 시간 안에 사용 가능해지지 않음)'
+  elif printf '%s' "$text" | grep -qi 'herdr'; then
+    printf 'herdr_error(원문은 raw Evidence 참고)'
+  else
+    printf 'unknown(원문은 raw Evidence 참고)'
+  fi
+}
+
 # 모델 기동 실패 신호 스캔. Provider마다 공통 종료 코드가 없으므로 실제로
 # 확인된 출력 조합만 좁게 본다. "model"이나 400 하나만으로 판정하지 않는다 —
 # 인증·Herdr·Pane 실패를 모델 탓으로 돌리느니 새 문구를 놓치는 편이 안전하다.

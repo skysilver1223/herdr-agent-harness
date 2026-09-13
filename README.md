@@ -331,6 +331,7 @@ PASS: 이벤트 로그 기록
 PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
 PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)
 PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)
+PASS: dispatch 기동 실패 정리 (timeout 상한 300000 Pane 생성 전 거부/기존값·상한값 통과, agent start 실패 단계·안전한 분류·raw Evidence 경로 표면화/원문 비노출, dispatch가 만든 Pane 자동 회수·회수 실패 표면화, Attempt·Evidence 구조적 기록, Herdr·Provider 미호출)
 PASS: 모델 선택 (역할별 Task 지정/정책·Provider 기본값/허용 목록·플래그 주입 거부/Secret 비노출/기록)
 PASS: 모델 등급 (Task·역할 기본 등급 해석/우선순위 5단계/목록순서 무관/미정의·허용목록불일치·오타 거부·키 명시/프리미엄 합집합/격리 유지/codex 고정키·claude --effort·agy 흡수 속도/-c 승인통로 차단/models 표시)
 PASS: 프리미엄 모델 승인 (정확 범위/불일치·재사용·Agent Pane 거부/강등·누출 차단/fail-open·argv 주입 차단/기록)
@@ -480,11 +481,21 @@ dispatch — Task의 역할·모델 정책에 맞는 Agent를 Pane에서 한 턴
   사용자 승인 파일이 있어야 쓴다. 실제 모델·출처·승인 근거는 Attempt·Evidence에
   남긴다.
 
+--timeout MS (기본 120000, 상한 300000):
+  Herdr agent start의 실제 허용 상한이 300000ms다. 초과 값은 Pane을 만들기
+  전에 거부한다. 더 오래 걸리는 작업은 300000 이하로 dispatch한 뒤
+  observe로 이어서 관측한다.
+
+agent start 실패:
+  Pane split 뒤 agent start가 실패하면 실패 단계·안전한 분류·raw Evidence
+  경로를 함께 내고, dispatch가 이번 호출에서 만든 Pane은 자동 회수한다(회수
+  실패도 숨기지 않는다). Provider 원문 전체는 raw Evidence에만 남는다.
+
 역할(ROLE): worker | reviewer
 
 예시:
   herdr-harness dispatch . task-001 worker
-  herdr-harness dispatch . task-001 reviewer --timeout 600000
+  herdr-harness dispatch . task-001 reviewer --timeout 300000
 
 --print-only:
   Pane을 만들지도 Agent를 띄우지도 않고, Context Packet 경로와 직접 실행할
@@ -500,7 +511,7 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness validate [PATH] [--wave ID] [--no-git]` | Git 기준선, Task/Wave, Provider, 의존성, 실행 상한과 write scope를 읽기 전용 검증 |
 | `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제. `submitted`로 갈 때는 Acceptance Criteria의 `verified_by` 명령을 직접 실행하고 하나라도 실패하면 거부 |
 | `herdr-harness approve PATH TASK_ID --confirm-user-approval` | 사용자 명시 승인 확인 후 승인 증거를 원자적으로 기록하고 기존 `transition` 게이트로 `completed` 전이 |
-| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS] [--print-only] [--extra-prompt FILE] [--cwd DIR]` | 역할별 모델을 선택하고 프리미엄 승인·Provider 기본값 누출 차단을 적용한 뒤 Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
+| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS(상한 300000)] [--print-only] [--extra-prompt FILE] [--cwd DIR]` | 역할별 모델을 선택하고 프리미엄 승인·Provider 기본값 누출 차단을 적용한 뒤 Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--timeout`이 300000ms를 넘으면 Pane을 만들기 전에 거부. agent start 실패 시 실패 단계·안전한 분류·raw Evidence 경로를 표면화하고 자신이 만든 Pane을 자동 회수(회수 실패도 표면화). `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
 | `herdr-harness observe PATH TASK_ID [worker\|reviewer]` | 기존 Agent를 재조회하고 Evidence에 추가 |
 | `herdr-harness adopt PATH TASK_ID worker\|reviewer --pane PANE --agent NAME [--provider P]` | 사람이 직접 띄운 Agent를 Harness 추적에 등록(`--print-only` 폴백의 마지막 단계) |
 | `herdr-harness close-agent PATH TASK_ID [worker\|reviewer] [--force]` | Harness runtime에 등록된 Pane만 정리 |

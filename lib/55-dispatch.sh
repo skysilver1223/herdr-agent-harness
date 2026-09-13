@@ -4,11 +4,18 @@
 cmd_dispatch() {
   local path="${1:-}" task_id="${2:-}" role="${3:-}" timeout=120000 print_only=0
   local extra_prompt="" agent_cwd=""
-  [[ -n "$path" && -n "$task_id" && -n "$role" ]] || die "사용법: dispatch PATH TASK_ID ROLE(worker|reviewer) [--timeout MS] [--print-only] [--extra-prompt FILE] [--cwd DIR]"
+  # Herdr agent start의 실측 상한이다(사용자 실측 2026-09-13: 1800000·900000 모두
+  # invalid_agent_timeout으로 Pane split 전 실패). 여기서 미리 거부하지 않으면
+  # 그 검증이 Pane을 만든 뒤에야 Herdr에서 돌아와 빈 Pane을 남긴다.
+  local -r dispatch_max_timeout_ms=300000
+  [[ -n "$path" && -n "$task_id" && -n "$role" ]] || die "사용법: dispatch PATH TASK_ID ROLE(worker|reviewer) [--timeout MS(기본 120000, 상한 $dispatch_max_timeout_ms)] [--print-only] [--extra-prompt FILE] [--cwd DIR]"
   shift 3
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --timeout) [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || die "--timeout에는 양의 밀리초가 필요합니다."; timeout="$2"; shift 2 ;;
+      --timeout)
+        [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || die "--timeout에는 양의 밀리초가 필요합니다."
+        (( "$2" <= dispatch_max_timeout_ms )) || die "--timeout 값이 Herdr agent start 허용 상한(${dispatch_max_timeout_ms}ms)을 넘습니다: ${2}ms. Pane을 만들기 전에 거부합니다. ${dispatch_max_timeout_ms} 이하 값으로 dispatch하고, 작업이 더 오래 걸리면 '$SCRIPT_NAME observe PATH TASK_ID ROLE'로 이어서 관측하세요."
+        timeout="$2"; shift 2 ;;
       --print-only) print_only=1; shift ;;
       # 이 Task에만 필요한 추가 지시(리뷰 중점, 오판 방지 경고 등)를 Packet 끝에
       # 붙인다. 이게 없으면 그런 지시를 담으려고 사람이 Agent를 직접 띄우게 되고,
@@ -37,6 +44,10 @@ cmd_dispatch() {
   local prompt_output prompt_status get_output get_status read_output read_status result
   local prompt_resent=0
   local attempt_file evidence_file temporary
+  # AC-002·003: agent start 실패 단계·분류와 dispatch가 이번 호출에서 만든
+  # Pane의 자동 회수 결과. 실패가 아니면 계속 빈 값으로 남아 Attempt·Evidence에
+  # 아무 줄도 추가하지 않는다.
+  local start_failure_stage="" start_failure_class="" pane_cleanup_summary=""
   root="$(project_root "$path")"
   # --cwd를 주지 않으면 지금까지와 같이 워크스페이스에서 띄운다.
   if [[ -n "$agent_cwd" ]]; then
@@ -123,6 +134,10 @@ cmd_dispatch() {
   fi
 
   attempt="$(_runtime_next_attempt "$root" "$task_id")"
+  # agent start 실패 시 Pane 생성 직후 이 경로를 stderr에 바로 알려야 하므로,
+  # 원문이 담기는 raw Evidence 파일 경로를 실제로 쓰기 전에 미리 계산해 둔다
+  # (경로 계산 자체는 부수효과가 없다).
+  evidence_file="$(_runtime_evidence_raw_path "$root" "$task_id" "$role" "$attempt")"
   started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
   baseline="$(git -C "$root" rev-parse HEAD 2>/dev/null || printf 'unborn')"
   local task_slug="${task_id,,}"
@@ -204,6 +219,27 @@ cmd_dispatch() {
     prompt_status="$start_status"
     read_output=""
     read_status=1
+    start_failure_stage="agent_start"
+    start_failure_class="$(_runtime_classify_start_failure "$start_output")"
+    # AC-003: 지금 이 호출이 방금 split한 Pane만 회수한다. adopt한 Pane·사용자
+    # Pane·기존 등록 Agent는 이 분기에 도달할 수 없다 — dispatch는 항상 위에서
+    # 직접 만든 pane_id로만 여기 온다.
+    local pane_cleanup_output pane_cleanup_status
+    set +e
+    pane_cleanup_output="$(herdr pane close "$pane_id" 2>&1)"
+    pane_cleanup_status=$?
+    set -e
+    if (( pane_cleanup_status == 0 )); then
+      pane_cleanup_summary="회수됨 (pane_id=$pane_id)"
+    else
+      pane_cleanup_summary="회수 실패 (pane_id=$pane_id, exit=$pane_cleanup_status) — 수동 확인 필요: herdr pane close $pane_id"
+    fi
+    printf '실패 단계: %s\n분류: %s\nPane 정리: %s\nraw Evidence: %s\n' \
+      "$start_failure_stage" "$start_failure_class" "$pane_cleanup_summary" "$evidence_file" >&2
+    {
+      printf -- '- Start failure stage: %s\n- Start failure classification: %s\n- Pane cleanup: %s\n' \
+        "$start_failure_stage" "$start_failure_class" "$pane_cleanup_summary"
+    } >>"$attempt_file"
   else
     # Provider REPL이 입력을 받을 수 있게 될 때까지 기다린다. 이 대기가 없으면
     # 부팅·신뢰 확인·로그인 화면이 Packet을 먹고 Agent는 idle로 남는다.
@@ -268,6 +304,10 @@ cmd_dispatch() {
   {
     printf '# Evidence: %s / %s / Attempt %s\n\n' "$task_id" "$role" "$attempt"
     printf -- '- Captured: %s\n- Dispatch result: %s\n- Model: %s\n- Model source: %s\n- Model approval: %s\n- Model degradation: %s\n- Effort: %s\n- Effort source: %s\n- Model failure reason: %s\n- Model quarantine: %s\n- Approval mode: %s\n- Prompt exit: %s\n- Agent get exit: %s\n- Agent read exit: %s\n- Prompt 재전송: %s\n- 추가 지시 파일: %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$result" "$model_record" "$model_source" "$model_approval" "${model_degradation:-(없음)}" "$effort_record" "$effort_source" "${model_failure_reason:-(없음)}" "${model_quarantine:-(없음)}" "$approval_mode" "$prompt_status" "$get_status" "$read_status" "$( ((prompt_resent==1)) && printf 'yes(1회)' || printf 'no')" "${extra_prompt:-(없음)}"
+    if [[ -n "$start_failure_stage" ]]; then
+      printf -- '- Start failure stage: %s\n- Start failure classification: %s\n- Pane cleanup: %s\n\n' \
+        "$start_failure_stage" "$start_failure_class" "$pane_cleanup_summary"
+    fi
     printf '## Git status --short\n\n'
     git -C "$root" status --short 2>&1 || true
     printf '\n## Git diff --stat\n\n'
@@ -281,6 +321,9 @@ cmd_dispatch() {
     printf '\n## Agent state\n\n%s\n' "$get_output"
     printf '\n## Dispatch 명령 출력\n\n%s\n' "$prompt_output"
     printf '\n## Agent output\n\n%s\n' "$read_output"
+    if [[ -n "$start_failure_stage" ]]; then
+      printf '\n## Pane 정리 명령 출력\n\n%s\n' "${pane_cleanup_output:-}"
+    fi
     if [[ -n "$quota_signal" ]]; then
       printf '\n## 쿼터 신호(자동 감지 — 확정 아님)\n\n%s\n\n실패로 확정되지 않았으므로 이 신호만으로 Provider를 바꾸지 않는다. `herdr-harness quota-check`로 확인 후 판단한다.\n' "$quota_signal"
     fi
@@ -293,8 +336,13 @@ cmd_dispatch() {
   _runtime_atomic_copy "$temporary" "$evidence_file"
   rm -f -- "$temporary"
   # 정본은 판단에 쓰이는 6필드 YAML이다. Reviewer와 transition은 이것만 읽는다.
+  local evidence_summary
+  evidence_summary="dispatch 결과 $result (Provider $provider, 모델 $model_record, 출처 $model_source, 속도 $effort_record, 속도 출처 $effort_source, 프리미엄 모델 승인 $model_approval, 모델 강등 ${model_degradation:-(없음)}, 모델 실패 ${model_failure_reason:-(없음)}, 승인 모드 $approval_mode). 원문은 raw 참조."
+  if [[ -n "$start_failure_stage" ]]; then
+    evidence_summary="$evidence_summary 실패 단계 $start_failure_stage, 분류 $start_failure_class, Pane 정리 $pane_cleanup_summary."
+  fi
   _runtime_write_evidence_yaml "$root" "$task_id" "$role" "$attempt" "$result" \
-    "dispatch 결과 $result (Provider $provider, 모델 $model_record, 출처 $model_source, 속도 $effort_record, 속도 출처 $effort_source, 프리미엄 모델 승인 $model_approval, 모델 강등 ${model_degradation:-(없음)}, 모델 실패 ${model_failure_reason:-(없음)}, 승인 모드 $approval_mode). 원문은 raw 참조." 0
+    "$evidence_summary" 0
   _runtime_write_result "$root" "$task_id" "$role" "$result"
   printf 'dispatch_result=%s\n' "$result"
   [[ "$result" == settled || "$result" == blocked ]]
