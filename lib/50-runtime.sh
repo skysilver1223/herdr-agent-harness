@@ -59,6 +59,7 @@ _runtime_yaml_scalar() {
   local file="$1" key="$2"
   awk -v key="$key" '
     $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
+      sub("\r$", "")
       sub("^[[:space:]]*" key ":[[:space:]]*", "")
       gsub(/^['\''"]|['\''"]$/, "")
       print

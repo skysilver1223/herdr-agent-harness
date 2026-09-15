@@ -40,6 +40,7 @@ write_project_templates() {
     while IFS=':' read -r key variable; do
       value="$(awk -v key="$key" '
         $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
+          sub("\r$", "")
           sub("^[[:space:]]*" key ":[[:space:]]*", "")
           gsub(/^[\047\042]|[\047\042]$/, "")
           print
