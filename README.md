@@ -21,7 +21,7 @@ ARCHITECTURE.md  # 운영 구조
 
 - Ubuntu 22.04 이상
 - Windows 11의 WSL2 Ubuntu
-- Bash 4 이상
+- Bash 4 이상 (LF 및 CRLF 개행 호환 지원)
 - Git
 - Herdr
 - Claude Code, Codex CLI, Antigravity CLI 중 하나 이상
@@ -350,6 +350,7 @@ PASS: Task Lock (동시 획득 거부/release/stale 회수)
 PASS: quota-retry/auto-step opt-in 게이트
 PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)
 PASS: sync-templates (dry-run/apply·멱등, agent-policy 모델·프리미엄 키 전파·사용자 값 보존, AGENTS.md/STATE.md 비침범, .gitignore 보충)
+PASS: CRLF 파싱 및 설정 보존 (sync-templates 후 dispatch 인수에 approval_mode와 model 반영)
 PASS: README 기대 출력 ↔ 실제 test 출력 정합
 PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)
 PASS: 의존성 선언 (doctor jq 선택 의존성·codex 모델 조회 영향 안내, install.sh jq 부재 감지·설치 안내·특권 동작 없음)

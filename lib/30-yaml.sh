@@ -56,12 +56,14 @@ project_field() {
   local count line
   [[ -f "$file" ]] || die "project.yaml이 없습니다: $file"
   count="$(awk -v s="$section:" -v k="  $key:" '
+    { sub(/\r$/, "") }
     $0 == s { inside = 1; next }
     /^[^[:space:]#]/ { inside = 0 }
     inside && index($0, k) == 1 { n++ }
     END { print n + 0 }' "$file")"
   [[ "$count" -eq 1 ]] || die "project.yaml에서 $section.$key 를 정확히 한 번 찾지 못했습니다 (발견 $count 회)."
   line="$(awk -v s="$section:" -v k="  $key:" '
+    { sub(/\r$/, "") }
     $0 == s { inside = 1; next }
     /^[^[:space:]#]/ { inside = 0 }
     inside && index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$file")"

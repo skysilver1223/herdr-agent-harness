@@ -2913,6 +2913,36 @@ STUB
   [[ "$(grep -cxF '.harness/evidence/raw/' "$gi_project/.gitignore")" -eq 1 ]] ||
     die "sync-templates --apply가 .gitignore 줄을 중복 추가했습니다."
 
+  # --- CRLF 설정 보존 및 dispatch 인수 생성 -----------------------------------
+  local crlf_project="$test_root/crlf-project"
+  bash "$SELF_PATH" init "$crlf_project" --name crlf --goal "CRLF 검증" >/dev/null
+  # 기존 상태에 CRLF 주입
+  sed -i "s/$/\r/" "$crlf_project/.harness/project.yaml"
+  sed -i "s/$/\r/" "$crlf_project/.harness/policies/agent-policy.yaml"
+
+  # approval_mode와 default_model 값을 CRLF와 함께 변경
+  sed -i "s/^  approval_mode:.*/  approval_mode: 'bypass'\r/" "$crlf_project/.harness/policies/agent-policy.yaml"
+  sed -i "s/^  codex_models:.*/  codex_models: 'crlf-test-model'\r/" "$crlf_project/.harness/policies/agent-policy.yaml"
+  sed -i "s/^  codex_default_model:.*/  codex_default_model: 'crlf-test-model'\r/" "$crlf_project/.harness/policies/agent-policy.yaml"
+
+  # sync-templates 적용
+  bash "$SELF_PATH" sync-templates "$crlf_project" --apply >/dev/null
+
+  # CRLF가 있는 환경에서 파싱이 깨지지 않고 올바른 값을 읽는지, dispatch 시 적용되는지 검증
+  cat > "$crlf_project/.harness/tasks/task-crlf.yaml" <<'EOF'
+schema_version: '1.0'
+task_id: task-crlf
+status: ready
+objective: CRLF test
+primary_worker: codex
+EOF
+  local crlf_dispatch_out
+  crlf_dispatch_out="$(bash "$SELF_PATH" dispatch "$crlf_project" task-crlf worker --print-only 2>&1 || true)"
+  printf '%s' "$crlf_dispatch_out" | grep -q '모델: crlf-test-model / 출처: 정책 기본값 (codex_default_model)' ||
+    die "CRLF 상태에서 codex_default_model 설정이 보존/적용되지 않았습니다: $crlf_dispatch_out"
+  printf '%s' "$crlf_dispatch_out" | grep -q '승인 모드: bypass' ||
+    die "CRLF 상태에서 approval_mode 설정이 보존/적용되지 않았습니다: $crlf_dispatch_out"
+
   # 출력 목록 자체를 한 곳에서 정의하고 README의 기대 출력 블록과 비교한다.
   # cmd_test를 다시 실행하지 않으므로 Agent 호출·네트워크 접근·재귀 실행이 없다.
   local pass_lines=(
@@ -2954,6 +2984,7 @@ STUB
     'PASS: quota-retry/auto-step opt-in 게이트'
     'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)'
     'PASS: sync-templates (dry-run/apply·멱등, agent-policy 모델·프리미엄 키 전파·사용자 값 보존, AGENTS.md/STATE.md 비침범, .gitignore 보충)'
+    'PASS: CRLF 파싱 및 설정 보존 (sync-templates 후 dispatch 인수에 approval_mode와 model 반영)'
     'PASS: README 기대 출력 ↔ 실제 test 출력 정합'
     'PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)'
     'PASS: 의존성 선언 (doctor jq 선택 의존성·codex 모델 조회 영향 안내, install.sh jq 부재 감지·설치 안내·특권 동작 없음)'

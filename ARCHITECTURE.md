@@ -483,3 +483,7 @@ Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않�
 - Container 또는 별도 OS 사용자 격리
 
 상주 Controller는 여전히 현재 Harness의 범위가 아닙니다. `quota-retry`/`auto-step`은 상주 프로세스가 아니라 호출 1회가 유한 시간 안에 반드시 끝나는 opt-in 명령이며, 둘 다 `completed`/`awaiting_approval`/`reviewing` 전이를 호출하지 않습니다. `approve`는 자동 루프가 아니라 사용자 명시 승인 뒤 Orchestrator가 확인 플래그와 함께 수동 호출하는 단일 기록·전이 명령입니다.
+
+## 14. 환경 호환성 및 제약 (Environment & Constraints)
+
+Harness는 Windows WSL2, Linux 및 macOS 등 다양한 환경에서의 Git 파일 공유를 지원하기 위해 LF와 CRLF 개행 문자를 모두 지원합니다. Windows에서 `git pull` 시 유입되는 CRLF(`\r\n`) 환경에서도 YAML 파싱과 런타임 설정 로딩이 깨지지 않도록 설계되어, `sync-templates`와 `dispatch` 명령이 모델이나 승인 모드 등의 설정을 안전하게 보존합니다.
