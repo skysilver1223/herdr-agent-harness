@@ -874,6 +874,13 @@ Evidence는 "Worker가 말한 것과 실제 저장소 상태가 일치하는가"
 
 `changes_requested` 후 재시도에서 Worker가 Reviewer의 지적을 못 본 채 같은 접근을 반복하는 것을 막기 위한 것입니다. "가장 큰 attempt 번호"가 아니라 파일이 실제로 존재하는 최근 attempt를 찾고, 길이가 예측 불가능한 Review·checks는 줄 수와 줄 길이를 함께 잘라 넣습니다.
 
+### 역할별 필수 읽기 지침과 템플릿 동기화
+
+Worker와 Reviewer는 Context Packet에 SPEC과 Task 정보가 포함되어 전달되므로 원본(`.harness/SPEC.md`, 현재 Task YAML)을 중복 통독할 필요가 없습니다. 단, Packet이 없거나 추가 정보가 필요할 때는 예외로 원본에 접근해야 합니다.
+이러한 역할별 지침은 신규 프로젝트 생성 시 `AGENTS.md` (및 `CLAUDE.md`, `GEMINI.md`)에 기록됩니다.
+
+기존 프로젝트에서 `herdr-harness sync-templates`를 실행할 때, 이 진입 문서 파일들은 사용자가 고유 규칙을 덧붙였을 가능성이 있어 덮어쓰지 않고 변경점(diff)만 보여줍니다. 따라서 변경된 Context Packet 중복 통독 방지 지침 등을 기존 프로젝트에 반영하려면, 표시되는 diff를 참고하여 사용자가 직접 진입 문서를 수정해야 합니다.
+
 ### `quota-retry`, `auto-step` — opt-in 제약된 자동화
 
 두 명령 모두 기본은 꺼져 있고(opt-in), 완전 자율 실행이 아니라 **유한하고 되돌릴 수 있는 범위**만 자동화합니다. 둘 다 실행 전에 같은 Task에 대한 mkdir 기반 Task Lock(`.harness/runtime/TASK_ID.lock`)을 잡아, `quota-retry`/`auto-step` 두 자동화 경로끼리 같은 Task에 동시에 들어가는 것을 막습니다 — SQLite Lease나 Fencing Token 같은 완전한 락은 아니며, 사람이 그 사이에 수동으로 `dispatch`/`transition`을 실행하는 것까지 막지는 않으므로 자동 명령이 도는 동안은 `status --live`로 확인하고 수동 개입을 삼가세요.

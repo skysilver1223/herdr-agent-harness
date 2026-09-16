@@ -528,19 +528,41 @@ AC_PY
   # dispatch Packet에 SPEC/Task가 있으면 Worker/Reviewer가 원본을 중복 통독하지 않도록 지침(AGENTS.md)을 갱신했다.
   grep -q 'Worker와 Reviewer는 전달된 Context Packet에 SPEC 발췌와 Task 정보가 포함되어 있다면 원본을 중복해서 통독하지 않는다' "$test_project/AGENTS.md" ||
     die "AGENTS.md에 Worker/Reviewer의 Context Packet 중복 통독 방지 지침이 없습니다."
-  grep -E -q 'Orchestrator와 Planner는 추가로.*\.harness/SPEC\.md.*와 전체 Task 목록을 반드시 통독한다' "$test_project/AGENTS.md" ||
-    die "AGENTS.md에 Orchestrator/Planner의 SPEC.md 필독 지침이 없습니다."
+  grep -q '반드시 `\.harness/SPEC\.md`, `\.harness/STATE\.md`, 현재 Task YAML, 현재 역할 문서와 관련 Skill을 읽는다.' "$test_project/AGENTS.md" ||
+    die "AGENTS.md에 기본 문서 필독 지침이 없습니다."
 
-  # 패킷 크기 측정 및 보존 여부 검사(Evidence 제출용 측정)
-  local test_packet="$test_project/.harness/runtime/packet-reading-test.md"
-  _runtime_context_packet "$test_project" task-001 worker "$task" "$test_packet" ||
-    die "Context Packet 생성(reading test)에 실패했습니다."
+  # 별도 fixture를 통한 실제 Packet 필수 정보 보존 검사
+  local packet_fixture_dir
+  packet_fixture_dir="$(mktemp -d)"
+  mkdir -p "$packet_fixture_dir/.harness/tasks" "$packet_fixture_dir/.harness/runtime"
   
-  # 원본 보존 여부 검사
-  grep -q '## Specification excerpt' "$test_packet" ||
-    die "Context Packet에 SPEC 발췌가 보존되지 않았습니다."
-  grep -q 'acceptance_criteria`는 위 Task Contract YAML 안에 있다' "$test_packet" ||
+  cat << 'EOF' > "$packet_fixture_dir/.harness/SPEC.md"
+## 1. 목표
+테스트
+## 3. 기술 스택 및 제약
+- UNIQUE_CONSTRAINT_TEXT
+EOF
+  
+  cat << 'EOF' > "$packet_fixture_dir/.harness/tasks/task-001.yaml"
+schema_version: '1.0'
+task_id: task-001
+acceptance_criteria:
+  - criterion_id: AC-001
+    statement: UNIQUE_AC_TEXT_FOR_FIXTURE
+EOF
+
+  local fixture_packet="$packet_fixture_dir/.harness/runtime/packet-fixture.md"
+  _runtime_context_packet "$packet_fixture_dir" task-001 worker "$packet_fixture_dir/.harness/tasks/task-001.yaml" "$fixture_packet" ||
+    die "Context Packet 생성(fixture test)에 실패했습니다."
+  
+  grep -Fq 'UNIQUE_CONSTRAINT_TEXT' "$fixture_packet" ||
+    die "Context Packet에 SPEC 3절의 제약(UNIQUE_CONSTRAINT_TEXT)이 보존되지 않았습니다."
+  grep -Fq 'UNIQUE_AC_TEXT_FOR_FIXTURE' "$fixture_packet" ||
+    die "Context Packet에 Task YAML의 AC(UNIQUE_AC_TEXT_FOR_FIXTURE)가 보존되지 않았습니다."
+  grep -q 'acceptance_criteria`는 위 Task Contract YAML 안에 있다' "$fixture_packet" ||
     die "Context Packet에 필수 제약·AC 보존 안내가 사라졌습니다."
+    
+  rm -rf "$packet_fixture_dir"
 
   expect_fail "dispatch 잘못된 ROLE" \
     bash "$SELF_PATH" dispatch "$test_project" task-001 architect
