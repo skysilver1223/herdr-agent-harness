@@ -535,14 +535,14 @@ AC_PY
   local packet_fixture_dir
   packet_fixture_dir="$(mktemp -d)"
   mkdir -p "$packet_fixture_dir/.harness/tasks" "$packet_fixture_dir/.harness/runtime"
-  
+
   cat << 'EOF' > "$packet_fixture_dir/.harness/SPEC.md"
 ## 1. 목표
 테스트
 ## 3. 기술 스택 및 제약
 - UNIQUE_CONSTRAINT_TEXT
 EOF
-  
+
   cat << 'EOF' > "$packet_fixture_dir/.harness/tasks/task-001.yaml"
 schema_version: '1.0'
 task_id: task-001
@@ -554,14 +554,14 @@ EOF
   local fixture_packet="$packet_fixture_dir/.harness/runtime/packet-fixture.md"
   _runtime_context_packet "$packet_fixture_dir" task-001 worker "$packet_fixture_dir/.harness/tasks/task-001.yaml" "$fixture_packet" ||
     die "Context Packet 생성(fixture test)에 실패했습니다."
-  
+
   grep -Fq 'UNIQUE_CONSTRAINT_TEXT' "$fixture_packet" ||
     die "Context Packet에 SPEC 3절의 제약(UNIQUE_CONSTRAINT_TEXT)이 보존되지 않았습니다."
   grep -Fq 'UNIQUE_AC_TEXT_FOR_FIXTURE' "$fixture_packet" ||
     die "Context Packet에 Task YAML의 AC(UNIQUE_AC_TEXT_FOR_FIXTURE)가 보존되지 않았습니다."
   grep -q 'acceptance_criteria`는 위 Task Contract YAML 안에 있다' "$fixture_packet" ||
     die "Context Packet에 필수 제약·AC 보존 안내가 사라졌습니다."
-    
+
   rm -rf "$packet_fixture_dir"
 
   expect_fail "dispatch 잘못된 ROLE" \
@@ -3031,12 +3031,12 @@ STUB
     for ap_type in lf crlf; do
       local crlf_project="$test_root/crlf-${p_type}-${ap_type}"
       bash "$SELF_PATH" init "$crlf_project" --name "crlf-$p_type-$ap_type" --goal "CRLF 검증" >/dev/null
-      
+
       # approval_mode와 default_model 설정 (agent-policy.yaml)
       sed -i "s/^  approval_mode:.*/  approval_mode: 'bypass'/" "$crlf_project/.harness/policies/agent-policy.yaml"
       sed -i "s/^  codex_models:.*/  codex_models: 'crlf-test-model'/" "$crlf_project/.harness/policies/agent-policy.yaml"
       sed -i "s/^  codex_default_model:.*/  codex_default_model: 'crlf-test-model'/" "$crlf_project/.harness/policies/agent-policy.yaml"
-      
+
       # CRLF 주입 (필요시)
       if [[ "$p_type" == "crlf" ]]; then
         sed -i 's/$/\r/' "$crlf_project/.harness/project.yaml"
@@ -3044,7 +3044,7 @@ STUB
       if [[ "$ap_type" == "crlf" ]]; then
         sed -i 's/$/\r/' "$crlf_project/.harness/policies/agent-policy.yaml"
       fi
-      
+
       cat > "$crlf_project/.harness/tasks/task-crlf.yaml" <<'EOF'
 schema_version: '1.0'
 task_id: task-crlf
@@ -3057,7 +3057,7 @@ EOF
       local scalar_val
       scalar_val="$(_runtime_yaml_scalar "$crlf_project/.harness/policies/agent-policy.yaml" approval_mode)"
       [[ "$scalar_val" == "bypass" ]] || die "sync 전 _runtime_yaml_scalar(approval_mode) 실패: '$scalar_val' ($p_type/$ap_type)"
-      
+
       scalar_val="$(_runtime_yaml_scalar "$crlf_project/.harness/policies/agent-policy.yaml" codex_default_model)"
       [[ "$scalar_val" == "crlf-test-model" ]] || die "sync 전 _runtime_yaml_scalar(codex_default_model) 실패: '$scalar_val' ($p_type/$ap_type)"
 
@@ -3067,25 +3067,25 @@ EOF
       agent_start_line="$(printf '%s\n' "$crlf_dispatch_out" | grep '^[[:space:]]*herdr agent start')" || die "sync 전 herdr agent start 명령이 없습니다 ($p_type/$ap_type)"
       printf '%s\n' "$agent_start_line" | grep -q -- "--model crlf-test-model" || die "sync 전 --model 누락 ($p_type/$ap_type): $agent_start_line"
       printf '%s\n' "$agent_start_line" | grep -q -- "--dangerously-bypass-approvals-and-sandbox" || die "sync 전 bypass 인수 누락 ($p_type/$ap_type): $agent_start_line"
-      
+
       # 1차 sync-templates 적용
       bash "$SELF_PATH" sync-templates "$crlf_project" --apply >/dev/null
-      
+
       # sync 후 값 보존 및 멱등성 검증
       scalar_val="$(_runtime_yaml_scalar "$crlf_project/.harness/policies/agent-policy.yaml" approval_mode)"
       [[ "$scalar_val" == "bypass" ]] || die "1차 sync 후 _runtime_yaml_scalar(approval_mode) 실패: '$scalar_val' ($p_type/$ap_type)"
-      
+
       crlf_dispatch_out="$(bash "$SELF_PATH" dispatch "$crlf_project" task-crlf worker --print-only 2>&1)" || die "1차 sync 후 dispatch 실패 ($p_type/$ap_type)"
       agent_start_line="$(printf '%s\n' "$crlf_dispatch_out" | grep '^[[:space:]]*herdr agent start')" || die "1차 sync 후 herdr agent start 명령이 없습니다 ($p_type/$ap_type)"
       printf '%s\n' "$agent_start_line" | grep -q -- "--model crlf-test-model" || die "1차 sync 후 --model 누락 ($p_type/$ap_type)"
       printf '%s\n' "$agent_start_line" | grep -q -- "--dangerously-bypass-approvals-and-sandbox" || die "1차 sync 후 bypass 인수 누락 ($p_type/$ap_type)"
-      
+
       # 2차 sync (멱등성 확인용 스냅샷)
       cp "$crlf_project/.harness/policies/agent-policy.yaml" "$crlf_project/agent-policy.yaml.1"
       cp "$crlf_project/.harness/project.yaml" "$crlf_project/project.yaml.1"
-      
+
       bash "$SELF_PATH" sync-templates "$crlf_project" --apply >/dev/null
-      
+
       cmp -s "$crlf_project/agent-policy.yaml.1" "$crlf_project/.harness/policies/agent-policy.yaml" || die "2차 sync 시 agent-policy.yaml이 변경되었습니다 (멱등성 실패, $p_type/$ap_type)"
       cmp -s "$crlf_project/project.yaml.1" "$crlf_project/.harness/project.yaml" || die "2차 sync 시 project.yaml이 변경되었습니다 (멱등성 실패, $p_type/$ap_type)"
     done
