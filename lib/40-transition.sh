@@ -355,7 +355,7 @@ _transition_require_acceptance_criteria() {
           rm -f -- "$temporary"
           die "$id 의 verified_by.type이 command인데 command 필드가 없습니다: $task_file"
         }
-        
+
         local cache_idx=-1
         local i
         for (( i=0; i<${#cached_commands[@]}; i++ )); do

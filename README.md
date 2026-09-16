@@ -325,7 +325,8 @@ PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정
 PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정
 PASS: Agent 상태 정규화
 PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)
-PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록/동일 명령 캐시·다음 호출 재실행)
+PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)
+PASS: AC 동일 명령 캐시 및 재실행 방지 (명령문자열 단위 캐시/AC행별 기록 보존/중복 성공 시 제출)
 PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)
 PASS: 이벤트 로그 기록 (전이·sync-templates·quota-retry·auto-step·lock-reclaim·adopt 9곳 + dispatch·observe·quota-check 직접 호출 event, 쿼터 수치 미노출)
 PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
