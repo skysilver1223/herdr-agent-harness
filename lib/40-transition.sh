@@ -321,6 +321,9 @@ _transition_require_acceptance_criteria() {
   local root="$1" task_id="$2" task_file="$3"
   local line id type command output status attempt checks_file temporary
   local total=0 passed=0 failed=0 manual=0 timeout_s
+  local -a cached_commands=()
+  local -a cached_statuses=()
+  local -a cached_outputs=()
 
   timeout_s="$(awk '/^  acceptance_check_timeout_seconds:/{print $2; exit}' \
     "$root/.harness/policies/project-policy.yaml" 2>/dev/null || true)"
@@ -352,19 +355,39 @@ _transition_require_acceptance_criteria() {
           rm -f -- "$temporary"
           die "$id 의 verified_by.type이 command인데 command 필드가 없습니다: $task_file"
         }
-        info "AC 검증 실행: $id — $command"
-        set +e
-        if _ac_remote_enabled "$root"; then
-          # cmd_remote_run은 인자 1개만 받고, 설정이 미리 로드돼 있어야 한다.
-          # 원격에서도 무한 루프가 전이를 영원히 붙잡지 않도록 timeout을 건다.
-          output="$( _remote_require "$root" &&
-                     cmd_remote_run "timeout -k 10 $timeout_s bash -c $(printf '%q' "$command")" 2>&1 )"
+        
+        local cache_idx=-1
+        local i
+        for (( i=0; i<${#cached_commands[@]}; i++ )); do
+          if [[ "${cached_commands[i]}" == "$command" ]]; then
+            cache_idx=$i
+            break
+          fi
+        done
+
+        if (( cache_idx >= 0 )); then
+          info "AC 검증 결과 재사용: $id"
+          status="${cached_statuses[cache_idx]}"
+          output="${cached_outputs[cache_idx]}"
         else
-          # -k 없이는 TERM을 무시하는 명령이 계속 돌아 전이가 끝나지 않는다.
-          output="$(cd "$root" && timeout -k 10 "$timeout_s" bash -c "$command" 2>&1)"
+          info "AC 검증 실행: $id — $command"
+          set +e
+          if _ac_remote_enabled "$root"; then
+            # cmd_remote_run은 인자 1개만 받고, 설정이 미리 로드돼 있어야 한다.
+            # 원격에서도 무한 루프가 전이를 영원히 붙잡지 않도록 timeout을 건다.
+            output="$( _remote_require "$root" &&
+                       cmd_remote_run "timeout -k 10 $timeout_s bash -c $(printf '%q' "$command")" 2>&1 )"
+          else
+            # -k 없이는 TERM을 무시하는 명령이 계속 돌아 전이가 끝나지 않는다.
+            output="$(cd "$root" && timeout -k 10 "$timeout_s" bash -c "$command" 2>&1)"
+          fi
+          status=$?
+          set -e
+          cached_commands+=("$command")
+          cached_statuses+=("$status")
+          cached_outputs+=("$output")
         fi
-        status=$?
-        set -e
+
         if (( status == 0 )); then
           passed=$((passed + 1))
         else

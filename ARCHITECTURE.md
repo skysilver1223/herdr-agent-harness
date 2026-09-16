@@ -92,6 +92,7 @@ Worker는 `completed`를 선언하지 않습니다. Reviewer는 품질 판정을
 - `type: manual-review` — 자동 검증이 불가능하므로 `manual`로 기록만 하고 막지 않습니다. 판단은 Reviewer 몫입니다.
 - `acceptance_criteria`가 비어 있으면 `submitted`로 전이할 수 없습니다.
 - 원격 실행 모드(§11.1)에서는 같은 명령을 원격에서 실행하며, 원격에도 같은 제한 시간을 겁니다.
+- **동일 명령 중복 실행 캐시**: 동일한 `command` 문자열을 가진 조건이 여러 개 있을 경우 한 번의 `submitted` 검증 안에서는 최초 실행의 종료 코드와 출력을 재사용합니다. 실패 제출 차단·AC별 `result` 독립 기록·원격 실행 제한 등은 그대로 적용되며, 다음 검증 호출(재시도)에서는 캐시를 비우고 다시 실행합니다.
 - 결과는 `.harness/evidence/TASK-attempt-N-checks.yaml`(기준별 `exit_code`·`result`·`output_tail`, `summary`)에 남고 다음 Context Packet에 주입됩니다.
 
 ### 5.2 Evidence 구조

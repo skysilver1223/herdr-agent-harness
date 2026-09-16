@@ -265,6 +265,70 @@ AC_PY
   grep -q "  manual: 1$" "$checks_file" || die "manual-review가 기록되지 않았습니다."
   grep -q "  failed: 0$" "$checks_file" || die "AC 실패 수가 0으로 기록되지 않았습니다."
 
+  # --- 동일 명령 중복 실행 방지 검증 (task-018) ---
+  local task_ac_cache="$test_project/.harness/tasks/task-ac-cache.yaml"
+  sed -e 's/^task_id: .*/task_id: task-ac-cache/' \
+      -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+      "$test_project/.harness/tasks/TEMPLATE.yaml" >"$task_ac_cache"
+  bash "$SELF_PATH" transition "$test_project" task-ac-cache ready >/dev/null
+  bash "$SELF_PATH" transition "$test_project" task-ac-cache active >/dev/null
+  printf '# attempt 1\n' >"$test_project/.harness/attempts/task-ac-cache-attempt-1.md"
+  printf "task: 'task-ac-cache'\nrole: 'worker'\nattempt: 1\nresult:\n  summary: 'x'\nstatus: 'settled'\n" >"$test_project/.harness/evidence/task-ac-cache-worker-attempt-1.yaml"
+
+  local counter_file="$test_root/ac_counter"
+  echo 0 > "$counter_file"
+  local cmd_success="count=\$(cat '$counter_file'); echo \$((count+1)) > '$counter_file'; exit 0"
+  local cmd_fail="count=\$(cat '$counter_file'); echo \$((count+1)) > '$counter_file'; exit 1"
+  local cmd_other="count=\$(cat '$counter_file'); echo \$((count+1)) > '$counter_file'; exit 0 # diff"
+
+  _ac_set_criteria "$task_ac_cache" "acceptance_criteria:
+  - criterion_id: AC-001
+    statement: 첫 번째 성공
+    verified_by:
+      type: command
+      command: '$cmd_success'
+  - criterion_id: AC-002
+    statement: 동일한 성공 중복
+    verified_by:
+      type: command
+      command: '$cmd_success'
+  - criterion_id: AC-003
+    statement: 첫 번째 실패
+    verified_by:
+      type: command
+      command: '$cmd_fail'
+  - criterion_id: AC-004
+    statement: 동일한 실패 중복
+    verified_by:
+      type: command
+      command: '$cmd_fail'
+  - criterion_id: AC-005
+    statement: 다른 명령 성공
+    verified_by:
+      type: command
+      command: '$cmd_other'
+"
+
+  expect_fail "active->submitted (AC 명령 실패, 하지만 캐시는 작동해야 함)" \
+    bash "$SELF_PATH" transition "$test_project" task-ac-cache submitted
+  
+  local run_count
+  run_count="$(cat "$counter_file")"
+  [[ "$run_count" == 3 ]] || die "동일 명령 중복 실행 방지 실패: 기대 3, 실제 $run_count"
+
+  local cache_checks_file="$test_project/.harness/evidence/task-ac-cache-attempt-1-checks.yaml"
+  grep -q "  passed: 3$" "$cache_checks_file" || die "AC 통과 수 캐시 집계 실패"
+  grep -q "  failed: 2$" "$cache_checks_file" || die "AC 실패 수 캐시 집계 실패"
+
+  # 다음 검증 호출은 다시 실행함을 검토
+  echo 0 > "$counter_file"
+  printf '# attempt 2\n' >"$test_project/.harness/attempts/task-ac-cache-attempt-2.md"
+  printf "task: 'task-ac-cache'\nrole: 'worker'\nattempt: 2\nresult:\n  summary: 'x'\nstatus: 'settled'\n" >"$test_project/.harness/evidence/task-ac-cache-worker-attempt-2.yaml"
+  expect_fail "active->submitted (다음 호출)" \
+    bash "$SELF_PATH" transition "$test_project" task-ac-cache submitted
+  run_count="$(cat "$counter_file")"
+  [[ "$run_count" == 3 ]] || die "다음 검증 호출에서 재실행되지 않음: 기대 3, 실제 $run_count"
+
   expect_pass "submitted->reviewing" \
     bash "$SELF_PATH" transition "$test_project" task-001 reviewing
   expect_fail "reviewing->awaiting_approval (APPROVED Review 없음)" \
@@ -2995,7 +3059,7 @@ EOF
     'PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정'
     'PASS: Agent 상태 정규화'
     'PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)'
-    'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)'
+    'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록/동일 명령 캐시·다음 호출 재실행)'
     'PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)'
     'PASS: 이벤트 로그 기록 (전이·sync-templates·quota-retry·auto-step·lock-reclaim·adopt 9곳 + dispatch·observe·quota-check 직접 호출 event, 쿼터 수치 미노출)'
     'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)'
