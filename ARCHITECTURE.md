@@ -486,4 +486,4 @@ Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않�
 
 ## 14. 환경 호환성 및 제약 (Environment & Constraints)
 
-Harness는 Windows WSL2, Linux 및 macOS 등 다양한 환경에서의 Git 파일 공유를 지원하기 위해 LF와 CRLF 개행 문자를 모두 지원합니다. Windows에서 `git pull` 시 유입되는 CRLF(`\r\n`) 환경에서도 YAML 파싱과 런타임 설정 로딩이 깨지지 않도록 설계되어, `sync-templates`와 `dispatch` 명령이 모델이나 승인 모드 등의 설정을 안전하게 보존합니다.
+Harness는 Windows WSL2 등에서 `git pull` 시 유입될 수 있는 CRLF(`\r\n`) 개행 문자가 포함된 환경에서도 `project.yaml` 및 `agent-policy.yaml` 파싱이 깨지지 않도록 지원합니다. 이를 통해 `sync-templates`와 `dispatch` 명령 실행 시 모델이나 승인 모드 등의 설정이 누락되거나 기본값으로 강등되는 것을 안전하게 방지합니다.

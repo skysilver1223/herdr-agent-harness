@@ -21,7 +21,7 @@ ARCHITECTURE.md  # 운영 구조
 
 - Ubuntu 22.04 이상
 - Windows 11의 WSL2 Ubuntu
-- Bash 4 이상 (LF 및 CRLF 개행 호환 지원)
+- Bash 4 이상 (`project.yaml`, `agent-policy.yaml`의 제한적 CRLF 개행 호환)
 - Git
 - Herdr
 - Claude Code, Codex CLI, Antigravity CLI 중 하나 이상

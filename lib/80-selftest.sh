@@ -2914,34 +2914,70 @@ STUB
     die "sync-templates --apply가 .gitignore 줄을 중복 추가했습니다."
 
   # --- CRLF 설정 보존 및 dispatch 인수 생성 -----------------------------------
-  local crlf_project="$test_root/crlf-project"
-  bash "$SELF_PATH" init "$crlf_project" --name crlf --goal "CRLF 검증" >/dev/null
-  # 기존 상태에 CRLF 주입
-  sed -i "s/$/\r/" "$crlf_project/.harness/project.yaml"
-  sed -i "s/$/\r/" "$crlf_project/.harness/policies/agent-policy.yaml"
-
-  # approval_mode와 default_model 값을 CRLF와 함께 변경
-  sed -i "s/^  approval_mode:.*/  approval_mode: 'bypass'\r/" "$crlf_project/.harness/policies/agent-policy.yaml"
-  sed -i "s/^  codex_models:.*/  codex_models: 'crlf-test-model'\r/" "$crlf_project/.harness/policies/agent-policy.yaml"
-  sed -i "s/^  codex_default_model:.*/  codex_default_model: 'crlf-test-model'\r/" "$crlf_project/.harness/policies/agent-policy.yaml"
-
-  # sync-templates 적용
-  bash "$SELF_PATH" sync-templates "$crlf_project" --apply >/dev/null
-
-  # CRLF가 있는 환경에서 파싱이 깨지지 않고 올바른 값을 읽는지, dispatch 시 적용되는지 검증
-  cat > "$crlf_project/.harness/tasks/task-crlf.yaml" <<'EOF'
+  local p_type ap_type
+  for p_type in lf crlf; do
+    for ap_type in lf crlf; do
+      local crlf_project="$test_root/crlf-${p_type}-${ap_type}"
+      bash "$SELF_PATH" init "$crlf_project" --name "crlf-$p_type-$ap_type" --goal "CRLF 검증" >/dev/null
+      
+      # approval_mode와 default_model 설정 (agent-policy.yaml)
+      sed -i "s/^  approval_mode:.*/  approval_mode: 'bypass'/" "$crlf_project/.harness/policies/agent-policy.yaml"
+      sed -i "s/^  codex_models:.*/  codex_models: 'crlf-test-model'/" "$crlf_project/.harness/policies/agent-policy.yaml"
+      sed -i "s/^  codex_default_model:.*/  codex_default_model: 'crlf-test-model'/" "$crlf_project/.harness/policies/agent-policy.yaml"
+      
+      # CRLF 주입 (필요시)
+      if [[ "$p_type" == "crlf" ]]; then
+        sed -i 's/$/\r/' "$crlf_project/.harness/project.yaml"
+      fi
+      if [[ "$ap_type" == "crlf" ]]; then
+        sed -i 's/$/\r/' "$crlf_project/.harness/policies/agent-policy.yaml"
+      fi
+      
+      cat > "$crlf_project/.harness/tasks/task-crlf.yaml" <<'EOF'
 schema_version: '1.0'
 task_id: task-crlf
 status: ready
 objective: CRLF test
 primary_worker: codex
 EOF
-  local crlf_dispatch_out
-  crlf_dispatch_out="$(bash "$SELF_PATH" dispatch "$crlf_project" task-crlf worker --print-only 2>&1 || true)"
-  printf '%s' "$crlf_dispatch_out" | grep -q '모델: crlf-test-model / 출처: 정책 기본값 (codex_default_model)' ||
-    die "CRLF 상태에서 codex_default_model 설정이 보존/적용되지 않았습니다: $crlf_dispatch_out"
-  printf '%s' "$crlf_dispatch_out" | grep -q '승인 모드: bypass' ||
-    die "CRLF 상태에서 approval_mode 설정이 보존/적용되지 않았습니다: $crlf_dispatch_out"
+
+      # _runtime_yaml_scalar 자체도 CRLF 정책 값이 정상인지 검증하여 sync가 LF로 바꿔 결함을 가리는 것을 막는다.
+      local scalar_val
+      scalar_val="$(_runtime_yaml_scalar "$crlf_project/.harness/policies/agent-policy.yaml" approval_mode)"
+      [[ "$scalar_val" == "bypass" ]] || die "sync 전 _runtime_yaml_scalar(approval_mode) 실패: '$scalar_val' ($p_type/$ap_type)"
+      
+      scalar_val="$(_runtime_yaml_scalar "$crlf_project/.harness/policies/agent-policy.yaml" codex_default_model)"
+      [[ "$scalar_val" == "crlf-test-model" ]] || die "sync 전 _runtime_yaml_scalar(codex_default_model) 실패: '$scalar_val' ($p_type/$ap_type)"
+
+      # sync 전 dispatch
+      local crlf_dispatch_out agent_start_line
+      crlf_dispatch_out="$(bash "$SELF_PATH" dispatch "$crlf_project" task-crlf worker --print-only 2>&1)" || die "sync 전 dispatch 실패 ($p_type/$ap_type): $crlf_dispatch_out"
+      agent_start_line="$(printf '%s\n' "$crlf_dispatch_out" | grep '^[[:space:]]*herdr agent start')" || die "sync 전 herdr agent start 명령이 없습니다 ($p_type/$ap_type)"
+      printf '%s\n' "$agent_start_line" | grep -q -- "--model crlf-test-model" || die "sync 전 --model 누락 ($p_type/$ap_type): $agent_start_line"
+      printf '%s\n' "$agent_start_line" | grep -q -- "--dangerously-bypass-approvals-and-sandbox" || die "sync 전 bypass 인수 누락 ($p_type/$ap_type): $agent_start_line"
+      
+      # 1차 sync-templates 적용
+      bash "$SELF_PATH" sync-templates "$crlf_project" --apply >/dev/null
+      
+      # sync 후 값 보존 및 멱등성 검증
+      scalar_val="$(_runtime_yaml_scalar "$crlf_project/.harness/policies/agent-policy.yaml" approval_mode)"
+      [[ "$scalar_val" == "bypass" ]] || die "1차 sync 후 _runtime_yaml_scalar(approval_mode) 실패: '$scalar_val' ($p_type/$ap_type)"
+      
+      crlf_dispatch_out="$(bash "$SELF_PATH" dispatch "$crlf_project" task-crlf worker --print-only 2>&1)" || die "1차 sync 후 dispatch 실패 ($p_type/$ap_type)"
+      agent_start_line="$(printf '%s\n' "$crlf_dispatch_out" | grep '^[[:space:]]*herdr agent start')" || die "1차 sync 후 herdr agent start 명령이 없습니다 ($p_type/$ap_type)"
+      printf '%s\n' "$agent_start_line" | grep -q -- "--model crlf-test-model" || die "1차 sync 후 --model 누락 ($p_type/$ap_type)"
+      printf '%s\n' "$agent_start_line" | grep -q -- "--dangerously-bypass-approvals-and-sandbox" || die "1차 sync 후 bypass 인수 누락 ($p_type/$ap_type)"
+      
+      # 2차 sync (멱등성 확인용 스냅샷)
+      cp "$crlf_project/.harness/policies/agent-policy.yaml" "$crlf_project/agent-policy.yaml.1"
+      cp "$crlf_project/.harness/project.yaml" "$crlf_project/project.yaml.1"
+      
+      bash "$SELF_PATH" sync-templates "$crlf_project" --apply >/dev/null
+      
+      cmp -s "$crlf_project/agent-policy.yaml.1" "$crlf_project/.harness/policies/agent-policy.yaml" || die "2차 sync 시 agent-policy.yaml이 변경되었습니다 (멱등성 실패, $p_type/$ap_type)"
+      cmp -s "$crlf_project/project.yaml.1" "$crlf_project/.harness/project.yaml" || die "2차 sync 시 project.yaml이 변경되었습니다 (멱등성 실패, $p_type/$ap_type)"
+    done
+  done
 
   # 출력 목록 자체를 한 곳에서 정의하고 README의 기대 출력 블록과 비교한다.
   # cmd_test를 다시 실행하지 않으므로 Agent 호출·네트워크 접근·재귀 실행이 없다.
