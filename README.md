@@ -322,6 +322,7 @@ PASS: 신규 프로젝트 보호
 PASS: 비대화형 명시적 실패
 PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)
 PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)
+PASS: 역할별 읽기 지침 정합 및 Context 보존
 PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정
 PASS: Agent 상태 정규화
 PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)

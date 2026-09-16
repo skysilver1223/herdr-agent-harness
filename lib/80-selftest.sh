@@ -524,6 +524,23 @@ AC_PY
   grep -q '직전 시도' "$test_project/.harness/runtime/packet-fresh.md" &&
     die "이력이 없는데 직전 시도 절이 붙었습니다."
   rm -f "$fresh_task"
+  # --- 역할별 읽기 지침 정합 및 Context Packet 필수 정보 보존 ---
+  # dispatch Packet에 SPEC/Task가 있으면 Worker/Reviewer가 원본을 중복 통독하지 않도록 지침(AGENTS.md)을 갱신했다.
+  grep -q 'Worker와 Reviewer는 전달된 Context Packet에 SPEC 발췌와 Task 정보가 포함되어 있다면 원본을 중복해서 통독하지 않는다' "$test_project/AGENTS.md" ||
+    die "AGENTS.md에 Worker/Reviewer의 Context Packet 중복 통독 방지 지침이 없습니다."
+  grep -E -q 'Orchestrator와 Planner는 추가로.*\.harness/SPEC\.md.*와 전체 Task 목록을 반드시 통독한다' "$test_project/AGENTS.md" ||
+    die "AGENTS.md에 Orchestrator/Planner의 SPEC.md 필독 지침이 없습니다."
+
+  # 패킷 크기 측정 및 보존 여부 검사(Evidence 제출용 측정)
+  local test_packet="$test_project/.harness/runtime/packet-reading-test.md"
+  _runtime_context_packet "$test_project" task-001 worker "$task" "$test_packet" ||
+    die "Context Packet 생성(reading test)에 실패했습니다."
+  
+  # 원본 보존 여부 검사
+  grep -q '## Specification excerpt' "$test_packet" ||
+    die "Context Packet에 SPEC 발췌가 보존되지 않았습니다."
+  grep -q 'acceptance_criteria`는 위 Task Contract YAML 안에 있다' "$test_packet" ||
+    die "Context Packet에 필수 제약·AC 보존 안내가 사라졌습니다."
 
   expect_fail "dispatch 잘못된 ROLE" \
     bash "$SELF_PATH" dispatch "$test_project" task-001 architect
@@ -3065,6 +3082,7 @@ EOF
     'PASS: 비대화형 명시적 실패'
     'PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)'
     'PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)'
+    'PASS: 역할별 읽기 지침 정합 및 Context 보존'
     'PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정'
     'PASS: Agent 상태 정규화'
     'PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)'

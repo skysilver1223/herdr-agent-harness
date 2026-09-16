@@ -103,7 +103,10 @@ _entry_doc_agents() {
 
 이 프로젝트는 Herdr Agent/Skills Harness로 운영한다.
 
-반드시 \`.harness/SPEC.md\`, \`.harness/STATE.md\`, 현재 Task YAML, 현재 역할 문서와 관련 Skill을 읽는다.
+반드시 \`.harness/STATE.md\`, 현재 역할 문서와 관련 Skill을 읽는다.
+Orchestrator와 Planner는 추가로 \`.harness/SPEC.md\`와 전체 Task 목록을 반드시 통독한다.
+Worker와 Reviewer는 전달된 Context Packet에 SPEC 발췌와 Task 정보가 포함되어 있다면 원본을 중복해서 통독하지 않는다(Packet이 없거나 추가 정보가 필요할 때만 원본 접근).
+단, 해당 Task의 Intent, 소스, 미해결 리뷰, 추가 근거는 필수로 읽는다.
 
 - 승인된 SPEC과 Task 없이 구현하지 않는다.
 - 하나의 Task는 하나의 목적만 가진다.

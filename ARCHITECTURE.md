@@ -400,6 +400,7 @@ Provider를 바꾸지 않습니다** — 아래 확인된 실패 조건과 별�
 ## 9. Context Packet
 
 `dispatch`는 Worker와 Reviewer에게 전체 대화 대신 `.harness/runtime/TASK-context-ROLE.md` Context Packet을 한 번 전달합니다.
+이에 맞춰 진입 지침(`AGENTS.md`)도 분리됩니다. Worker와 Reviewer는 이 Packet에 포함된 내용(SPEC 발췌·Task)을 원본에서 중복 통독하지 않으며, Orchestrator와 Planner는 전체 흐름 파악을 위해 `.harness/SPEC.md` 원본과 전체 Task 목록을 필수로 읽어야 합니다.
 
 - 승인된 SPEC 발췌 — 1 목표·3 기술 스택과 제약·4 요구사항·5 Acceptance Criteria·6 제외 범위 (줄 수가 아니라 절 단위로 통째 추출)
 - 현재 Task Contract 전문 — `write_scope`·`resources`·`inputs`·`acceptance_criteria`가 이 YAML 안에 있음
