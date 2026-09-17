@@ -57,6 +57,12 @@ cmd_dispatch() {
   fi
   task_file="$root/.harness/tasks/$task_id.yaml"
   [[ -f "$task_file" ]] || die "Task YAML을 찾을 수 없습니다: $task_file"
+  if [[ "$role" == reviewer ]]; then
+    task_review_policy "$task_file" || die "$task_id: $TASK_REVIEW_POLICY_ERROR"
+    if [[ "$TASK_REVIEW_MODE" == manual ]]; then
+      die "$task_id 는 수동 검토 Task입니다. Reviewer를 dispatch하지 말고 submitted -> awaiting_approval로 전이하세요 (reason=$TASK_REVIEW_REASON)."
+    fi
+  fi
   # --print-only는 Pane을 만들지도 Agent를 띄우지도 않는다. Context Packet과
   # 실행할 명령만 출력하므로 Herdr 안이 아니어도 된다 — Herdr나 Provider가
   # 깨졌을 때 수동으로 진행하기 위한 폴백 경로다.

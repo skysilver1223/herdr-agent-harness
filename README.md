@@ -320,7 +320,7 @@ PASS: 플레이스홀더 치환
 PASS: Git 기준선 생성
 PASS: 신규 프로젝트 보호
 PASS: 비대화형 명시적 실패
-PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)
+PASS: 상태 전이표 강제 (17개 케이스, handover_required 인계문서 게이트 포함)
 PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)
 PASS: 역할별 읽기 지침 정합 및 Context 보존
 PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정
@@ -331,6 +331,8 @@ PASS: AC 동일 명령 캐시 및 재실행 방지 (명령문자열 단위 캐�
 PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)
 PASS: 이벤트 로그 기록 (전이·sync-templates·quota-retry·auto-step·lock-reclaim·adopt 9곳 + dispatch·observe·quota-check 직접 호출 event, 쿼터 수치 미노출)
 PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
+PASS: 수동 검토 정책 예외
+PASS: 수동 검토 lifecycle
 PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)
 PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)
 PASS: dispatch 기동 실패 정리 (timeout 상한 300000 Pane 생성 전 거부/기존값·상한값 통과, agent start 실패 단계·안전한 분류·raw Evidence 경로 표면화/원문 비노출, dispatch가 만든 Pane 자동 회수·회수 실패 표면화, Attempt·Evidence 구조적 기록, Herdr·Provider 미호출)
@@ -526,6 +528,16 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness auto-step PATH TASK_ID [--max-turns N]` | (opt-in) 유한 턴 동안 dispatch 1회 + observe 반복 |
 
 `dispatch`는 프롬프트 미전달로 확인된 경우의 1회 재전송 외에는 Task 재시도, 상태 전이, blocked 응답 또는 Provider failover를 수행하지 않습니다. Orchestrator는 반환된 `dispatch_result`를 확인한 뒤 사용자 승인 경계를 지키며 다음 스텝을 호출합니다.
+
+Task별 수동 검토 예외가 필요하면 `reviewer: user` 또는 `reviewer: human`을 지정하거나, Worker와 Reviewer가 같은 Provider인 Task에만 다음 블록을 명시합니다.
+
+```yaml
+policy_override:
+  allow_self_review: true
+  reason: quota_exhaustion
+```
+
+같은 Provider는 기본적으로 계속 오류이며, `true`와 비어 있지 않은 사유가 모두 있을 때만 `validate`가 `[WARN]`으로 통과시킵니다. 이 이름은 호환성을 위한 정책 키일 뿐 같은 Provider AI self-review를 허용하지 않습니다. 예외 Task에서는 reviewer dispatch와 `submitted -> reviewing`이 거부되고 `submitted -> awaiting_approval`만 열립니다. 이후 사람이 실제 변경과 Evidence를 검토하고 명시적으로 승인한 경우에만 `approve ... --confirm-user-approval`이 Review 파일 대신 예외 사유를 승인 기록에 남기고 `completed`로 전이합니다. Agent Pane 호출 차단과 사용자 최종 승인 규칙은 그대로입니다. 프로젝트 기본 Worker/Reviewer는 계속 서로 달라야 합니다.
 
 같은 Task·역할을 다시 `dispatch`할 때 runtime meta의 기존 Agent가 `herdr agent get`으로 살아 있음이 확인되면, meta를 덮어쓰지 않고 Pane 생성 전에 거부합니다. 출력된 기존 `agent_name`·`pane_id`를 확인한 뒤 `close-agent`로 명시 정리하고 다시 호출해야 하며, 별도 우회 플래그는 없습니다. 기존 Agent가 이미 죽어 조회에 실패하거나 meta가 없으면 기존처럼 진행합니다. 이 검사는 `adopted=1`에도 동일하지만, adopt Pane과 working Agent를 닫을 때 필요한 `close-agent --force` 규칙은 그대로 유지됩니다.
 

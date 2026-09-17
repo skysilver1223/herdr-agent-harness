@@ -22,12 +22,13 @@ Herdr Multiplexer 환경에서 승인된 Wave를 실행한다. 1스텝 CLI(`herd
    - `agent_lost`/`error`: `herdr-harness transition . <task_id> handover_required`(인계 문서 필요) 후 사용자에게 보고.
    - `agent read` 출력이 비었거나 잘리면(Alternate Screen 등) Worker에게 `.harness/attempts/<task_id>-attempt-N.md` 파일 산출을 요청하고 존재·내용을 확인한다.
 4. **제출 검증·전이 (active → submitted).** `.harness/attempts/<task_id>-attempt-*.md`와 Evidence 파일 생성 확인 → `git status --short`·`git diff --stat`으로 write_scope 준수 확인 → `herdr-harness transition . <task_id> submitted` → `herdr-harness close-agent . <task_id> worker`.
-5. **Reviewer 디스패치 (submitted → reviewing).** `herdr-harness transition . <task_id> reviewing`(Worker≠Reviewer 강제) → `herdr-harness dispatch . <task_id> reviewer`(읽기 전용, `review-policy.yaml`의 8대 `focus`로 `.harness/reviews/<task_id>-review-N.md` 작성). `timeout`/`stalled`이면 `herdr-harness observe . <task_id> reviewer`. 끝나면 `herdr-harness close-agent . <task_id> reviewer`.
+5. **검토 경로 선택.** 정상 Task는 `herdr-harness transition . <task_id> reviewing`(Worker≠Reviewer 강제) → `herdr-harness dispatch . <task_id> reviewer`(읽기 전용, `review-policy.yaml`의 8대 `focus`로 `.harness/reviews/<task_id>-review-N.md` 작성). `timeout`/`stalled`이면 `herdr-harness observe . <task_id> reviewer`. 끝나면 `herdr-harness close-agent . <task_id> reviewer`.
+   - Task가 `reviewer: user|human`이거나 Worker=Reviewer이면서 `policy_override.allow_self_review: true`와 비어 있지 않은 `reason`이 있으면 수동 검토 예외다. Reviewer를 dispatch하거나 같은 Provider AI Review를 만들지 않고 `herdr-harness transition . <task_id> awaiting_approval`을 실행한다. 이 전이는 `submitted`에서만 허용되며 Harness가 예외를 재검증한다.
    - Agent 기동은 **항상 `dispatch`가 한다.** Provider가 무엇이든 사람에게 "직접 띄워 달라"고 요청하지 않는다 — 수동 기동은 Attempt·Evidence·Pane 추적을 통째로 빠뜨린다.
    - 이 Task에만 필요한 지시(리뷰 중점, 오판 방지 경고 등)는 파일에 적어 `herdr-harness dispatch . <task_id> reviewer --extra-prompt <파일>`로 붙인다. 커스텀 프롬프트는 수동 기동의 사유가 되지 않는다.
    - Herdr 밖이라 `dispatch`가 불가능한 예외 상황에서만 `dispatch ... --print-only`로 명령을 받아 띄우고, 반드시 `herdr-harness adopt . <task_id> reviewer --pane <id> --agent <name>`으로 되돌려 등록한다.
 6. **판정 처리.** Review의 `판정:`을 읽는다. `CHANGES_REQUESTED`이면 `herdr-harness transition . <task_id> changes_requested` → `herdr-harness transition . <task_id> ready` 후 2로 복귀. `APPROVED`이면 `herdr-harness transition . <task_id> awaiting_approval`.
-7. **완료 승인 Gate (awaiting_approval → completed).** Wave의 모든 Task가 `awaiting_approval`에 도달하면 `herdr-harness status --live .`를 종합해 사용자에게 보고한다. 사용자가 채팅에서 현재 Task의 완료를 명시적으로 승인한 경우에만 `herdr-harness approve . <task_id> --confirm-user-approval`을 호출한다. 이 명령이 Task ID·상태·최신 APPROVED Review를 재검증하고 승인 파일을 원자적으로 기록한 뒤 기존 transition Gate를 호출한다. 승인 파일을 직접 편집하거나 사용자 발화에서 승인 권한을 추론하지 않는다.
+7. **완료 승인 Gate (awaiting_approval → completed).** Wave의 모든 Task가 `awaiting_approval`에 도달하면 `herdr-harness status --live .`를 종합해 사용자에게 보고한다. 사용자가 채팅에서 현재 Task의 완료를 명시적으로 승인한 경우에만 `herdr-harness approve . <task_id> --confirm-user-approval`을 호출한다. 정상 Task는 최신 APPROVED Review를, 수동 검토 예외 Task는 Task의 예외 사유를 승인 기록에 남긴 뒤 기존 transition Gate를 호출한다. 승인 파일을 직접 편집하거나 사용자 발화에서 승인 권한을 추론하지 않는다.
 8. `결과: SUCCESS, <실행한 Task·전이·판정 요약>` 또는 `결과: BLOCKED, 사유: <승인 대기·Agent 블록·장애 등>` 한 줄로 끝낸다.
 
 ## 3. 예외·중단 게이트
@@ -36,4 +37,4 @@ Herdr Multiplexer 환경에서 승인된 Wave를 실행한다. 1스텝 CLI(`herd
 
 ## 4. 산출물·불변식
 - `.harness/STATE.md`, `.harness/waves/`, `.harness/runtime/`, 사용자 명시 승인 때 `approve`가 생성한 `.harness/decisions/<task-id>-approval.md`.
-- 불변: 모든 상태 전이가 `herdr-harness transition` 경유(`approve`도 내부 재사용), Worker와 Reviewer가 서로 다른 Provider로 실행됨, 사용 끝난 Herdr 패널이 `close-agent`로 정리됨, `completed`는 사용자 명시 승인 하에서만. 세션이 끊기면 새 세션에서 `herdr-harness status --live .`로 현재 상태부터 재개한다.
+- 불변: 모든 상태 전이가 `herdr-harness transition` 경유(`approve`도 내부 재사용), 정상 Task의 Worker와 Reviewer가 서로 다른 Provider로 실행됨, 수동 검토 예외에는 Reviewer Agent가 실행되지 않음, 사용 끝난 Herdr 패널이 `close-agent`로 정리됨, `completed`는 사용자 명시 승인 하에서만. 세션이 끊기면 새 세션에서 `herdr-harness status --live .`로 현재 상태부터 재개한다.

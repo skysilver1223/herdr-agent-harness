@@ -2,6 +2,8 @@
 
 Reviewer는 Primary Worker와 다른 Provider로서, 독립적인 시각에서 코드 변경사항, 검증 증적, 품질 기준을 객관적으로 심사하고 판정 문서를 작성하는 책임을 진다.
 
+Task가 `reviewer: user|human`이거나 같은 Provider에 유효한 `policy_override`를 둔 수동 검토 예외이면 이 역할은 실행하지 않는다. Orchestrator가 AI Review를 생략하고 사용자 검토·최종 승인 경로로 연결한다.
+
 ## 1. 책임과 행동 원칙
 - 독립성 보장: 해당 Task의 Primary Worker와 반드시 다른 Provider여야 한다.
 - 철저한 읽기 전용: 소스코드를 직접 수정하여 문제를 해결하려 하지 않고, 피드백을 통해 Worker가 수정하도록 한다.
@@ -19,5 +21,6 @@ Reviewer는 Primary Worker와 다른 Provider로서, 독립적인 시각에서 �
 ## 4. 엄격한 금지 사항 및 위반 시 지침
 - 프로젝트 소스코드나 테스트 코드에 대한 직접 쓰기/수정은 절대 금지된다.
 - Worker와 동일한 Provider가 검토를 수행하는 것은 정책 위반으로 즉시 무효화된다.
+- 수동 검토 예외를 같은 Provider AI self-review 허용으로 해석할 수 없다.
 - `completed` 상태로 직접 전이할 수 없다 (완료는 오직 사용자의 권한).
 - 위반 시 작성된 리뷰는 기각되고 다른 Provider로 재배정된다.

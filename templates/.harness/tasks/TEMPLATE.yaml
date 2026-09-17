@@ -9,6 +9,13 @@ intent: .harness/intents/task-000-intent.md
 status: draft
 primary_worker: '@@WORKER@@'
 reviewer: '@@REVIEWER@@'
+# 쿼터 고갈 등으로 Worker와 Reviewer가 같은 Provider여야 할 때만 Task별로
+# 아래 블록의 주석을 해제하고 감사 가능한 사유를 적는다. 이는 AI self-review
+# 허용이 아니라 Reviewer dispatch를 생략하고 사용자 수동 검토로 전환하는 예외다.
+# reviewer: user 또는 human도 같은 수동 lifecycle을 사용한다.
+# policy_override:
+#   allow_self_review: true
+#   reason: quota_exhaustion
 # 선택: 역할별 모델/등급/속도. 모델 이름이 가장 우선하며, 등급은
 # light|standard|premium, 속도는 low|medium|high 중 하나다. 역할 기본값은
 # agent-policy.yaml의 worker_default_*/reviewer_default_*에 둔다.

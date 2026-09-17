@@ -112,6 +112,7 @@ _entry_doc_agents() {
 - Task당 쓰기 가능한 Primary Worker는 한 명이다.
 - 기존 코드·데이터·문서·Dump를 먼저 확인한다.
 - Worker는 \`submitted\`까지만 제안하고 사용자가 \`completed\`를 승인한다.
+- Task가 \`reviewer: user|human\`이거나 같은 Provider에 유효한 \`policy_override\`가 있으면 AI Review를 생략하고 \`submitted -> awaiting_approval\`로 이동한다. 같은 Provider AI self-review는 금지하며 최종 완료는 여전히 사용자 명시 승인이 필요하다.
 - 실패·쿼터 확인 후 Handover와 사용자 승인을 거쳐 Provider를 교체한다.
 - 위험한 명령, 배포, 외부 쓰기는 사용자 승인을 받는다.
 

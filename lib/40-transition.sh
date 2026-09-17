@@ -21,6 +21,7 @@ cmd_validate() {
 
   report_problem() { printf '[FAIL] %s\n' "$*"; problems=$((problems + 1)); }
   report_ok() { printf '[OK]   %s\n' "$*"; }
+  report_warn() { printf '[WARN] %s\n' "$*"; }
 
   # 1. Git 기준선
   local git_state
@@ -76,10 +77,13 @@ cmd_validate() {
 
     worker="$(yaml_scalar "$path" primary_worker)"
     reviewer="$(yaml_scalar "$path" reviewer)"
-    valid_provider "$worker" || report_problem "$task_id: 알 수 없는 primary_worker=$worker"
-    valid_provider "$reviewer" || report_problem "$task_id: 알 수 없는 reviewer=$reviewer"
-    [[ "$worker" != "$reviewer" ]] ||
-      report_problem "$task_id: Worker와 Reviewer가 같습니다 ($worker)"
+    if task_review_policy "$path"; then
+      if [[ "$TASK_REVIEW_MODE" == manual ]]; then
+        report_warn "$task_id: 독립 AI Review 생략, 수동 검토 후 사용자 승인 필요 (reason=$TASK_REVIEW_REASON)"
+      fi
+    else
+      report_problem "$task_id: $TASK_REVIEW_POLICY_ERROR"
+    fi
 
     case "$status" in
       completed) ;;
@@ -169,6 +173,7 @@ transition_allowed() {
     'active>handover_required') return 0 ;;
     'blocked>active') return 0 ;;
     'submitted>reviewing') return 0 ;;
+    'submitted>awaiting_approval') return 0 ;;
     'reviewing>changes_requested') return 0 ;;
     'reviewing>awaiting_approval') return 0 ;;
     'changes_requested>ready') return 0 ;;
@@ -193,14 +198,20 @@ valid_approval_task_id() {
 }
 
 approval_record_matches() {
-  local approval="$1" task_id="$2" review_relative="$3"
+  local approval="$1" task_id="$2" review_relative="$3" policy_reason="${4:-}"
   [[ -f "$approval" ]] || return 1
   [[ "$(grep -c '^Task:' "$approval" 2>/dev/null || true)" -eq 1 ]] || return 1
   [[ "$(grep -c '^승인:' "$approval" 2>/dev/null || true)" -eq 1 ]] || return 1
   [[ "$(grep -c '^근거 Review:' "$approval" 2>/dev/null || true)" -eq 1 ]] || return 1
   grep -qxF "Task: $task_id" "$approval" || return 1
   grep -qxF '승인: yes' "$approval" || return 1
-  grep -qxF "근거 Review: $review_relative" "$approval"
+  grep -qxF "근거 Review: $review_relative" "$approval" || return 1
+  if [[ -n "$policy_reason" ]]; then
+    [[ "$(grep -c '^정책 예외 사유:' "$approval" 2>/dev/null || true)" -eq 1 ]] || return 1
+    grep -qxF "정책 예외 사유: $policy_reason" "$approval"
+  else
+    [[ "$(grep -c '^정책 예외 사유:' "$approval" 2>/dev/null || true)" -eq 0 ]]
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -493,23 +504,30 @@ cmd_transition() {
       _transition_require_acceptance_criteria "$root" "$task_id" "$path"
       ;;
     reviewing)
-      local worker reviewer
-      worker="$(yaml_scalar "$path" primary_worker)"
-      reviewer="$(yaml_scalar "$path" reviewer)"
-      [[ "$worker" != "$reviewer" ]] ||
-        die "Reviewer가 Worker와 같습니다 ($worker). 독립 Review가 성립하지 않습니다."
+      task_review_policy "$path" || die "$task_id: $TASK_REVIEW_POLICY_ERROR"
+      [[ "$TASK_REVIEW_MODE" == ai ]] ||
+        die "$task_id 는 수동 검토 Task입니다. Reviewer를 dispatch하지 말고 submitted -> awaiting_approval로 전이하세요 (reason=$TASK_REVIEW_REASON)."
       ;;
     awaiting_approval)
-      # 과거의 APPROVED가 남아 있어도 최신 Review가 반려면 통과시키지 않는다.
-      local latest_review verdict
-      latest_review="$(latest_task_review "$root" "$task_id")"
-      [[ -n "$latest_review" ]] ||
-        die "Review 파일이 없습니다: .harness/reviews/${task_id}-*.md"
-      # 줄 시작의 '판정:' 만 읽는다. Markdown 굵은 표시(**판정: X**)는 허용하되
-      # focus 항목의 '- 판정: PASS / FAIL / NA' 같은 하위 줄은 매칭하지 않는다.
-      verdict="$(review_verdict "$latest_review")"
-      [[ "$verdict" == APPROVED ]] ||
-        die "최신 Review의 판정이 APPROVED가 아닙니다 (${verdict:-없음}): $latest_review"
+      task_review_policy "$path" || die "$task_id: $TASK_REVIEW_POLICY_ERROR"
+      if [[ "$from_state" == submitted ]]; then
+        [[ "$TASK_REVIEW_MODE" == manual ]] ||
+          die "$task_id 는 독립 AI Review Task입니다. submitted -> reviewing을 먼저 수행하세요."
+        info "수동 검토 예외: AI Review 없이 사용자 승인 대기로 전이합니다 (reason=$TASK_REVIEW_REASON)"
+      else
+        [[ "$TASK_REVIEW_MODE" == ai ]] ||
+          die "$task_id 는 수동 검토 Task이므로 reviewing 상태에서 awaiting_approval로 전이할 수 없습니다."
+        # 과거의 APPROVED가 남아 있어도 최신 Review가 반려면 통과시키지 않는다.
+        local latest_review verdict
+        latest_review="$(latest_task_review "$root" "$task_id")"
+        [[ -n "$latest_review" ]] ||
+          die "Review 파일이 없습니다: .harness/reviews/${task_id}-*.md"
+        # 줄 시작의 '판정:' 만 읽는다. Markdown 굵은 표시(**판정: X**)는 허용하되
+        # focus 항목의 '- 판정: PASS / FAIL / NA' 같은 하위 줄은 매칭하지 않는다.
+        verdict="$(review_verdict "$latest_review")"
+        [[ "$verdict" == APPROVED ]] ||
+          die "최신 Review의 판정이 APPROVED가 아닙니다 (${verdict:-없음}): $latest_review"
+      fi
       ;;
     completed)
       local approval="$root/.harness/decisions/${task_id}-approval.md"
@@ -584,6 +602,7 @@ cmd_approve() {
     die "안전하지 않은 Task ID입니다: $task_id"
 
   local root path declared_id task_status latest_review verdict review_relative approval
+  local review_mode policy_reason=""
   root="$(project_root "$root_arg")"
   _runtime_require_human_caller "$root" approve
   path="$(task_file "$root" "$task_id")"
@@ -595,18 +614,24 @@ cmd_approve() {
   [[ "$task_status" == awaiting_approval || "$task_status" == completed ]] ||
     die "$task_id 는 awaiting_approval 상태가 아닙니다 (현재 $task_status)."
 
-  latest_review="$(latest_task_review "$root" "$task_id")"
-  [[ -n "$latest_review" ]] ||
-    die "Review 파일이 없습니다: .harness/reviews/${task_id}-*.md"
-  verdict="$(review_verdict "$latest_review")"
-  [[ "$verdict" == APPROVED ]] ||
-    die "최신 Review의 판정이 APPROVED가 아닙니다 (${verdict:-없음}): $latest_review"
-
-  review_relative=".harness/reviews/${latest_review##*/}"
+  task_review_policy "$path" || die "$task_id: $TASK_REVIEW_POLICY_ERROR"
+  review_mode="$TASK_REVIEW_MODE"
+  if [[ "$review_mode" == manual ]]; then
+    review_relative="(생략 — 수동 검토 정책 예외)"
+    policy_reason="$TASK_REVIEW_REASON"
+  else
+    latest_review="$(latest_task_review "$root" "$task_id")"
+    [[ -n "$latest_review" ]] ||
+      die "Review 파일이 없습니다: .harness/reviews/${task_id}-*.md"
+    verdict="$(review_verdict "$latest_review")"
+    [[ "$verdict" == APPROVED ]] ||
+      die "최신 Review의 판정이 APPROVED가 아닙니다 (${verdict:-없음}): $latest_review"
+    review_relative=".harness/reviews/${latest_review##*/}"
+  fi
   approval="$root/.harness/decisions/${task_id}-approval.md"
 
   if [[ -e "$approval" ]]; then
-    approval_record_matches "$approval" "$task_id" "$review_relative" ||
+    approval_record_matches "$approval" "$task_id" "$review_relative" "$policy_reason" ||
       die "기존 승인 파일이 현재 Task/Review와 충돌합니다. 덮어쓰지 않습니다: $approval"
   elif [[ "$task_status" == completed ]]; then
     die "completed Task의 승인 파일이 없습니다: $approval"
@@ -622,6 +647,7 @@ cmd_approve() {
       printf '승인자: 사용자 (채팅 명시 승인)\n'
       printf '승인 시각: %s\n' "$approved_at"
       printf '근거 Review: %s\n' "$review_relative"
+      [[ -z "$policy_reason" ]] || printf '정책 예외 사유: %s\n' "$policy_reason"
       printf '명시 확인: --confirm-user-approval\n'
     } >"$temporary"
     chmod 0644 "$temporary"
@@ -631,7 +657,7 @@ cmd_approve() {
     mv -n "$temporary" "$approval"
     if [[ -e "$temporary" ]]; then
       rm -f "$temporary"
-      approval_record_matches "$approval" "$task_id" "$review_relative" ||
+      approval_record_matches "$approval" "$task_id" "$review_relative" "$policy_reason" ||
         die "승인 파일 생성 중 충돌이 발생했습니다. 기존 파일을 보존합니다: $approval"
     fi
   fi
@@ -641,6 +667,7 @@ cmd_approve() {
     return 0
   fi
 
-  cmd_transition "$root" "$task_id" completed \
-    --note "approve: explicit user confirmation; review=$review_relative"
+  local approval_note="approve: explicit user confirmation; review=$review_relative"
+  [[ -z "$policy_reason" ]] || approval_note="$approval_note; policy_exception=$policy_reason"
+  cmd_transition "$root" "$task_id" completed --note "$approval_note"
 }

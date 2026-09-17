@@ -73,6 +73,7 @@ stateDiagram-v2
     blocked --> active: 입력 확보
     active --> handover_required: 실패·쿼터
     submitted --> reviewing: 독립 Review
+    submitted --> awaiting_approval: Task별 수동 검토 예외
     reviewing --> changes_requested: 수정 필요
     reviewing --> awaiting_approval: Review 통과
     changes_requested --> ready: 재시도 승인
@@ -80,9 +81,9 @@ stateDiagram-v2
     awaiting_approval --> completed: 사용자 승인
 ```
 
-Worker는 `completed`를 선언하지 않습니다. Reviewer는 품질 판정을 기록하고 사용자가 완료를 승인합니다.
+Worker는 `completed`를 선언하지 않습니다. 정상 Task에서는 Reviewer가 품질 판정을 기록하고 사용자가 완료를 승인합니다. 쿼터 고갈 등으로 Task가 `reviewer: user|human`을 지정했거나 Worker=Reviewer이면서 `policy_override.allow_self_review: true`와 비어 있지 않은 `reason`을 둔 경우에는 독립 AI Review를 생략합니다. 이 예외는 같은 Provider의 AI self-review를 허용하지 않으며, `validate`가 `[WARN]`을 출력한 뒤 `submitted -> awaiting_approval` 수동 검토 경로만 엽니다. `project.yaml`의 기본 Worker/Reviewer 분리 규칙은 바뀌지 않습니다.
 
-일반 상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`를 사용합니다. `submitted`에는 Attempt와 Evidence(정본 YAML — 이름과 필수 필드를 함께 확인), `handover_required`에는 `.harness/handovers/TASK-handover-*.md` 인계 문서, `awaiting_approval`에는 `판정: APPROVED`인 Review가 필요합니다. 또한 `submitted` 전이에서는 Harness가 Task의 `acceptance_criteria[].verified_by`를 **직접 실행**하고 하나라도 실패하면 전이를 거부합니다(§5.1). 사용자가 완료를 명시적으로 승인한 뒤에는 `herdr-harness approve PATH TASK_ID --confirm-user-approval`이 승인 기록을 원자적으로 만들고 기존 `transition ... completed` 게이트를 호출합니다. 수동 승인 파일과 직접 `transition`하는 기존 흐름도 유지됩니다.
+일반 상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`를 사용합니다. `submitted`에는 Attempt와 Evidence(정본 YAML — 이름과 필수 필드를 함께 확인), `handover_required`에는 `.harness/handovers/TASK-handover-*.md` 인계 문서, 정상 AI 검토의 `awaiting_approval`에는 `판정: APPROVED`인 Review가 필요합니다. 수동 검토 예외는 Review 파일 없이 `submitted -> awaiting_approval`로만 이동할 수 있습니다. 또한 `submitted` 전이에서는 Harness가 Task의 `acceptance_criteria[].verified_by`를 **직접 실행**하고 하나라도 실패하면 전이를 거부합니다(§5.1). 사용자가 완료를 명시적으로 승인한 뒤에는 `herdr-harness approve PATH TASK_ID --confirm-user-approval`이 정상 Task에는 Review 경로를, 수동 예외 Task에는 정책 사유를 승인 기록에 남기고 기존 `transition ... completed` 게이트를 호출합니다. Agent Pane 호출 차단과 명시 승인 플래그는 두 경로에서 동일합니다.
 
 ### 5.1 Acceptance Criteria 게이트
 
@@ -129,10 +130,10 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 3. Orchestrator가 `validate [PATH] --wave ID`로 실행 전제를 검사합니다.
 4. `transition ... active` 후 `dispatch ... worker`로 Worker 한 턴만 실행합니다. Herdr나 Provider CLI 문제로 이 경로가 막히면 `dispatch ... --print-only`로 실행할 명령만 받아 사람이 직접 띄운 뒤 `adopt`로 등록합니다(§7.1).
 5. `running`, `blocked`, `prompt_not_delivered`, `unknown`, `timeout`, `stalled`이면 `observe`로 상태를 재조회하고 Orchestrator가 사용자 질문, 대기 또는 중단을 결정합니다.
-6. Attempt와 Evidence가 준비되면 `transition ... submitted`를 수행합니다. 이 시점에 Harness가 Acceptance Criteria를 직접 실행하고, 모두 통과해야 전이됩니다(§5.1). 이어서 `transition ... reviewing`을 수행합니다.
-7. `dispatch ... reviewer`로 다른 Provider의 읽기 전용 Review 한 턴을 실행합니다.
-8. Review 판정에 따라 `changes_requested` 또는 `awaiting_approval`로 전이합니다.
-9. 사용자가 현재 Task의 완료를 명시적으로 승인한 뒤 Orchestrator가 `approve ... --confirm-user-approval`을 호출합니다. 명령은 Task ID·`awaiting_approval`·최신 `APPROVED` Review를 검증하고 승인 파일을 원자적으로 기록한 뒤 기존 `transition` 게이트로 `completed` 전이합니다. 사용자 의도를 추론하거나 무승인으로 호출하지 않습니다.
+6. Attempt와 Evidence가 준비되면 `transition ... submitted`를 수행합니다. 이 시점에 Harness가 Acceptance Criteria를 직접 실행하고, 모두 통과해야 전이됩니다(§5.1).
+7. 정상 Task는 `transition ... reviewing` 후 `dispatch ... reviewer`로 다른 Provider의 읽기 전용 Review 한 턴을 실행하고, 판정에 따라 `changes_requested` 또는 `awaiting_approval`로 전이합니다.
+8. 수동 검토 예외 Task는 Reviewer dispatch와 `reviewing`을 생략하고 `transition ... awaiting_approval`을 호출합니다. Harness는 Task별 예외와 사유를 다시 확인하며 정상 Task의 직접 전이는 거부합니다.
+9. 사용자가 현재 Task의 완료를 명시적으로 승인한 뒤 Orchestrator가 `approve ... --confirm-user-approval`을 호출합니다. 명령은 Task ID·`awaiting_approval`과 정상 Task의 최신 `APPROVED` Review 또는 수동 예외 사유를 검증하고 승인 파일을 원자적으로 기록한 뒤 기존 `transition` 게이트로 `completed` 전이합니다. 사용자 의도를 추론하거나 무승인으로 호출하지 않습니다.
 10. 등록된 Agent는 `close-agent`, 전체 상태는 `status --live`로 정리·관측합니다.
 
 ### 7.1 Agent 생성 경로와 승인 정책

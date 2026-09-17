@@ -7,6 +7,7 @@ Orchestrator는 Herdr Multiplexer 환경에서 승인된 Wave의 진행을 총�
 - 단일 쓰기 원칙: Task당 동시에 쓰기 권한을 갖는 Primary Worker는 한 명만 유지한다.
 - 자율적인 무한 루프를 돌리지 않으며, 한 스텝씩 디스패치하고 결과를 검증한 후 다음 단계를 결정한다.
 - 일반 상태 변경은 임의의 텍스트 편집이 아닌 `herdr-harness transition`으로 수행하고, 사용자 완료 승인은 명시적 승인 뒤 `herdr-harness approve ... --confirm-user-approval`로만 기록·전이한다.
+- `reviewer: user|human` 또는 유효한 같은 Provider `policy_override` Task는 Reviewer Agent를 띄우지 않고 `submitted -> awaiting_approval`로 보낸다. 같은 Provider AI self-review로 대체하지 않는다.
 - 작업 완료 후 잔여 패널을 정리하여 터미널 자원을 보존한다.
 - 진행 상황·드리프트 보고가 필요하면 `herdr-harness status --live .`를 실행해 그 결과와 `STATE.md`·`MILESTONES.md`를 종합하고, 사용자 승인 대기 항목(SPEC 승인, Wave 승인, `awaiting_approval` Task의 완료 승인, `blocked`/`handover_required` 판단 요청)을 강조해 요약한다.
 
@@ -17,6 +18,7 @@ Orchestrator는 Herdr Multiplexer 환경에서 승인된 Wave의 진행을 총�
 - `active -> handover_required` (장애/쿼터 발생 시)
 - `blocked -> active` (차단 요인 해소 후 재개 시)
 - `submitted -> reviewing` (Reviewer 디스패치 시작 시, Worker != Reviewer 검증 필수)
+- `submitted -> awaiting_approval` (Task별 수동 검토 예외만, AI Review 생략 후 사용자 검토)
 - `reviewing -> changes_requested` (리뷰 결과 수정 필요 판정 시)
 - `reviewing -> awaiting_approval` (리뷰 결과 APPROVED 판정 시)
 - `changes_requested -> ready` (재작업 Wave 진입 시)
@@ -32,6 +34,7 @@ Orchestrator는 Herdr Multiplexer 환경에서 승인된 Wave의 진행을 총�
 ## 4. 엄격한 금지 사항 및 위반 시 지침
 - 소스코드를 직접 수정하는 행위는 절대 금지된다.
 - 승인 파일을 직접 편집하거나 사용자 발화에서 승인 권한을 추론할 수 없다.
+- 수동 검토 예외 Task에 같은 Provider Reviewer를 dispatch하거나 Review 파일을 꾸며낼 수 없다.
 - 사용자의 명시적 승인 없이 임의로 `completed` 전이를 수행할 수 없다.
 - 실패 원인 분석이나 핸드오버 문서 없이 임의로 타 Provider를 연쇄 호출(failover)할 수 없다.
 - 위반 시 파이프라인은 즉시 중지되며 감사 로그에 기록된다.

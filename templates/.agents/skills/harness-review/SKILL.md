@@ -10,10 +10,11 @@ Worker와 독립된 제3의 Provider 관점에서 코드 변경(Diff), 자체 �
 
 ## 1. 적용조건과 입력
 - Task 상태가 `submitted` 또는 `reviewing`, 자신이 그 Task의 `primary_worker`와 다른 Provider(`provider_must_differ_from_worker: true`), Attempt·Evidence가 제출돼 있음.
+- Task가 `reviewer: user|human`이거나 같은 Provider `policy_override`를 사용한 수동 검토 예외이면 적용하지 않는다. 같은 Provider AI Review를 만들지 않고 Orchestrator에게 수동 승인 경로를 사용하라고 알린다.
 - Context Packet(dispatch가 주입)에 Task 계약과 acceptance_criteria가 들어 있다. 추가로 읽을 것: `AGENTS.md`, `.agents/roles/reviewer.agent.md`, `.harness/policies/review-policy.yaml`, 이 Task의 `.harness/intents/task-*-intent.md`(Not/Constraints/Invariants/Verification Intent 정본), 최신 `.harness/attempts/task-XXX-attempt-N.md`·`.harness/evidence/task-XXX-<역할>-attempt-N.yaml`(정본)과 `.harness/evidence/task-XXX-attempt-N-checks.yaml`(AC 검증 결과), `git diff` 결과.
 
 ## 2. 절차
-1. 독립성 확인 — 자신이 Worker와 같은 Provider이면 즉시 검토를 거부하고 보고한다.
+1. 독립성 확인 — 자신이 Worker와 같은 Provider이거나 Task가 수동 검토 예외이면 즉시 AI 검토를 거부하고 보고한다.
 2. `git diff`를 정밀 검토해 변경이 Task의 `write_scope` 안에 한정됐는지 검사한다. 소스·설정 파일은 절대 직접 수정하지 않는다.
 3. `review-policy.yaml`의 `focus` 8대 항목을 순서대로 채점한다.
    - `requirement_coverage`: 요구사항·Acceptance Criteria를 빠짐없이 만족하는가? intent의 `Verification Intent`와 실제 AC 목록이 어긋나지 않는가?

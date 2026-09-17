@@ -85,6 +85,10 @@ PROVIDER_STUB
     die "생성 Planner Skill에서 등급·속도 확정 주체가 사용자가 아닙니다."
   grep -q '자동으로 써 넣지 않는다' "$generated_plan_skill" ||
     die "생성 Planner Skill이 제안값의 Task YAML 자동 기입을 금지하지 않습니다."
+  grep -q '^# policy_override:$' "$test_project/.harness/tasks/TEMPLATE.yaml" ||
+    die "생성 Task TEMPLATE에 policy_override 예시가 없습니다."
+  grep -q '같은 Provider AI self-review는 금지' "$test_project/AGENTS.md" ||
+    die "생성 AGENTS.md에 수동 검토 예외와 AI self-review 금지가 없습니다."
 
   # 템플릿 정본이 templates/ 에 파일로 존재하고, 배열과 파일이 서로 어긋나지
   # 않는지 확인한다(heredoc → 파일 추출 후 회귀 방지).
@@ -480,6 +484,111 @@ AC_PY
   expect_fail "validate가 Worker==Reviewer를 통과시킴" \
     bash "$SELF_PATH" validate "$test_project"
   sed -i "s/^reviewer: .*/reviewer: 'agy'/" "$task"
+
+  # --- Task별 수동 검토 정책 예외 ------------------------------------------
+  # 같은 Provider는 기본 실패를 유지하고, 고정 policy_override 블록의 true와
+  # 비어 있지 않은 reason이 모두 있을 때만 WARN으로 통과한다. user/human은
+  # Provider가 아니라 수동 검토자이며, 그 밖의 문자열은 fail-closed다.
+  local manual_task_id=task-manual-policy
+  local manual_task="$test_project/.harness/tasks/$manual_task_id.yaml"
+  make_manual_policy_task() {
+    local reviewer_value="$1" override_block="${2:-}" task_state="${3:-completed}"
+    sed -e "s/^task_id: .*/task_id: $manual_task_id/" \
+        -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+        -e "s/^status: .*/status: $task_state/" \
+        -e "s/^primary_worker: .*/primary_worker: 'codex'/" \
+        -e "s/^reviewer: .*/reviewer: '$reviewer_value'/" \
+        "$test_project/.harness/tasks/TEMPLATE.yaml" >"$manual_task"
+    [[ -z "$override_block" ]] || printf '%s\n' "$override_block" >>"$manual_task"
+  }
+
+  make_manual_policy_task codex
+  expect_fail "수동 검토: 같은 Provider 기본 거부" \
+    bash "$SELF_PATH" validate "$test_project"
+
+  make_manual_policy_task codex "policy_override:
+  allow_self_review: true"
+  expect_fail "수동 검토: reason 누락 거부" \
+    bash "$SELF_PATH" validate "$test_project"
+
+  make_manual_policy_task codex "policy_override:
+  allow_self_review: true
+  reason: ''"
+  expect_fail "수동 검토: 빈 reason 거부" \
+    bash "$SELF_PATH" validate "$test_project"
+
+  make_manual_policy_task codex "policy_override:
+  allow_self_review: false
+  reason: quota_exhaustion"
+  expect_fail "수동 검토: allow_self_review=false 거부" \
+    bash "$SELF_PATH" validate "$test_project"
+
+  local manual_validate_output
+  make_manual_policy_task codex "policy_override:
+  allow_self_review: true
+  reason: quota_exhaustion
+# canonical TEMPLATE처럼 블록 뒤에 최상위 주석이 이어져도 블록 경계로 처리한다."
+  manual_validate_output="$(bash "$SELF_PATH" validate "$test_project")" ||
+    die "유효한 같은 Provider 정책 예외가 validate를 통과하지 못했습니다."
+  grep -Fq '[WARN] task-manual-policy:' <<<"$manual_validate_output" &&
+    grep -Fq '(reason=quota_exhaustion)' <<<"$manual_validate_output" ||
+    die "같은 Provider 정책 예외가 reason을 포함한 WARN을 내지 않았습니다."
+
+  make_manual_policy_task user
+  manual_validate_output="$(bash "$SELF_PATH" validate "$test_project")" ||
+    die "reviewer=user가 수동 검토자로 validate를 통과하지 못했습니다."
+  grep -Fq '[WARN] task-manual-policy:' <<<"$manual_validate_output" &&
+    grep -Fq '(reason=manual_reviewer_user)' <<<"$manual_validate_output" ||
+    die "reviewer=user가 수동 검토 WARN을 내지 않았습니다."
+
+  make_manual_policy_task human
+  manual_validate_output="$(bash "$SELF_PATH" validate "$test_project")" ||
+    die "reviewer=human이 수동 검토자로 validate를 통과하지 못했습니다."
+  grep -Fq '[WARN] task-manual-policy:' <<<"$manual_validate_output" &&
+    grep -Fq '(reason=manual_reviewer_human)' <<<"$manual_validate_output" ||
+    die "reviewer=human이 수동 검토 WARN을 내지 않았습니다."
+
+  make_manual_policy_task robot
+  expect_fail "수동 검토: 알 수 없는 reviewer 거부" \
+    bash "$SELF_PATH" validate "$test_project"
+
+  # lifecycle 검사는 같은 Provider의 명시적 예외로 고정한다. Reviewer Agent와
+  # reviewing은 모두 막고 submitted에서 awaiting_approval로만 건너간다.
+  make_manual_policy_task codex "policy_override:
+  allow_self_review: true
+  reason: quota_exhaustion" submitted
+  expect_fail "수동 검토: Reviewer dispatch 거부" \
+    bash "$SELF_PATH" dispatch "$test_project" "$manual_task_id" reviewer --print-only
+  expect_fail "수동 검토: submitted->reviewing 거부" \
+    bash "$SELF_PATH" transition "$test_project" "$manual_task_id" reviewing
+  expect_fail "정상 Task: submitted->awaiting_approval 직접 전이 거부" \
+    bash "$SELF_PATH" transition "$test_project" task-ac-cache awaiting_approval
+  [[ ! -e "$test_project/.harness/reviews/$manual_task_id-review-1.md" ]] ||
+    die "수동 검토 fixture에 AI Review가 생겼습니다."
+  expect_pass "수동 검토: submitted->awaiting_approval" \
+    bash "$SELF_PATH" transition "$test_project" "$manual_task_id" awaiting_approval
+  expect_fail "수동 검토 approve: 명시 확인 플래그 없음" \
+    bash "$SELF_PATH" approve "$test_project" "$manual_task_id"
+
+  # 수동 경로에서도 Harness가 추적하는 Agent Pane은 approve를 호출할 수 없다.
+  mkdir -p "$test_project/.harness/runtime"
+  printf 'task_id=%s\nrole=worker\nagent_name=hh-task-manual-policy-w-1\npane_id=wMANUAL:p1\nprovider=codex\nattempt=1\nadopted=0\n' \
+    "$manual_task_id" >"$test_project/.harness/runtime/$manual_task_id-worker.meta"
+  expect_fail "수동 검토 approve: Agent Pane 호출 거부" \
+    env HERDR_PANE_ID=wMANUAL:p1 bash "$SELF_PATH" approve "$test_project" "$manual_task_id" --confirm-user-approval
+  rm -f "$test_project/.harness/runtime/$manual_task_id-worker.meta"
+
+  expect_pass "수동 검토 approve: 사용자 명시 승인" \
+    bash "$SELF_PATH" approve "$test_project" "$manual_task_id" --confirm-user-approval
+  [[ "$(yaml_scalar "$manual_task" status)" == completed ]] ||
+    die "수동 검토 approve 뒤 completed로 전이되지 않았습니다."
+  local manual_approval="$test_project/.harness/decisions/$manual_task_id-approval.md"
+  approval_record_matches "$manual_approval" "$manual_task_id" \
+    "(생략 — 수동 검토 정책 예외)" quota_exhaustion ||
+    die "수동 검토 승인 기록에 Task/명시 승인/예외 사유가 올바르게 남지 않았습니다."
+  grep -q $'\ttransition\ttask-manual-policy\tawaiting_approval\tcompleted\t.*policy_exception=quota_exhaustion' \
+    "$test_project/.harness/evidence/events.tsv" ||
+    die "수동 검토 완료 이벤트에 정책 예외 사유가 없습니다."
 
   local no_git="$test_root/no-git-project"
   cp -r "$test_project" "$no_git"
@@ -3102,7 +3211,7 @@ EOF
     'PASS: Git 기준선 생성'
     'PASS: 신규 프로젝트 보호'
     'PASS: 비대화형 명시적 실패'
-    'PASS: 상태 전이표 강제 (16개 케이스, handover_required 인계문서 게이트 포함)'
+    'PASS: 상태 전이표 강제 (17개 케이스, handover_required 인계문서 게이트 포함)'
     'PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)'
     'PASS: 역할별 읽기 지침 정합 및 Context 보존'
     'PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정'
@@ -3113,6 +3222,8 @@ EOF
     'PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)'
     'PASS: 이벤트 로그 기록 (전이·sync-templates·quota-retry·auto-step·lock-reclaim·adopt 9곳 + dispatch·observe·quota-check 직접 호출 event, 쿼터 수치 미노출)'
     'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)'
+    'PASS: 수동 검토 정책 예외'
+    'PASS: 수동 검토 lifecycle'
     'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)'
     'PASS: dispatch --cwd (기본 워크스페이스/지정 반영/없는 경로·무값 거부/셸 인용, 옵션↔help↔탭완성 정합)'
     'PASS: dispatch 기동 실패 정리 (timeout 상한 300000 Pane 생성 전 거부/기존값·상한값 통과, agent start 실패 단계·안전한 분류·raw Evidence 경로 표면화/원문 비노출, dispatch가 만든 Pane 자동 회수·회수 실패 표면화, Attempt·Evidence 구조적 기록, Herdr·Provider 미호출)'
