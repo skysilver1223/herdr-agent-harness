@@ -248,6 +248,7 @@ _HERDR_HARNESS_ROLES=(
 
 _HERDR_HARNESS_STATES=(
   "draft::초안 — 아직 착수 조건을 못 갖춘 Task"
+  "queued::활성 슬롯 대기 — Worker dispatch 대상 아님"
   "ready::착수 가능 — dispatch 대상"
   "active::Agent가 작업 중"
   "submitted::Worker가 결과를 제출함 (Attempt·Evidence 필요)"

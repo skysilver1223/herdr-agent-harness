@@ -213,6 +213,32 @@ project_field() {
   yaml_unquote "$line"
 }
 
+# 활성 Task 상한의 단일 해석 경로. 환경 변수는 "설정됐을 때"만 프로젝트
+# 설정보다 우선하며, 빈 문자열을 포함한 잘못된 값은 안전한 기본값으로
+# 바꾸지 않는다. 잘못된 상한으로 계속 진행하면 queue lock을 잡더라도 실제
+# 계약보다 많은 Task를 ready로 만들 수 있기 때문이다.
+project_max_active_tasks() {
+  local root="$1" value source
+  if [[ ${MAX_ACTIVE_TASKS+x} ]]; then
+    value="$MAX_ACTIVE_TASKS"
+    source=MAX_ACTIVE_TASKS
+  else
+    value="$(project_field "$root" limits max_active_tasks)"
+    source=project.yaml:limits.max_active_tasks
+  fi
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] ||
+    die "$source 는 양의 정수여야 합니다 (현재 ${value:-빈 값})."
+  printf '%s\n' "$value"
+}
+
+task_uses_active_slot() {
+  case "$1" in
+    ready|active|submitted|reviewing|changes_requested|blocked|handover_required|awaiting_approval) return 0 ;;
+    draft|queued|completed) return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
 task_file() {
   local root="$1" task_id="$2"
   local path="$root/.harness/tasks/${task_id}.yaml"
@@ -232,7 +258,7 @@ task_ids() {
 
 valid_task_status() {
   case "$1" in
-    draft|ready|active|submitted|reviewing|changes_requested|blocked|handover_required|awaiting_approval|completed) return 0 ;;
+    draft|queued|ready|active|submitted|reviewing|changes_requested|blocked|handover_required|awaiting_approval|completed) return 0 ;;
     *) return 1 ;;
   esac
 }

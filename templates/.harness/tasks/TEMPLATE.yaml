@@ -5,7 +5,10 @@ title: Task 제목
 objective: 하나의 검증 가능한 목적
 # intent: 필수 — Why/What/Not/Constraints/Invariants/Open Questions/Verification Intent 정본. 작성 가이드: .harness/intents/TEMPLATE.md
 intent: .harness/intents/task-000-intent.md
-# status: intent.md의 "Open Questions / Decision Gates"가 모두 해소되기 전에는 ready로 전환하지 않는다
+# status: intent.md의 "Open Questions / Decision Gates"가 모두 해소되기 전에는 ready로 전환하지 않는다.
+# ready 요청 때 활성 슬롯이 가득 찼거나 의존 Task가 아직 completed가 아니면
+# Harness가 queued로 기록한다(선언한 의존 Task 파일이 없으면 계획 오류로 거부). queued는
+# Worker dispatch 대상이 아니며 completed 전이 때 빈 슬롯만큼 ready로 승격된다.
 status: draft
 primary_worker: '@@WORKER@@'
 reviewer: '@@REVIEWER@@'

@@ -6,12 +6,15 @@ Orchestrator는 Herdr Multiplexer 환경에서 승인된 Wave의 진행을 총�
 - `HERDR_ENV=1` 환경을 필히 확인하고 오직 승인된 Wave의 Task만 순차 실행한다.
 - 단일 쓰기 원칙: Task당 동시에 쓰기 권한을 갖는 Primary Worker는 한 명만 유지한다.
 - 자율적인 무한 루프를 돌리지 않으며, 한 스텝씩 디스패치하고 결과를 검증한 후 다음 단계를 결정한다.
+- `queued` Task는 Worker dispatch 대상에서 제외한다. `completed` 전이가 queue lock 아래 자동 승격한 `ready` Task만 다음 후보로 선택한다.
 - 일반 상태 변경은 임의의 텍스트 편집이 아닌 `herdr-harness transition`으로 수행하고, 사용자 완료 승인은 명시적 승인 뒤 `herdr-harness approve ... --confirm-user-approval`로만 기록·전이한다.
 - `reviewer: user|human` 또는 유효한 같은 Provider `policy_override` Task는 Reviewer Agent를 띄우지 않고 `submitted -> awaiting_approval`로 보낸다. 같은 Provider AI self-review로 대체하지 않는다.
 - 작업 완료 후 잔여 패널을 정리하여 터미널 자원을 보존한다.
 - 진행 상황·드리프트 보고가 필요하면 `herdr-harness status --live .`를 실행해 그 결과와 `STATE.md`·`MILESTONES.md`를 종합하고, 사용자 승인 대기 항목(SPEC 승인, Wave 승인, `awaiting_approval` Task의 완료 승인, `blocked`/`handover_required` 판단 요청)을 강조해 요약한다.
 
 ## 2. 허용된 상태 전이 (BRIEF 정본 기준)
+- `draft -> queued` (ready 요청 시 활성 슬롯이 가득 찼거나 의존 Task가 아직 `completed`가 아닌 경우 Harness가 대신 기록. 두 사유는 서로 독립이며 해당하는 것을 모두 `[WARN]`으로 남긴다. 선언한 의존 Task 파일 자체가 없으면 계획 오류이므로 슬롯 상황과 무관하게 거부한다)
+- `queued -> ready` (completed로 빈 슬롯이 생기고 의존성이 충족될 때 Task ID 오름차순 자동 승격)
 - `ready -> active` (Worker 디스패치 시작 시)
 - `active -> submitted` (Attempt 및 Evidence 검증 완료 시)
 - `active -> blocked` (Worker의 질문/차단 발생 시)
@@ -35,6 +38,7 @@ Orchestrator는 Herdr Multiplexer 환경에서 승인된 Wave의 진행을 총�
 - 소스코드를 직접 수정하는 행위는 절대 금지된다.
 - 승인 파일을 직접 편집하거나 사용자 발화에서 승인 권한을 추론할 수 없다.
 - 수동 검토 예외 Task에 같은 Provider Reviewer를 dispatch하거나 Review 파일을 꾸며낼 수 없다.
+- `queued` Task를 dispatch하거나 자동 승격을 `active` 이후로 이어갈 수 없다.
 - 사용자의 명시적 승인 없이 임의로 `completed` 전이를 수행할 수 없다.
 - 실패 원인 분석이나 핸드오버 문서 없이 임의로 타 Provider를 연쇄 호출(failover)할 수 없다.
 - 위반 시 파이프라인은 즉시 중지되며 감사 로그에 기록된다.

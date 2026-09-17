@@ -331,6 +331,9 @@ PASS: AC 동일 명령 캐시 및 재실행 방지 (명령문자열 단위 캐�
 PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)
 PASS: 이벤트 로그 기록 (전이·sync-templates·quota-retry·auto-step·lock-reclaim·adopt 9곳 + dispatch·observe·quota-check 직접 호출 event, 쿼터 수치 미노출)
 PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)
+PASS: 가변 활성 Task 상한
+PASS: queued lifecycle
+PASS: queued lifecycle 동시성
 PASS: 수동 검토 정책 예외
 PASS: 수동 검토 lifecycle
 PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)
@@ -412,7 +415,7 @@ herdr-harness init ~/Projects/timeseries-inference \
 | Reviewer | `agy` |
 | Fallback | `claude,agy` |
 | Agent 승인 모드 | `auto` (`--approval-mode ask\|auto\|bypass`) |
-| 활성 Task | 최대 5개 |
+| 활성 Task | 기본 최대 5개 (`MAX_ACTIVE_TASKS`로 일시 override) |
 | 병렬 Worker | 최대 2개 |
 
 스크립트는 신규·빈 디렉터리에서만 작동하며 기존 파일을 덮어쓰지 않습니다. 생성 후 `git init`과 Harness 파일 staging을 자동 수행합니다. Git 사용자 이름과 이메일이 설정되어 있으면 기준 commit도 생성합니다. 설정이 없어 commit을 만들지 못한 경우 안내된 `git commit`을 완료해야 Task를 `active`로 전이할 수 있습니다.
@@ -526,6 +529,10 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness quota-check PATH --provider agy` | Task 없이 agy 쿼터만 바로 확인 |
 | `herdr-harness quota-retry PATH TASK_ID worker\|reviewer` | (opt-in) 연속 저쿼터 확인 시 Provider 교체를 `handover_required`까지 자동 처리 |
 | `herdr-harness auto-step PATH TASK_ID [--max-turns N]` | (opt-in) 유한 턴 동안 dispatch 1회 + observe 반복 |
+
+활성 슬롯은 `ready|active|submitted|reviewing|changes_requested|blocked|handover_required|awaiting_approval`만 셉니다. `draft|queued|completed`는 제외합니다. 상한은 유효한 양의 `MAX_ACTIVE_TASKS`가 가장 우선하고, 환경 변수가 없으면 `.harness/project.yaml`의 `limits.max_active_tasks`를 사용합니다. 빈 값·0·음수·숫자가 아닌 값은 기본값으로 조용히 대체하지 않고 명시적으로 실패합니다.
+
+`draft -> ready` 요청 때 활성 슬롯이 가득 찼거나 의존 Task가 아직 `completed`가 아니면 Task를 실패시키거나 과할당하지 않고 같은 호출에서 `queued`로 원자적으로 기록합니다. 두 사유는 서로 독립으로 판정하며 해당하는 것을 모두 `[WARN]`으로 남깁니다 — 슬롯 상황에 따라 의존성 판정이 달라지지 않습니다. 다만 선언한 의존 Task 파일 자체가 없으면 정상 대기가 아니라 계획 오류이므로 슬롯 상황과 무관하게 거부하고, 이미 `queued`인 Task에 대한 명시적 `ready` 요청도 의존성이 미충족이면 상태를 바꾸지 않고 실패합니다. `queued`는 Worker dispatch 대상이 아닙니다. 사용자 승인으로 한 Task가 `completed`가 되면 프로젝트 queue lock 안에서 빈 슬롯을 다시 계산하고, 의존성이 모두 `completed`인 queued Task를 Task ID 오름차순으로 빈 슬롯 수만큼만 `ready`로 승격합니다. 각 승격은 `events.tsv`에 남고 자동 처리는 거기서 끝납니다. Agent dispatch, Review, `awaiting_approval`, 사용자 완료 승인은 자동으로 이어지지 않습니다. 이미 활성 상태가 설정 상한을 넘은 프로젝트는 `validate`가 `[WARN]`으로 보고하되 기존 Task를 임의로 강등하거나 검증 전체를 실패시키지 않습니다.
 
 `dispatch`는 프롬프트 미전달로 확인된 경우의 1회 재전송 외에는 Task 재시도, 상태 전이, blocked 응답 또는 Provider failover를 수행하지 않습니다. Orchestrator는 반환된 `dispatch_result`를 확인한 뒤 사용자 승인 경계를 지키며 다음 스텝을 호출합니다.
 

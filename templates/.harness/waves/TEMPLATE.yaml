@@ -5,7 +5,10 @@ title: Wave 제목
 description: Wave 실행 목적 및 개요
 status: draft # draft | approved | active | completed
 
-# 병렬 실행 한도 및 제약
+# 병렬 실행 한도 및 제약. 프로젝트 활성 슬롯 상한은 project.yaml의
+# limits.max_active_tasks이며, 유효한 양의 MAX_ACTIVE_TASKS가 일시적으로 우선한다.
+# 상한 밖의 승인된 신규 Task는 queued에서 기다리고 completed가 빈 슬롯을 만들면
+# 의존성을 충족한 Task ID 오름차순으로 ready까지만 승격된다.
 limits:
   max_parallel_workers: 2
 

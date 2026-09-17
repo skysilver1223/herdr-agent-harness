@@ -14,7 +14,7 @@ compatibility: Herdr pane, Git repository, project-local .harness directory
 
 ## 2. 절차
 1. SPEC 요구사항을 검증 가능한 단위의 Milestone으로 나눠 `.harness/MILESTONES.md`를 작성한다.
-2. 각 Milestone 아래 독립적으로 수행 가능한 Task를 도출한다 — 한 Task는 하나의 기능·분석·리팩터링 목적만 가지며, 현재 활성 Task는 최대 5개.
+2. 각 Milestone 아래 독립적으로 수행 가능한 Task를 도출한다 — 한 Task는 하나의 기능·분석·리팩터링 목적만 가진다. 활성 슬롯 상한은 유효한 양의 `MAX_ACTIVE_TASKS`, 없으면 `project.yaml`의 `limits.max_active_tasks`를 사용하며 `draft|queued|completed`는 세지 않는다.
 3. Task마다 `.harness/tasks/task-XXX.yaml`(`tasks/TEMPLATE.yaml` 기반)과 짝이 되는 `.harness/intents/task-XXX-intent.md`(`intents/TEMPLATE.md` 기반)를 작성한다.
    - `primary_worker: @@WORKER@@`, `reviewer: @@REVIEWER@@` (반드시 Worker와 다른 Provider).
    - Task 기안 시 `models` 명령 또는 README의 기준표에 비추어 `worker_tier`·`reviewer_tier`와, 필요하면 속도(`worker_effort`·`reviewer_effort`)를 제안한다. 어느 기준 항목에 해당하는지는 intent나 사용자와의 대화에 근거로 적는다.
@@ -23,14 +23,14 @@ compatibility: Herdr pane, Git repository, project-local .harness directory
    - 착수 게이트(선행 결정·조건)는 Task YAML이 아니라 intent.md의 `Open Questions / Decision Gates`에만 적는다. 그 목록이 미해소면 Task를 `ready`로 올리지 않는다.
 4. 병렬 실행 가능성을 점검한다 — `write_scope`가 겹치지 않고 의존성이 없는 Task끼리 같은 `parallel_group`으로 묶는다. 병렬 Worker는 최대 2개.
 5. `.harness/waves/wave-001.yaml`(`waves/TEMPLATE.yaml` 기반)을 생성하고, `.harness/STATE.md`에 현재 Milestone·생성된 Task 목록·대기 중인 결정을 반영한다.
-6. `herdr-harness validate .`로 스키마 무결성과 제약을 점검한 뒤, 수립한 계획과 Wave를 사용자에게 보고해 실행 승인을 요청한다.
+6. `herdr-harness validate .`로 스키마 무결성과 제약을 점검한 뒤, 수립한 계획과 Wave를 사용자에게 보고해 실행 승인을 요청한다. 승인 후 `draft -> ready` 요청이 슬롯 상한에 걸리면 Task는 `queued`로 보존되며 Worker를 배정하지 않는다.
 7. `결과: SUCCESS, Wave 승인 대기 (Task N개)` 또는 `결과: BLOCKED, 사유: <계획 충돌·한도 초과 등>` 한 줄로 끝낸다.
 
 ## 3. 예외·중단 게이트
 - SPEC이 승인되지 않았거나 요구사항이 모호하면 계획 수립을 중단한다.
-- 활성 Task가 5개를 초과하거나 병렬 Worker가 2개를 초과하는 설계면 조정하고 중단한다.
+- 기존 활성 Task가 설정 상한을 넘으면 `validate`의 WARN을 보고하되 임의로 강등하지 않는다. 신규 초과 Task는 `queued`로 두고, 병렬 Worker가 2개를 초과하는 설계면 조정하고 중단한다.
 - 계획 완료 후 사용자가 Wave를 승인하기 전까지 절대 Worker를 기동하지 않는다.
 
 ## 4. 산출물·불변식
 - `.harness/MILESTONES.md`, `.harness/tasks/task-*.yaml`, `.harness/intents/task-*-intent.md`, `.harness/waves/wave-*.yaml`, `.harness/STATE.md`.
-- 불변: 기존 Task YAML을 덮어쓰지 않고 새 일련번호(task-002 등)를 발급한다. Wave 재계획 시 완료된 Task는 유지하고 ready/draft 상태만 재편성한다. 모든 Task에서 Worker와 Reviewer는 서로 다른 Provider이고 `write_scope`가 명확하다.
+- 불변: 기존 Task YAML을 덮어쓰지 않고 새 일련번호(task-002 등)를 발급한다. Wave 재계획 시 완료된 Task는 유지하고 `ready|queued|draft` 상태만 재편성한다. `queued` Task는 dispatch하지 않는다. 모든 Task에서 Worker와 Reviewer는 서로 다른 Provider이고 `write_scope`가 명확하다.

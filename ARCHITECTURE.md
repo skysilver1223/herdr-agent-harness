@@ -58,7 +58,7 @@ flowchart TD
 - Milestone은 Project 완성에 필요한 중간 목표입니다.
 - Task는 Milestone을 만드는 하나의 검증 가능한 목적입니다.
 - 프로젝트 전체 Task 수는 제한하지 않습니다.
-- 현재 활성 Task는 기본 5개, 병렬 Worker는 2개로 제한합니다.
+- 활성 Task 상한은 기본 5개이며 유효한 양의 `MAX_ACTIVE_TASKS`가 `project.yaml`의 `limits.max_active_tasks`보다 우선합니다. 병렬 Worker는 별도 상한(기본 2개)을 사용합니다.
 - 완료 Milestone은 Archive해 기본 Context에서 제외합니다.
 
 ## 5. Task 상태
@@ -67,6 +67,8 @@ flowchart TD
 stateDiagram-v2
     [*] --> draft
     draft --> ready: 사용자 계획 승인
+    draft --> queued: 승인됐지만 활성 슬롯 없음 또는 의존성 미충족
+    queued --> ready: completed가 만든 빈 슬롯·의존성 충족
     ready --> active: Worker 시작
     active --> submitted: 결과 제출
     active --> blocked: 입력 필요
@@ -82,6 +84,10 @@ stateDiagram-v2
 ```
 
 Worker는 `completed`를 선언하지 않습니다. 정상 Task에서는 Reviewer가 품질 판정을 기록하고 사용자가 완료를 승인합니다. 쿼터 고갈 등으로 Task가 `reviewer: user|human`을 지정했거나 Worker=Reviewer이면서 `policy_override.allow_self_review: true`와 비어 있지 않은 `reason`을 둔 경우에는 독립 AI Review를 생략합니다. 이 예외는 같은 Provider의 AI self-review를 허용하지 않으며, `validate`가 `[WARN]`을 출력한 뒤 `submitted -> awaiting_approval` 수동 검토 경로만 엽니다. `project.yaml`의 기본 Worker/Reviewer 분리 규칙은 바뀌지 않습니다.
+
+활성 슬롯은 `ready|active|submitted|reviewing|changes_requested|blocked|handover_required|awaiting_approval`이며 `draft|queued|completed`는 제외합니다. `MAX_ACTIVE_TASKS`가 설정되어 있으면 양의 정수인지 엄격히 확인한 뒤 프로젝트 설정보다 우선하고, 없으면 `limits.max_active_tasks`를 엄격히 읽습니다. 잘못된 값에는 fallback하지 않습니다. 기존 프로젝트가 이미 상한을 넘었으면 `validate`는 읽기 전용 `[WARN]`만 내며, 새 `draft -> ready` 요청은 프로젝트 queue lock 아래 `queued`로 바꿉니다. 의존성과 슬롯은 서로 독립으로 판정하고 해당하는 사유를 모두 `[WARN]`으로 남깁니다 — 슬롯이 가득 찼다는 이유로 의존성 판정을 건너뛰지 않습니다. 선언한 의존 Task 파일이 없는 것은 정상 대기가 아니라 계획 오류이므로 슬롯 상황과 무관하게 거부합니다.
+
+`completed` 전이는 같은 queue lock을 잡은 채 빈 슬롯을 계산하고, 의존성이 모두 끝난 queued Task를 Task ID 오름차순으로 슬롯 수만큼만 `ready`로 승격합니다. 파일 교체와 각 transition event를 남긴 뒤 호출은 끝납니다. `queued`는 dispatch 대상이 아니며, 승격 경로는 Agent dispatch·`reviewing`·`awaiting_approval`·사용자 승인으로 이어지지 않습니다. lock 획득에 실패하면 어떤 Task 상태도 바꾸지 않고 명시적으로 실패합니다.
 
 일반 상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`를 사용합니다. `submitted`에는 Attempt와 Evidence(정본 YAML — 이름과 필수 필드를 함께 확인), `handover_required`에는 `.harness/handovers/TASK-handover-*.md` 인계 문서, 정상 AI 검토의 `awaiting_approval`에는 `판정: APPROVED`인 Review가 필요합니다. 수동 검토 예외는 Review 파일 없이 `submitted -> awaiting_approval`로만 이동할 수 있습니다. 또한 `submitted` 전이에서는 Harness가 Task의 `acceptance_criteria[].verified_by`를 **직접 실행**하고 하나라도 실패하면 전이를 거부합니다(§5.1). 사용자가 완료를 명시적으로 승인한 뒤에는 `herdr-harness approve PATH TASK_ID --confirm-user-approval`이 정상 Task에는 Review 경로를, 수동 예외 Task에는 정책 사유를 승인 기록에 남기고 기존 `transition ... completed` 게이트를 호출합니다. Agent Pane 호출 차단과 명시 승인 플래그는 두 경로에서 동일합니다.
 
@@ -128,12 +134,12 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 1. `init`이 프로젝트 파일과 Git 저장소를 만들고 가능한 경우 기준 commit을 생성합니다.
 2. `harness-spec`(자산 조사 + 인터뷰)과 `harness-plan` 후 사용자가 SPEC과 Wave를 승인합니다.
 3. Orchestrator가 `validate [PATH] --wave ID`로 실행 전제를 검사합니다.
-4. `transition ... active` 후 `dispatch ... worker`로 Worker 한 턴만 실행합니다. Herdr나 Provider CLI 문제로 이 경로가 막히면 `dispatch ... --print-only`로 실행할 명령만 받아 사람이 직접 띄운 뒤 `adopt`로 등록합니다(§7.1).
+4. `ready` Task에만 `transition ... active` 후 `dispatch ... worker`로 Worker 한 턴을 실행합니다. `queued`는 완료 전이가 `ready`로 승격할 때까지 선택하지 않습니다. Herdr나 Provider CLI 문제로 이 경로가 막히면 `dispatch ... --print-only`로 실행할 명령만 받아 사람이 직접 띄운 뒤 `adopt`로 등록합니다(§7.1).
 5. `running`, `blocked`, `prompt_not_delivered`, `unknown`, `timeout`, `stalled`이면 `observe`로 상태를 재조회하고 Orchestrator가 사용자 질문, 대기 또는 중단을 결정합니다.
 6. Attempt와 Evidence가 준비되면 `transition ... submitted`를 수행합니다. 이 시점에 Harness가 Acceptance Criteria를 직접 실행하고, 모두 통과해야 전이됩니다(§5.1).
 7. 정상 Task는 `transition ... reviewing` 후 `dispatch ... reviewer`로 다른 Provider의 읽기 전용 Review 한 턴을 실행하고, 판정에 따라 `changes_requested` 또는 `awaiting_approval`로 전이합니다.
 8. 수동 검토 예외 Task는 Reviewer dispatch와 `reviewing`을 생략하고 `transition ... awaiting_approval`을 호출합니다. Harness는 Task별 예외와 사유를 다시 확인하며 정상 Task의 직접 전이는 거부합니다.
-9. 사용자가 현재 Task의 완료를 명시적으로 승인한 뒤 Orchestrator가 `approve ... --confirm-user-approval`을 호출합니다. 명령은 Task ID·`awaiting_approval`과 정상 Task의 최신 `APPROVED` Review 또는 수동 예외 사유를 검증하고 승인 파일을 원자적으로 기록한 뒤 기존 `transition` 게이트로 `completed` 전이합니다. 사용자 의도를 추론하거나 무승인으로 호출하지 않습니다.
+9. 사용자가 현재 Task의 완료를 명시적으로 승인한 뒤 Orchestrator가 `approve ... --confirm-user-approval`을 호출합니다. 명령은 Task ID·`awaiting_approval`과 정상 Task의 최신 `APPROVED` Review 또는 수동 예외 사유를 검증하고 승인 파일을 원자적으로 기록한 뒤 기존 `transition` 게이트로 `completed` 전이합니다. 그 전이가 빈 슬롯을 만든 경우에만 queued Task를 `ready`까지 유한 승격합니다. 사용자 의도를 추론하거나 무승인으로 호출하지 않습니다.
 10. 등록된 Agent는 `close-agent`, 전체 상태는 `status --live`로 정리·관측합니다.
 
 ### 7.1 Agent 생성 경로와 승인 정책
@@ -397,6 +403,8 @@ Provider를 바꾸지 않습니다** — 아래 확인된 실패 조건과 별�
 `.harness/policies/loop-policy.yaml`의 `enabled: true`로 켜면 `herdr-harness auto-step PATH TASK_ID [--max-turns N]`을 쓸 수 있습니다. 이것도 §1의 "Bash는 한 스텝" 원칙을 어기지 않습니다 — 호출 1회가 정책 상한(`max_turns_ceiling`, 기본 5) 안에서 반드시 끝나는 유한 배치일 뿐, 상주 루프가 아닙니다. 1턴째만 `dispatch`로 Pane을 하나 만들고 이후 턴은 같은 Agent를 `observe`로만 재조회합니다(반복 dispatch는 Pane을 고아로 만듭니다). `stalled`·`timeout`만 상한 안에서 다시 관측하며, `settled`·`blocked`·`running`·`prompt_not_delivered`·`unknown`·`agent_lost`·`error` 중 하나에 닿으면 즉시 멈추고 사람에게 넘깁니다 — `reviewing`·`awaiting_approval`·`completed`로 이어지는 호출은 코드에 존재하지 않습니다.
 
 두 명령 모두 실행 전 mkdir 기반 Task Lock(`.harness/runtime/TASK_ID.lock`)을 잡습니다. 이건 quota-retry/auto-step 두 자동화 경로끼리의 충돌만 막는 권고적 잠금이며, SQLite Lease나 Fencing Token(§13)이 아닙니다 — 사람이 같은 Task에 수동으로 `dispatch`/`transition`을 실행하는 것까지 막지는 않으므로, 자동 명령이 도는 동안은 `status --live`로 확인하고 수동 개입을 삼가야 합니다.
+
+이 Task별 잠금과 별도로 활성 슬롯을 바꾸는 `draft|queued -> ready` 및 `awaiting_approval -> completed`는 프로젝트 queue lock(`.harness/runtime/__project_queue__.lock`)을 사용합니다. 이 잠금은 capacity 확인, 상태 파일의 원자적 교체, completed 뒤의 유한 queued 승격을 직렬화하여 동시 호출의 상한 초과를 막습니다. 획득 실패는 상태 변경 전에 보고됩니다.
 
 ## 9. Context Packet
 

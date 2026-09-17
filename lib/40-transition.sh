@@ -56,12 +56,12 @@ cmd_validate() {
 
   # 4. 상한
   local max_active max_parallel
-  max_active="$(awk '/^  max_active_tasks:/{print $2; exit}' "$root/.harness/project.yaml")"
+  max_active="$(project_max_active_tasks "$root")"
   max_parallel="$(awk '/^  max_parallel_workers:/{print $2; exit}' "$root/.harness/project.yaml")"
 
   # 5. Task별 검사
   local task_id path status worker reviewer dep
-  local active_count=0 open_count=0
+  local active_count=0 slot_count=0
   local -A scope_owner=()
 
   while IFS= read -r task_id; do
@@ -85,10 +85,9 @@ cmd_validate() {
       report_problem "$task_id: $TASK_REVIEW_POLICY_ERROR"
     fi
 
-    case "$status" in
-      completed) ;;
-      *) open_count=$((open_count + 1)) ;;
-    esac
+    if task_uses_active_slot "$status"; then
+      slot_count=$((slot_count + 1))
+    fi
     if [[ "$status" == active ]]; then
       active_count=$((active_count + 1))
       fi
@@ -123,10 +122,12 @@ cmd_validate() {
     fi
   done < <(task_ids "$root")
 
-  if [[ "$open_count" -le "${max_active:-5}" ]]; then
-    report_ok "활성 Task $open_count / 상한 ${max_active:-5}"
+  if [[ "$slot_count" -le "$max_active" ]]; then
+    report_ok "활성 Task $slot_count / 상한 $max_active"
   else
-    report_problem "활성 Task가 상한을 초과했습니다: $open_count > ${max_active:-5}"
+    # 이미 진행 중인 레거시 Task를 validate가 임의로 되돌리거나 프로젝트
+    # 전체를 막지는 않는다. 새 슬롯 진입은 transition의 queue lock이 막는다.
+    report_warn "활성 Task가 상한을 초과했습니다: $slot_count > $max_active (기존 상태 유지, 신규 Task는 queued)"
   fi
   if [[ "$active_count" -le "${max_parallel:-2}" ]]; then
     report_ok "동시 Worker $active_count / 상한 ${max_parallel:-2}"
@@ -167,6 +168,7 @@ transition_allowed() {
   local from="$1" to="$2"
   case "${from}>${to}" in
     'draft>ready') return 0 ;;
+    'queued>ready') return 0 ;;
     'ready>active') return 0 ;;
     'active>submitted') return 0 ;;
     'active>blocked') return 0 ;;
@@ -449,6 +451,96 @@ _transition_require_acceptance_criteria() {
   info "AC 검증 통과: pass $passed / manual $manual / 전체 $total → ${checks_file#"$root/"}"
 }
 
+_transition_active_slot_count() {
+  local root="$1" task_id path status count=0
+  while IFS= read -r task_id; do
+    [[ -n "$task_id" ]] || continue
+    path="$root/.harness/tasks/$task_id.yaml"
+    status="$(yaml_scalar "$path" status)"
+    task_uses_active_slot "$status" && count=$((count + 1))
+  done < <(task_ids "$root")
+  printf '%s\n' "$count"
+}
+
+# 의존성 미충족에는 성질이 다른 두 경우가 섞여 있다. 선언한 Task 파일이 아예
+# 없는 것은 계획 오류이므로 어떤 슬롯 상황에서도 큰 소리로 실패해야 한다. 반면
+# "의존 Task가 아직 completed가 아니다"는 Wave의 정상 진행 상태이며, 그 Task는
+# queued에서 기다리다가 completed 전이가 승격한다. 호출자가 둘을 구분할 수
+# 있도록 TRANSITION_DEPENDENCY_MISSING으로 나눠 알린다.
+_transition_dependencies_complete() {
+  local root="$1" path="$2" dep dep_path dep_status
+  TRANSITION_DEPENDENCY_ERROR=""
+  TRANSITION_DEPENDENCY_MISSING=0
+  while IFS= read -r dep; do
+    [[ -n "$dep" ]] || continue
+    dep_path="$root/.harness/tasks/$dep.yaml"
+    if [[ ! -f "$dep_path" ]]; then
+      TRANSITION_DEPENDENCY_ERROR="의존 Task 파일이 없습니다: $dep"
+      TRANSITION_DEPENDENCY_MISSING=1
+      return 1
+    fi
+    dep_status="$(yaml_scalar "$dep_path" status)"
+    if [[ "$dep_status" != completed ]]; then
+      TRANSITION_DEPENDENCY_ERROR="의존 Task $dep 가 completed가 아닙니다 (현재 $dep_status)"
+      return 1
+    fi
+  done < <(yaml_flow_list "$path" dependencies)
+  return 0
+}
+
+_transition_write_status() {
+  local root="$1" task_id="$2" path="$3" from_state="$4" to_state="$5" note="${6:-}"
+  local temporary
+  temporary="$(mktemp "$(dirname "$path")/.harness-transition.XXXXXX")"
+  if ! awk -v to="$to_state" '
+    !done_flag && index($0, "status:") == 1 { print "status: " to; done_flag = 1; next }
+    { print }
+  ' "$path" >"$temporary"; then
+    rm -f -- "$temporary"
+    die "status 갱신용 임시 파일 생성에 실패했습니다: $path"
+  fi
+  grep -q "^status: ${to_state}$" "$temporary" || {
+    rm -f -- "$temporary"
+    die "status 갱신에 실패했습니다: $path"
+  }
+  chmod 0644 "$temporary"
+  if ! mv -f -- "$temporary" "$path"; then
+    rm -f -- "$temporary"
+    die "status 파일 교체에 실패했습니다: $path"
+  fi
+
+  append_event "$root" transition "$task_id" "$from_state" "$to_state" "$note"
+  printf '%s: %s -> %s\n' "$task_id" "$from_state" "$to_state"
+
+  # STATE.md 드리프트 안내 (스크립트가 산문을 대신 쓰지 않는다)
+  if grep -q "| *${task_id} *|" "$root/.harness/STATE.md" 2>/dev/null; then
+    grep -q "| *${task_id} *|.*| *${to_state} *|" "$root/.harness/STATE.md" ||
+      info "STATE.md의 $task_id 행이 아직 $to_state 가 아닙니다. Orchestrator가 갱신하세요."
+  fi
+}
+
+# completed가 만든 빈 슬롯만 채운다. 호출자는 프로젝트 queue lock을 보유한다.
+# 자동 범위는 queued -> ready 상태 기록까지이며 dispatch나 승인 경로는 호출하지
+# 않는다. 정렬은 locale과 무관한 Task ID 문자열 오름차순으로 고정한다.
+_transition_promote_queued() {
+  local root="$1" max_active="$2" active_count available task_id path status
+  active_count="$(_transition_active_slot_count "$root")"
+  available=$((max_active - active_count))
+  (( available > 0 )) || return 0
+
+  while IFS= read -r task_id; do
+    (( available > 0 )) || break
+    [[ -n "$task_id" ]] || continue
+    path="$root/.harness/tasks/$task_id.yaml"
+    status="$(yaml_scalar "$path" status)"
+    [[ "$status" == queued ]] || continue
+    _transition_dependencies_complete "$root" "$path" || continue
+    _transition_write_status "$root" "$task_id" "$path" queued ready \
+      "queue promotion: dependency satisfied; max_active_tasks=$max_active"
+    available=$((available - 1))
+  done < <(task_ids "$root" | LC_ALL=C sort)
+}
+
 cmd_transition() {
   local root_arg="" task_id="" to_state="" note=""
   while [[ $# -gt 0 ]]; do
@@ -471,16 +563,86 @@ cmd_transition() {
   [[ -n "$root_arg" && -n "$task_id" && -n "$to_state" ]] ||
     die "사용법: $SCRIPT_NAME transition PATH TASK_ID TO_STATE"
 
-  local root path from_state
+  local root path from_state max_active="" queue_token="" lock_error_file="" lock_error=""
   root="$(project_root "$root_arg")"
   _runtime_require_human_caller "$root" transition
   path="$(task_file "$root" "$task_id")"
   valid_task_status "$to_state" || die "알 수 없는 목표 상태: $to_state"
+
+  # 슬롯 수를 바꾸는 경로는 상태 확인 전부터 같은 프로젝트 전역 lock 아래 둔다.
+  # lock 획득 실패 시 어떤 Task YAML도 건드리지 않는다.
+  case "$to_state" in
+    ready|completed)
+      max_active="$(project_max_active_tasks "$root")"
+      lock_error_file="$(mktemp "${TMPDIR:-/tmp}/herdr-queue-lock.XXXXXX")"
+      if ! queue_token="$(_runtime_lock_acquire "$root" __project_queue__ queue-transition 600 2>"$lock_error_file")"; then
+        lock_error="$(tr '\n' ' ' <"$lock_error_file")"
+        rm -f -- "$lock_error_file"
+        die "프로젝트 queue lock 획득에 실패했습니다. 상태는 변경되지 않았습니다: ${lock_error:-알 수 없는 잠금 오류}"
+      fi
+      rm -f -- "$lock_error_file"
+      trap "_runtime_lock_release '$root' __project_queue__ '$queue_token'" EXIT INT TERM
+      ;;
+  esac
+
   from_state="$(yaml_scalar "$path" status)"
 
   [[ "$from_state" != "$to_state" ]] || die "$task_id 는 이미 $to_state 입니다."
   transition_allowed "$from_state" "$to_state" ||
     die "허용되지 않은 전이입니다: $from_state -> $to_state ($task_id)"
+
+  local write_state="$to_state" write_note="$note" active_slots
+
+  # draft/queued만 ready 진입 때 새 슬롯을 소비한다. changes_requested와
+  # handover_required는 이미 활성 슬롯을 쓰므로 ready로 이름만 바뀐다.
+  #
+  # 의존성과 슬롯은 서로 독립인 두 조건이다. 하나의 if/elif로 묶으면 같은 요청이
+  # 큐가 붐빌 때만 다르게 처리돼 계획 오류가 가장 발견하기 어려운 시점에 숨는다.
+  # 그래서 둘을 각각 판정하고, 해당하는 사유를 모두 남긴다.
+  if [[ "$to_state" == ready && ( "$from_state" == draft || "$from_state" == queued ) ]]; then
+    local dependency_ok=1 dependency_reason="" slot_full=0
+
+    if ! _transition_dependencies_complete "$root" "$path"; then
+      # 선언한 의존 Task 파일이 아예 없다 = 계획 오류. 슬롯 상황과 무관하게,
+      # 또 어느 from_state에서든 실패한다. queued에 묻어두면 Wave가 끝날 때까지
+      # 아무도 모른다.
+      (( TRANSITION_DEPENDENCY_MISSING == 0 )) ||
+        die "$task_id: ready 전이 조건 불충족 — $TRANSITION_DEPENDENCY_ERROR"
+      dependency_ok=0
+      dependency_reason="$TRANSITION_DEPENDENCY_ERROR"
+    fi
+
+    active_slots="$(_transition_active_slot_count "$root")"
+    (( active_slots < max_active )) || slot_full=1
+
+    if (( dependency_ok == 0 || slot_full == 1 )); then
+      if [[ "$from_state" == draft ]]; then
+        # 아직 ready가 될 수 없는 승인된 Task는 실패시키지도 과할당하지도 않고
+        # queued에 보존한다. 해당하는 사유를 모두 note와 WARN에 남긴다.
+        write_state=queued
+        if (( dependency_ok == 0 )); then
+          write_note="${write_note:+$write_note; }queue: ready requested; $dependency_reason"
+          printf '[WARN] 의존성이 아직 충족되지 않아 %s 를 queued로 기록합니다: %s\n' \
+            "$task_id" "$dependency_reason" >&2
+        fi
+        if (( slot_full == 1 )); then
+          write_note="${write_note:+$write_note; }queue: ready requested; active=$active_slots; max_active_tasks=$max_active"
+          printf '[WARN] 활성 Task 슬롯이 가득 차 %s 를 queued로 기록합니다: %s / %s\n' \
+            "$task_id" "$active_slots" "$max_active" >&2
+        fi
+      elif (( dependency_ok == 0 )); then
+        # 이미 queued인 Task에 대한 명시적 ready 요청은 지금 이행할 수 없으므로
+        # 상태를 바꾸지 않고 사유와 함께 실패한다.
+        die "$task_id: ready 전이 조건 불충족 — $dependency_reason"
+      else
+        printf '[WARN] 활성 Task 슬롯이 가득 차 %s 는 queued에 남습니다: %s / %s\n' \
+          "$task_id" "$active_slots" "$max_active" >&2
+        _runtime_lock_release "$root" __project_queue__ "$queue_token"
+        trap - EXIT INT TERM
+        return 0
+      fi
+    fi
+  fi
 
   # --- 전이별 필수 조건 ---
   case "$to_state" in
@@ -538,29 +700,15 @@ cmd_transition() {
       ;;
   esac
 
-  # --- 원자적 갱신 ---
-  local temporary
-  temporary="$(mktemp "$(dirname "$path")/.harness-transition.XXXXXX")"
-  trap "rm -f -- '$temporary'" RETURN
-  awk -v to="$to_state" '
-    !done_flag && index($0, "status:") == 1 { print "status: " to; done_flag = 1; next }
-    { print }
-  ' "$path" >"$temporary"
-  grep -q "^status: ${to_state}$" "$temporary" || {
-    rm -f "$temporary"
-    die "status 갱신에 실패했습니다: $path"
-  }
-  chmod 0644 "$temporary"
-  mv "$temporary" "$path"
+  # --- queue lock 아래 원자적 파일 교체와 유한 승격 ---
+  _transition_write_status "$root" "$task_id" "$path" "$from_state" "$write_state" "$write_note"
+  if [[ "$to_state" == completed ]]; then
+    _transition_promote_queued "$root" "$max_active"
+  fi
 
-  append_event "$root" transition "$task_id" "$from_state" "$to_state" "${note:-}"
-
-  printf '%s: %s -> %s\n' "$task_id" "$from_state" "$to_state"
-
-  # STATE.md 드리프트 안내 (스크립트가 산문을 대신 쓰지 않는다)
-  if grep -q "| *${task_id} *|" "$root/.harness/STATE.md" 2>/dev/null; then
-    grep -q "| *${task_id} *|.*| *${to_state} *|" "$root/.harness/STATE.md" ||
-      info "STATE.md의 $task_id 행이 아직 $to_state 가 아닙니다. Orchestrator가 갱신하세요."
+  if [[ -n "$queue_token" ]]; then
+    _runtime_lock_release "$root" __project_queue__ "$queue_token"
+    trap - EXIT INT TERM
   fi
 }
 

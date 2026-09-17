@@ -596,6 +596,233 @@ AC_PY
   expect_fail "validate가 Git 기준선 누락을 통과시킴" \
     bash "$SELF_PATH" validate "$no_git"
 
+  # --- task-021: 가변 활성 상한과 queued lifecycle --------------------------
+  local queue_project="$test_root/queue-project"
+  bash "$SELF_PATH" init "$queue_project" --name queue-project --goal queue-test \
+    --worker codex --reviewer agy --fallback claude,agy >/dev/null
+  sed -i 's/^- 상태: draft$/- 상태: approved/' "$queue_project/.harness/SPEC.md"
+  sed -i 's/^  max_active_tasks: .*/  max_active_tasks: 2/' "$queue_project/.harness/project.yaml"
+
+  make_queue_task() {
+    local project="$1" id="$2" state="$3" dependencies="${4:-}"
+    sed -e "s/^task_id: .*/task_id: $id/" \
+        -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+        -e "s/^status: .*/status: $state/" \
+        -e "s/^dependencies: .*/dependencies: [$dependencies]/" \
+        "$project/.harness/tasks/TEMPLATE.yaml" >"$project/.harness/tasks/$id.yaml"
+  }
+
+  # project.yaml 설정을 기본으로 쓰고 draft/queued/completed를 슬롯에서 제외한다.
+  make_queue_task "$queue_project" task-limit-01 ready
+  make_queue_task "$queue_project" task-limit-02 active
+  make_queue_task "$queue_project" task-limit-03 draft
+  make_queue_task "$queue_project" task-limit-04 queued
+  make_queue_task "$queue_project" task-limit-05 completed
+  local limit_output limit_error
+  limit_output="$(bash "$SELF_PATH" validate "$queue_project")" ||
+    die "project.yaml 활성 상한으로 validate가 통과하지 못했습니다."
+  grep -Fq '[OK]   활성 Task 2 / 상한 2' <<<"$limit_output" ||
+    die "draft/queued/completed를 제외한 활성 슬롯 수가 올바르지 않습니다."
+
+  # 환경 변수가 프로젝트 설정보다 우선한다. 세 번째 ready 진입도 override 3
+  # 아래서는 허용되고, override가 사라진 뒤의 기존 초과 상태는 WARN만 낸다.
+  MAX_ACTIVE_TASKS=3 bash "$SELF_PATH" transition "$queue_project" task-limit-03 ready >/dev/null
+  [[ "$(yaml_scalar "$queue_project/.harness/tasks/task-limit-03.yaml" status)" == ready ]] ||
+    die "MAX_ACTIVE_TASKS가 project.yaml 상한보다 우선하지 않았습니다."
+  limit_output="$(MAX_ACTIVE_TASKS=3 bash "$SELF_PATH" validate "$queue_project")" ||
+    die "MAX_ACTIVE_TASKS=3 override validate가 실패했습니다."
+  grep -Fq '[OK]   활성 Task 3 / 상한 3' <<<"$limit_output" ||
+    die "validate가 MAX_ACTIVE_TASKS override를 사용하지 않았습니다."
+  limit_output="$(bash "$SELF_PATH" validate "$queue_project")" ||
+    die "기존 활성 상한 초과가 FAIL로 처리됐습니다."
+  grep -Fq '[WARN] 활성 Task가 상한을 초과했습니다: 3 > 2' <<<"$limit_output" ||
+    die "기존 활성 상한 초과 WARN이 없습니다."
+
+  set +e
+  limit_error="$(MAX_ACTIVE_TASKS=0 bash "$SELF_PATH" validate "$queue_project" 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] && grep -Fq 'MAX_ACTIVE_TASKS 는 양의 정수' <<<"$limit_error" ||
+    die "잘못된 MAX_ACTIVE_TASKS가 명시적으로 거부되지 않았습니다."
+  sed -i 's/^  max_active_tasks: .*/  max_active_tasks: invalid/' "$queue_project/.harness/project.yaml"
+  set +e
+  limit_error="$(env -u MAX_ACTIVE_TASKS bash "$SELF_PATH" validate "$queue_project" 2>&1)"
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] && grep -Fq 'project.yaml:limits.max_active_tasks 는 양의 정수' <<<"$limit_error" ||
+    die "잘못된 project.yaml 활성 상한이 명시적으로 거부되지 않았습니다."
+  sed -i 's/^  max_active_tasks: .*/  max_active_tasks: 2/' "$queue_project/.harness/project.yaml"
+
+  # 별도 fixture에서 상한 초과 ready 요청은 queued가 되고, completed가 만든
+  # 빈 슬롯에는 의존성이 끝난 Task만 ID 순서로 하나씩 승격된다.
+  local lifecycle_project="$test_root/queue-lifecycle-project"
+  bash "$SELF_PATH" init "$lifecycle_project" --name queue-lifecycle --goal queue-lifecycle-test \
+    --worker codex --reviewer agy --fallback claude,agy >/dev/null
+  sed -i 's/^- 상태: draft$/- 상태: approved/' "$lifecycle_project/.harness/SPEC.md"
+  sed -i 's/^  max_active_tasks: .*/  max_active_tasks: 2/' "$lifecycle_project/.harness/project.yaml"
+  make_queue_task "$lifecycle_project" task-110 awaiting_approval
+  make_queue_task "$lifecycle_project" task-120 ready
+  make_queue_task "$lifecycle_project" task-100 queued task-unfinished
+  make_queue_task "$lifecycle_project" task-130 draft task-110
+  make_queue_task "$lifecycle_project" task-140 queued
+  make_queue_task "$lifecycle_project" task-unfinished draft
+
+  local queue_warning
+  queue_warning="$(bash "$SELF_PATH" transition "$lifecycle_project" task-130 ready 2>&1)" ||
+    die "상한 초과 ready 요청이 queued로 안전하게 기록되지 않았습니다."
+  grep -Fq '[WARN] 활성 Task 슬롯이 가득 차 task-130 를 queued로 기록합니다' <<<"$queue_warning" ||
+    die "상한 초과 ready 요청의 queued WARN이 없습니다."
+  [[ "$(yaml_scalar "$lifecycle_project/.harness/tasks/task-130.yaml" status)" == queued ]] ||
+    die "상한 초과 draft Task가 queued가 아닙니다."
+  expect_fail "queued->active 직접 전이/dispatch 준비 거부" \
+    bash "$SELF_PATH" transition "$lifecycle_project" task-130 active
+
+  # 의존성 판정은 슬롯 상황과 무관해야 한다. 슬롯 검사와 하나의 if/elif로 묶이면
+  # 같은 요청이 큐가 붐빌 때만 다르게 처리돼 계획 오류가 조용히 삼켜진다.
+  # 선언한 의존 Task 파일이 아예 없는 것(계획 오류)은 슬롯이 가득 찼든 비었든
+  # 실패해야 하고, 의존 Task가 아직 completed가 아닌 것(정상 대기)은 슬롯이
+  # 비어 있어도 queued로 보존돼야 한다.
+  local dependency_output dependency_status
+  make_queue_task "$lifecycle_project" task-150 draft task-nonexistent
+  set +e
+  dependency_output="$(bash "$SELF_PATH" transition "$lifecycle_project" task-150 ready 2>&1)"
+  dependency_status=$?
+  set -e
+  [[ "$dependency_status" -ne 0 ]] &&
+    grep -Fq '의존 Task 파일이 없습니다: task-nonexistent' <<<"$dependency_output" ||
+    die "슬롯이 가득 찬 상태에서 없는 의존 Task의 ready 요청이 거부되지 않았습니다."
+  [[ "$(yaml_scalar "$lifecycle_project/.harness/tasks/task-150.yaml" status)" == draft ]] ||
+    die "거부된 ready 요청이 Task 상태를 바꿨습니다 (queued로 삼켜짐)."
+
+  # 같은 요청을 슬롯이 넉넉한 별도 프로젝트에서 반복해도 판정이 같아야 한다.
+  local dependency_project="$test_root/queue-dependency-project"
+  bash "$SELF_PATH" init "$dependency_project" --name queue-dependency --goal queue-dependency-test \
+    --worker codex --reviewer agy --fallback claude,agy >/dev/null
+  sed -i 's/^- 상태: draft$/- 상태: approved/' "$dependency_project/.harness/SPEC.md"
+  sed -i 's/^  max_active_tasks: .*/  max_active_tasks: 5/' "$dependency_project/.harness/project.yaml"
+  make_queue_task "$dependency_project" task-200 draft task-nonexistent
+  set +e
+  dependency_output="$(bash "$SELF_PATH" transition "$dependency_project" task-200 ready 2>&1)"
+  dependency_status=$?
+  set -e
+  [[ "$dependency_status" -ne 0 ]] &&
+    grep -Fq '의존 Task 파일이 없습니다: task-nonexistent' <<<"$dependency_output" ||
+    die "슬롯이 비어 있을 때 없는 의존 Task의 ready 요청이 거부되지 않았습니다."
+  [[ "$(yaml_scalar "$dependency_project/.harness/tasks/task-200.yaml" status)" == draft ]] ||
+    die "거부된 ready 요청이 Task 상태를 바꿨습니다."
+
+  # 의존 Task가 존재하지만 아직 completed가 아니면 슬롯이 비어 있어도 queued다.
+  make_queue_task "$dependency_project" task-210 active
+  make_queue_task "$dependency_project" task-220 draft task-210
+  dependency_output="$(bash "$SELF_PATH" transition "$dependency_project" task-220 ready 2>&1)" ||
+    die "슬롯이 비어 있을 때 미완료 의존성의 ready 요청이 실패했습니다."
+  grep -Fq '[WARN] 의존성이 아직 충족되지 않아 task-220 를 queued로 기록합니다' <<<"$dependency_output" ||
+    die "미완료 의존성 queued 기록의 WARN 사유가 없습니다."
+  [[ "$(yaml_scalar "$dependency_project/.harness/tasks/task-220.yaml" status)" == queued ]] ||
+    die "슬롯이 비어 있을 때 미완료 의존성 Task가 queued로 보존되지 않았습니다."
+
+  # 이미 queued인 Task에 대한 명시적 ready 요청은 이행할 수 없으면 실패한다.
+  set +e
+  dependency_output="$(bash "$SELF_PATH" transition "$dependency_project" task-220 ready 2>&1)"
+  dependency_status=$?
+  set -e
+  [[ "$dependency_status" -ne 0 ]] &&
+    grep -Fq '의존 Task task-210 가 completed가 아닙니다' <<<"$dependency_output" ||
+    die "queued Task의 명시적 ready 요청이 미충족 의존성에도 실패하지 않았습니다."
+  [[ "$(yaml_scalar "$dependency_project/.harness/tasks/task-220.yaml" status)" == queued ]] ||
+    die "실패한 queued->ready 요청이 상태를 바꿨습니다."
+  rm -f "$lifecycle_project/.harness/tasks/task-150.yaml"
+
+  mkdir -p "$lifecycle_project/.harness/decisions"
+  printf '승인: yes\n' >"$lifecycle_project/.harness/decisions/task-110-approval.md"
+  bash "$SELF_PATH" transition "$lifecycle_project" task-110 completed >/dev/null
+  [[ "$(yaml_scalar "$lifecycle_project/.harness/tasks/task-130.yaml" status)" == ready ]] ||
+    die "completed 뒤 의존성을 충족한 첫 queued Task가 ready로 승격되지 않았습니다."
+  [[ "$(yaml_scalar "$lifecycle_project/.harness/tasks/task-100.yaml" status)" == queued ]] &&
+    [[ "$(yaml_scalar "$lifecycle_project/.harness/tasks/task-140.yaml" status)" == queued ]] ||
+    die "빈 슬롯 수를 넘겨 queued Task를 승격했습니다."
+  printf '승인: yes\n' >"$lifecycle_project/.harness/decisions/task-120-approval.md"
+  sed -i 's/^status: ready$/status: awaiting_approval/' "$lifecycle_project/.harness/tasks/task-120.yaml"
+  bash "$SELF_PATH" transition "$lifecycle_project" task-120 completed >/dev/null
+  [[ "$(yaml_scalar "$lifecycle_project/.harness/tasks/task-140.yaml" status)" == ready ]] ||
+    die "두 번째 빈 슬롯에 다음 eligible queued Task가 승격되지 않았습니다."
+  [[ "$(yaml_scalar "$lifecycle_project/.harness/tasks/task-100.yaml" status)" == queued ]] ||
+    die "미완료 의존성이 있는 queued Task를 승격했습니다."
+  grep -q $'\ttransition\ttask-130\tqueued\tready\tqueue promotion:' \
+    "$lifecycle_project/.harness/evidence/events.tsv" &&
+    grep -q $'\ttransition\ttask-140\tqueued\tready\tqueue promotion:' \
+      "$lifecycle_project/.harness/evidence/events.tsv" ||
+    die "queued -> ready 자동 승격 이벤트가 누락됐습니다."
+
+  # lock 획득 실패는 Task YAML을 전혀 바꾸지 않고 원인을 명시한다.
+  make_queue_task "$lifecycle_project" task-lock-draft draft
+  local queue_lock_token queue_lock_error
+  queue_lock_token="$(_runtime_lock_acquire "$lifecycle_project" __project_queue__ selftest 600)" ||
+    die "queue lock 실패 fixture를 만들지 못했습니다."
+  set +e
+  queue_lock_error="$(bash "$SELF_PATH" transition "$lifecycle_project" task-lock-draft ready 2>&1)"
+  failure_status=$?
+  set -e
+  _runtime_lock_release "$lifecycle_project" __project_queue__ "$queue_lock_token"
+  [[ "$failure_status" -ne 0 ]] && grep -Fq '프로젝트 queue lock 획득에 실패했습니다. 상태는 변경되지 않았습니다' <<<"$queue_lock_error" ||
+    die "queue lock 획득 실패가 명시적으로 보고되지 않았습니다."
+  [[ "$(yaml_scalar "$lifecycle_project/.harness/tasks/task-lock-draft.yaml" status)" == draft ]] ||
+    die "queue lock 획득 실패 뒤 Task 상태가 부분 변경됐습니다."
+
+  # 동시 ready 진입과 동시 completed 승격 모두 같은 프로젝트 queue lock을 쓴다.
+  local concurrent_project="$test_root/queue-concurrent-project"
+  bash "$SELF_PATH" init "$concurrent_project" --name queue-concurrent --goal queue-concurrent-test \
+    --worker codex --reviewer agy --fallback claude,agy >/dev/null
+  sed -i 's/^- 상태: draft$/- 상태: approved/' "$concurrent_project/.harness/SPEC.md"
+  sed -i 's/^  max_active_tasks: .*/  max_active_tasks: 1/' "$concurrent_project/.harness/project.yaml"
+  make_queue_task "$concurrent_project" task-race-a draft
+  make_queue_task "$concurrent_project" task-race-b draft
+  local race_pid_a race_pid_b race_status_a race_status_b race_active
+  set +e
+  bash "$SELF_PATH" transition "$concurrent_project" task-race-a ready >"$test_root/race-a.out" 2>&1 & race_pid_a=$!
+  bash "$SELF_PATH" transition "$concurrent_project" task-race-b ready >"$test_root/race-b.out" 2>&1 & race_pid_b=$!
+  wait "$race_pid_a"; race_status_a=$?
+  wait "$race_pid_b"; race_status_b=$?
+  set -e
+  race_active="$(_transition_active_slot_count "$concurrent_project")"
+  (( race_active <= 1 )) || die "동시 ready 진입이 활성 상한을 초과했습니다: $race_active > 1"
+  (( race_status_a == 0 || race_status_b == 0 )) || die "동시 ready 진입이 모두 실패했습니다."
+  if (( race_status_a != 0 )); then
+    grep -Fq 'queue lock 획득에 실패' "$test_root/race-a.out" || die "동시 ready 잠금 실패 사유가 없습니다."
+    [[ "$(yaml_scalar "$concurrent_project/.harness/tasks/task-race-a.yaml" status)" == draft ]] || die "실패한 동시 ready 전이가 상태를 바꿨습니다."
+  fi
+  if (( race_status_b != 0 )); then
+    grep -Fq 'queue lock 획득에 실패' "$test_root/race-b.out" || die "동시 ready 잠금 실패 사유가 없습니다."
+    [[ "$(yaml_scalar "$concurrent_project/.harness/tasks/task-race-b.yaml" status)" == draft ]] || die "실패한 동시 ready 전이가 상태를 바꿨습니다."
+  fi
+
+  sed -i 's/^  max_active_tasks: .*/  max_active_tasks: 2/' "$concurrent_project/.harness/project.yaml"
+  rm -f "$concurrent_project/.harness/tasks/task-race-a.yaml" "$concurrent_project/.harness/tasks/task-race-b.yaml"
+  make_queue_task "$concurrent_project" task-complete-a awaiting_approval
+  make_queue_task "$concurrent_project" task-complete-b awaiting_approval
+  make_queue_task "$concurrent_project" task-queued-a queued
+  make_queue_task "$concurrent_project" task-queued-b queued
+  mkdir -p "$concurrent_project/.harness/decisions"
+  printf '승인: yes\n' >"$concurrent_project/.harness/decisions/task-complete-a-approval.md"
+  printf '승인: yes\n' >"$concurrent_project/.harness/decisions/task-complete-b-approval.md"
+  set +e
+  bash "$SELF_PATH" transition "$concurrent_project" task-complete-a completed >"$test_root/complete-a.out" 2>&1 & race_pid_a=$!
+  bash "$SELF_PATH" transition "$concurrent_project" task-complete-b completed >"$test_root/complete-b.out" 2>&1 & race_pid_b=$!
+  wait "$race_pid_a"; race_status_a=$?
+  wait "$race_pid_b"; race_status_b=$?
+  set -e
+  race_active="$(_transition_active_slot_count "$concurrent_project")"
+  (( race_active <= 2 )) || die "동시 completed 승격이 활성 상한을 초과했습니다: $race_active > 2"
+  (( race_status_a == 0 || race_status_b == 0 )) || die "동시 completed 전이가 모두 실패했습니다."
+  if (( race_status_a != 0 )); then
+    grep -Fq 'queue lock 획득에 실패' "$test_root/complete-a.out" || die "동시 completed 잠금 실패 사유가 없습니다."
+    [[ "$(yaml_scalar "$concurrent_project/.harness/tasks/task-complete-a.yaml" status)" == awaiting_approval ]] || die "실패한 completed 전이가 상태를 바꿨습니다."
+  fi
+  if (( race_status_b != 0 )); then
+    grep -Fq 'queue lock 획득에 실패' "$test_root/complete-b.out" || die "동시 completed 잠금 실패 사유가 없습니다."
+    [[ "$(yaml_scalar "$concurrent_project/.harness/tasks/task-complete-b.yaml" status)" == awaiting_approval ]] || die "실패한 completed 전이가 상태를 바꿨습니다."
+  fi
+
   # --- Context Packet에 직전 라운드가 들어가는가 ------------------------------
   # 안 들어가면 changes_requested 재시도에서 Worker가 Reviewer 지적을 못 보고
   # 같은 접근을 반복한다 — Rework 지표가 하네스 결함으로 부풀려진다.
@@ -3222,6 +3449,9 @@ EOF
     'PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)'
     'PASS: 이벤트 로그 기록 (전이·sync-templates·quota-retry·auto-step·lock-reclaim·adopt 9곳 + dispatch·observe·quota-check 직접 호출 event, 쿼터 수치 미노출)'
     'PASS: validate 검증 (정상/Worker=Reviewer/Git 누락)'
+    'PASS: 가변 활성 Task 상한'
+    'PASS: queued lifecycle'
+    'PASS: queued lifecycle 동시성'
     'PASS: 수동 검토 정책 예외'
     'PASS: 수동 검토 lifecycle'
     'PASS: 스텝 명령 인자 검증 (adopt 인자, --print-only 무상태·셸 인용, adopt Pane close 보호)'

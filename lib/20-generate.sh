@@ -259,7 +259,8 @@ providers:
   fallback_chain: [$fallback]
 
 limits:
-  # 전체 Task가 아니라 현재 활성 목록의 상한이다.
+  # ready부터 awaiting_approval까지의 활성 슬롯 상한이다. draft/queued/completed는
+  # 제외하며, 유효한 양의 MAX_ACTIVE_TASKS가 이 값을 일시적으로 덮어쓴다.
   max_active_tasks: 5
   max_parallel_workers: 2
   max_primary_workers_per_task: 1
