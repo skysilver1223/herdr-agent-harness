@@ -44,6 +44,10 @@ cmd_dispatch() {
   local prompt_output prompt_status get_output get_status read_output read_status result
   local prompt_resent=0
   local attempt_file evidence_file temporary
+  # Reviewer 산출물은 Agent 화면 밖의 규정 경로에만 유효하다. Provider가 다른
+  # 경로에 파일을 썼어도 Harness가 임의로 옮기지는 않고, 이 dispatch 직후 사람이
+  # 바로 찾을 수 있게 결과·Evidence에 사실만 기록한다.
+  local review_artifact_status="" review_artifact_note=""
   # AC-002·003: agent start 실패 단계·분류와 dispatch가 이번 호출에서 만든
   # Pane의 자동 회수 결과. 실패가 아니면 계속 빈 값으로 남아 Attempt·Evidence에
   # 아무 줄도 추가하지 않는다.
@@ -331,6 +335,15 @@ cmd_dispatch() {
   local quota_signal
   quota_signal="$(_runtime_scan_quota_signal "$prompt_output"$'\n'"$read_output" || true)"
 
+  if [[ "$role" == reviewer ]]; then
+    if [[ -n "$(latest_task_review "$root" "$task_id")" ]]; then
+      review_artifact_status="present_required_path"
+    else
+      review_artifact_status="missing_required_path"
+      review_artifact_note="Reviewer가 규정 경로 .harness/reviews/${task_id}-*.md 에 Review를 남기지 않았습니다. Agent 출력 또는 Provider 작업 경로를 확인하고 사람이 조치하세요."
+    fi
+  fi
+
   evidence_file="$(_runtime_evidence_raw_path "$root" "$task_id" "$role" "$attempt")"
   mkdir -p "$(dirname "$evidence_file")"
   temporary="$(mktemp "$root/.harness/evidence/.capture.XXXXXX")"
@@ -340,6 +353,11 @@ cmd_dispatch() {
     if [[ -n "$start_failure_stage" ]]; then
       printf -- '- Start failure stage: %s\n- Start failure classification: %s\n- Pane cleanup: %s\n\n' \
         "$start_failure_stage" "$start_failure_class" "$pane_cleanup_summary"
+    fi
+    if [[ "$role" == reviewer ]]; then
+      printf -- '- Review artifact: %s\n' "$review_artifact_status"
+      [[ -z "$review_artifact_note" ]] || printf -- '- Review artifact note: %s\n' "$review_artifact_note"
+      printf '\n'
     fi
     printf '## Git status --short\n\n'
     git -C "$root" status --short 2>&1 || true
@@ -374,10 +392,17 @@ cmd_dispatch() {
   if [[ -n "$start_failure_stage" ]]; then
     evidence_summary="$evidence_summary 실패 단계 $start_failure_stage, 분류 $start_failure_class, Pane 정리 $pane_cleanup_summary."
   fi
+  if [[ "$review_artifact_status" == missing_required_path ]]; then
+    evidence_summary="$evidence_summary $review_artifact_note"
+  fi
   _runtime_write_evidence_yaml "$root" "$task_id" "$role" "$attempt" "$result" \
     "$evidence_summary" 0
   _runtime_write_result "$root" "$task_id" "$role" "$result"
-  append_event "$root" dispatch "$task_id" "$role" "$result" "provider=$provider pane=$pane_id attempt=$attempt"
+  append_event "$root" dispatch "$task_id" "$role" "$result" "provider=$provider pane=$pane_id attempt=$attempt${review_artifact_status:+ review_artifact=$review_artifact_status}"
+  if [[ "$review_artifact_status" == missing_required_path ]]; then
+    printf '경고: %s\n' "$review_artifact_note" >&2
+    printf 'review_artifact=missing_required_path\n'
+  fi
   printf 'dispatch_result=%s\n' "$result"
   [[ "$result" == settled || "$result" == blocked ]]
 }

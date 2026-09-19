@@ -127,7 +127,7 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 | `evidence/TASK-attempt-N-checks.yaml` | AC 검증 결과 | 추적 |
 | `evidence/raw/TASK-<role>-attempt-N.md` | 원문 덤프 — `git status --short`/`diff --stat`, Agent 상태·출력, `observe` 관측 기록 | 제외 |
 
-정본은 `dispatch`/`observe`만 만들고, 게이트는 글롭이 아니라 이름과 필수 필드를 함께 봅니다 — 빈 YAML 하나로는 통과하지 못합니다. Secret 의심 패턴이 발견되면 원문 대신 요약만 남깁니다.
+정본은 `dispatch`/`observe`만 만들고, 게이트는 글롭이 아니라 이름과 필수 필드를 함께 봅니다 — 빈 YAML 하나로는 통과하지 못합니다. Secret 의심 패턴이 발견되면 원문 대신 요약만 남깁니다. Context Packet에 이전 Evidence·checks·Review를 넣을 때는 `gawk substr`로 줄마다 기본 `max_columns=500` 문자만 남깁니다. 이는 UTF-8 바이트 경계를 보존하기 위한 필수 의존성입니다. gawk가 없거나 실패하면 바이트 절단으로 폴백하지 않고 발췌 생략 표식·경고만 내며, `doctor`는 이를 필수 누락으로 보고합니다.
 
 ## 6. Skills
 
@@ -190,6 +190,13 @@ Pane split이 성공한 뒤 `agent start`가 실패하면 `dispatch_result=error
 실패도 숨기지 않고 사람이 `herdr pane close PANE_ID`로 정리하도록 안내합니다).
 `adopt`로 등록한 Pane·사용자 Pane·기존 등록 Agent는 이 자동 회수 대상이 아니며,
 그런 Pane은 여전히 `close-agent`의 `--force` 게이트로만 닫힙니다.
+
+Reviewer dispatch가 끝나면 Harness는 `.harness/reviews/TASK_ID-*.md`에 해당 Task의
+Review가 있는지 즉시 확인합니다. 없으면 `review_artifact=missing_required_path`를
+출력하고 raw Evidence와 정본 Evidence 요약·dispatch event에 누락 사실과 규정 경로를
+기록합니다. 이는 Agent 턴 종료 뒤의 관측 경고이므로 `dispatch_result`를 실패로
+바꾸지 않습니다. Harness는 Provider의 다른 작업 경로를 추측해 찾거나 파일을
+자동 이동하지 않으며, 사람만 출처를 확인해 조치합니다.
 
 `dispatch`·`observe`가 사용하는 상태 정규화는 Herdr의 실제 `agent_status` 다섯 값을
 기준으로 합니다.

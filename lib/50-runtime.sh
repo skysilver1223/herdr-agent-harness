@@ -528,7 +528,21 @@ _runtime_excerpt() {
   local file="$1" max_lines="${2:-80}" max_columns="${3:-500}" total
   [[ -f "$file" ]] || return 0
   total="$(wc -l <"$file" 2>/dev/null || printf 0)"
-  head -n "$max_lines" "$file" | cut -c "1-$max_columns"
+  # cut -c는 UTF-8 문자 경계를 보장하지 않는다. Review·Evidence의 긴 한글 줄을
+  # 중간 바이트에서 자르면 이 출력이 들어가는 Context Packet 자체가 invalid UTF-8이
+  # 되어 herdr agent prompt가 거부한다. GNU awk의 substr는 현재 locale의 문자
+  # 단위로 자르므로 max_columns의 기존 "문자 상한" 의미를 보존한다. mawk는
+  # 바이트 단위일 수 있어 이름을 gawk로 고정한다.
+  if ! command -v gawk >/dev/null 2>&1; then
+    printf '[발췌 생략: gawk가 없어 UTF-8 문자 경계를 보장할 수 없습니다. gawk를 설치한 뒤 다시 dispatch하세요.]\n'
+    printf '경고: Context Packet 발췌에는 gawk가 필요합니다. gawk를 설치한 뒤 다시 dispatch하세요.\n' >&2
+  elif ! gawk -v max_lines="$max_lines" -v max_columns="$max_columns" \
+      'NR <= max_lines { print substr($0, 1, max_columns) }' "$file"; then
+    # set -Eeuo pipefail 아래에서도 발췌 도구의 일시 실패가 dispatch 전체를
+    # 중단시키면 안 된다. 바이트 절단으로 폴백하지 않고 명시적 표식만 남긴다.
+    printf '[발췌 생략: gawk가 UTF-8 문자 경계 발췌에 실패했습니다. 원본 파일을 확인하세요.]\n'
+    printf '경고: gawk가 Context Packet 발췌에 실패했습니다: %s\n' "$file" >&2
+  fi
   if (( total > max_lines )); then
     printf '... (%s줄 중 %s줄만 표시 — 전문은 원본 파일 참조)\n' "$total" "$max_lines"
   fi

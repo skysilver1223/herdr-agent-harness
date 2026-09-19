@@ -900,6 +900,64 @@ EOF
 
   rm -rf "$packet_fixture_dir"
 
+  # --- Context Packet UTF-8 무결성: 긴 한글 줄은 문자 경계에서 잘린다 ---
+  # Review·Evidence 어느 한쪽만 긴 경우를 검사하면 다른 재시도 경로에서 다시
+  # 깨질 수 있다. 둘 다 500자보다 긴 한글 한 줄로 만들고, 실제 Packet 전체를
+  # iconv로 디코드해 바이트 절단이 남지 않았음을 고정한다.
+  local utf8_packet_root utf8_line utf8_excerpt utf8_packet no_gawk_bin
+  local missing_gawk_out missing_gawk_status doctor_no_gawk_out doctor_no_gawk_status
+  utf8_packet_root="$(mktemp -d)"
+  mkdir -p "$utf8_packet_root/.harness/"{tasks,runtime,evidence,reviews}
+  cat >"$utf8_packet_root/.harness/SPEC.md" <<'EOF'
+## 1. 목표
+UTF-8 Context Packet 검사
+## 3. 기술 스택 및 제약
+- Bash와 gawk
+EOF
+  cat >"$utf8_packet_root/.harness/tasks/task-utf8.yaml" <<'EOF'
+schema_version: '1.0'
+task_id: task-utf8
+intent: .harness/intents/task-utf8-intent.md
+EOF
+  utf8_line="$(printf '가%.0s' {1..501})"
+  printf "task: 'task-utf8'\nrole: 'worker'\nattempt: 1\nsummary: '%s'\n" "$utf8_line" \
+    >"$utf8_packet_root/.harness/evidence/task-utf8-worker-attempt-1.yaml"
+  printf '판정: CHANGES_REQUESTED\n%s\n' "$utf8_line" \
+    >"$utf8_packet_root/.harness/reviews/task-utf8-review-1.md"
+  utf8_excerpt="$(_runtime_excerpt "$utf8_packet_root/.harness/reviews/task-utf8-review-1.md" 80 500)" ||
+    die "문자 경계 발췌가 비영 종료로 호출자를 중단시켰습니다."
+  printf '%s\n' "$utf8_excerpt" | gawk 'NR == 2 { exit !(length($0) == 500) }' ||
+    die "gawk 발췌가 max_columns=500의 문자 상한을 보존하지 못했습니다."
+  utf8_packet="$utf8_packet_root/.harness/runtime/task-utf8-context-worker.md"
+  _runtime_context_packet "$utf8_packet_root" task-utf8 worker \
+    "$utf8_packet_root/.harness/tasks/task-utf8.yaml" "$utf8_packet" ||
+    die "긴 한글 fixture의 Context Packet 생성에 실패했습니다."
+  iconv -f UTF-8 -t UTF-8 "$utf8_packet" >/dev/null ||
+    die "긴 한글 Review·Evidence가 든 Context Packet이 유효한 UTF-8이 아닙니다."
+
+  # gawk가 없는 경우 바이트 절단으로 폴백하지 않고 표식과 진단을 남긴다.
+  # PATH를 최소화해도 _runtime_excerpt가 쓰는 wc만 넣어 실제 부재 경로를 탄다.
+  no_gawk_bin="$utf8_packet_root/no-gawk-bin"
+  mkdir -p "$no_gawk_bin"
+  ln -s "$(command -v wc)" "$no_gawk_bin/wc"
+  set +e
+  missing_gawk_out="$(PATH="$no_gawk_bin" _runtime_excerpt "$utf8_packet_root/.harness/reviews/task-utf8-review-1.md" 80 500 2>&1)"
+  missing_gawk_status=$?
+  doctor_no_gawk_out="$(PATH="$no_gawk_bin" cmd_doctor 2>&1)"
+  doctor_no_gawk_status=$?
+  set -e
+  [[ "$missing_gawk_status" -eq 0 ]] ||
+    die "gawk 부재 발췌가 호출자를 실패로 만들었습니다."
+  printf '%s' "$missing_gawk_out" | grep -q 'gawk.*UTF-8 문자 경계' ||
+    die "gawk 부재 발췌가 명시적 진단을 남기지 않았습니다."
+  [[ "$doctor_no_gawk_status" -ne 0 ]] &&
+    printf '%s' "$doctor_no_gawk_out" | grep -q 'gawk.*Context Packet.*UTF-8' ||
+    die "doctor가 gawk 부재와 Context Packet 영향을 명시하지 않았습니다."
+  grep -q 'Context Packet.*UTF-8' "$HARNESS_LIB_DIR/70-status.sh" ||
+    die "doctor 구현에 gawk 의존성 설명이 없습니다."
+  grep -q 'gawk' "$(dirname "$SELF_PATH")/README.md" ||
+    die "README에 gawk Context Packet 의존성 설명이 없습니다."
+
   expect_fail "dispatch 잘못된 ROLE" \
     bash "$SELF_PATH" dispatch "$test_project" task-001 architect
   expect_fail "observe 인자 부족" \
@@ -3608,6 +3666,46 @@ REPORT_JSON_CHECK
   fi
   rm -f -- "$extra_file"
 
+  # --- Reviewer 규정 경로 이탈: dispatch 결과와 Evidence에 즉시 보고 --------
+  # Provider를 실제로 띄우지 않는 Herdr 함수 스텁이다. 완료 상태인데도 Review가
+  # .harness/reviews/TASK-*.md에 없을 때만 경고하고 dispatch_result 자체는
+  # 실패로 바꾸지 않아야 한다.
+  local review_report_project review_report_task review_report_output review_report_raw review_report_yaml
+  review_report_project="$test_root/review-path-report-project"
+  cp -a "$test_project" "$review_report_project"
+  review_report_task="$review_report_project/.harness/tasks/task-review-report.yaml"
+  sed -e 's/^task_id: .*/task_id: task-review-report/' \
+      -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+      -e 's/^status: .*/status: reviewing/' \
+      "$test_project/.harness/tasks/TEMPLATE.yaml" >"$review_report_task"
+  review_report_output="$(
+    herdr() {
+      case "${1:-}:${2:-}" in
+        pane:split) printf '{"pane_id":"wREVIEW:p1"}\n' ;;
+        agent:start|agent:prompt) printf 'ok\n' ;;
+        agent:get) printf '{"agent_status":"done","revision":2,"state_change_seq":2}\n' ;;
+        agent:read) printf 'review turn completed outside the required path\n' ;;
+        *) return 125 ;;
+      esac
+    }
+    _runtime_wait_repl_ready() {
+      RUNTIME_PROMPT_BASELINE_OUTPUT='{"agent_status":"idle","revision":1,"state_change_seq":1}'
+      RUNTIME_PROMPT_BASELINE_AVAILABLE=1
+    }
+    _runtime_warn_model_policy_mismatch() { :; }
+    HERDR_ENV=1 cmd_dispatch "$review_report_project" task-review-report reviewer
+  )" || die "Review 경로 이탈 fixture dispatch가 실패했습니다."
+  printf '%s' "$review_report_output" | grep -q '^review_artifact=missing_required_path$' ||
+    die "Reviewer Review 경로 이탈이 dispatch 결과에 보고되지 않았습니다."
+  printf '%s' "$review_report_output" | grep -q '^dispatch_result=settled$' ||
+    die "Reviewer Review 경로 이탈이 dispatch를 실패로 바꿨습니다."
+  review_report_raw="$review_report_project/.harness/evidence/raw/task-review-report-reviewer-attempt-1.md"
+  review_report_yaml="$review_report_project/.harness/evidence/task-review-report-reviewer-attempt-1.yaml"
+  grep -q 'Review artifact: missing_required_path' "$review_report_raw" ||
+    die "Reviewer Review 경로 이탈이 raw Evidence에 기록되지 않았습니다."
+  grep -q '규정 경로 .*task-review-report' "$review_report_yaml" ||
+    die "Reviewer Review 경로 이탈이 정본 Evidence 요약에 기록되지 않았습니다."
+
   # --- 프롬프트 전달 재시도 판정 --------------------------------------------
   #
   # 출력에 Packet 헤더가 있는지는 Provider UI·스크롤백에 좌우되므로 신호가
@@ -3796,8 +3894,12 @@ EOF
     'PASS: 비대화형 명시적 실패'
     'PASS: 상태 전이표 강제 (17개 케이스, handover_required 인계문서 게이트 포함)'
     'PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)'
+    'PASS: 발췌 문자 경계 절단 (gawk substr·max_columns 문자 상한·비영 종료 차단)'
+    'PASS: Packet UTF-8 무결성 (긴 한글 Review·Evidence fixture iconv 검증)'
+    'PASS: gawk 의존성 명시 (부재 시 발췌 표식·doctor·README 진단)'
     'PASS: 역할별 읽기 지침 정합 및 Context 보존'
     'PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정'
+    'PASS: Review 경로 이탈 보고 (규정 경로 누락을 결과·Evidence에 기록, dispatch 비실패)'
     'PASS: Agent 상태 정규화'
     'PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)'
     'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)'

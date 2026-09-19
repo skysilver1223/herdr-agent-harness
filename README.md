@@ -299,10 +299,12 @@ herdr-harness doctor
 - Codex CLI
 - Antigravity CLI
 - jq (선택 — 없으면 `models --refresh`의 codex 모델 조회가 안 됩니다)
+- gawk (필수 — Context Packet의 긴 Review·Evidence를 UTF-8 문자 경계에서 발췌)
 - Herdr Integration 상태
 
-Herdr와 Git은 필수입니다. 설치하지 않은 선택 Provider와 jq는 각각 `MISSING`·
-`OPTION`으로 표시될 수 있습니다.
+Herdr·Git·gawk는 필수입니다. gawk가 없으면 Harness는 바이트 절단으로 폴백하지
+않고 해당 발췌를 생략 표식으로 남깁니다. 설치하지 않은 선택 Provider와 jq는 각각
+`MISSING`·`OPTION`으로 표시될 수 있습니다.
 
 ### 10. 쿼터 없는 자체 테스트
 
@@ -323,8 +325,12 @@ PASS: 신규 프로젝트 보호
 PASS: 비대화형 명시적 실패
 PASS: 상태 전이표 강제 (17개 케이스, handover_required 인계문서 게이트 포함)
 PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)
+PASS: 발췌 문자 경계 절단 (gawk substr·max_columns 문자 상한·비영 종료 차단)
+PASS: Packet UTF-8 무결성 (긴 한글 Review·Evidence fixture iconv 검증)
+PASS: gawk 의존성 명시 (부재 시 발췌 표식·doctor·README 진단)
 PASS: 역할별 읽기 지침 정합 및 Context 보존
 PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정
+PASS: Review 경로 이탈 보고 (규정 경로 누락을 결과·Evidence에 기록, dispatch 비실패)
 PASS: Agent 상태 정규화
 PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)
 PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)
@@ -558,7 +564,7 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제. `submitted`로 갈 때는 Acceptance Criteria의 `verified_by` 명령을 직접 실행하고 하나라도 실패하면 거부 |
 | `herdr-harness approve PATH TASK_ID --confirm-user-approval` | 사용자 명시 승인 확인 후 승인 증거를 원자적으로 기록하고 기존 `transition` 게이트로 `completed` 전이 |
 | `herdr-harness report [PATH] [--task TASK_ID\|--all] [--live] [--json]` | 최근 완료 1건(또는 `--task` 한 건·`--all` 전체) 요약·현재 Wave/전체 진척율·다음 할 일·STATE.md 드리프트를 읽기 전용으로 출력. 기본은 Herdr 미호출, `--live`만 Herdr 대조 |
-| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS(상한 300000)] [--print-only] [--extra-prompt FILE] [--cwd DIR]` | 같은 Task·역할의 살아 있는 기존 Agent가 있으면 이름·Pane과 `close-agent` 사용법을 안내하고 Pane 생성 전에 거부. 그 외에는 역할별 모델을 선택하고 프리미엄 승인·Provider 기본값 누출 차단을 적용한 뒤 Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--timeout`이 300000ms를 넘으면 Pane을 만들기 전에 거부. agent start 실패 시 실패 단계·안전한 분류·raw Evidence 경로를 표면화하고 자신이 만든 Pane을 자동 회수(회수 실패도 표면화). `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
+| `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS(상한 300000)] [--print-only] [--extra-prompt FILE] [--cwd DIR]` | 같은 Task·역할의 살아 있는 기존 Agent가 있으면 이름·Pane과 `close-agent` 사용법을 안내하고 Pane 생성 전에 거부. 그 외에는 역할별 모델을 선택하고 프리미엄 승인·Provider 기본값 누출 차단을 적용한 뒤 Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--timeout`이 300000ms를 넘으면 Pane을 만들기 전에 거부. agent start 실패 시 실패 단계·안전한 분류·raw Evidence 경로를 표면화하고 자신이 만든 Pane을 자동 회수(회수 실패도 표면화). Reviewer dispatch 뒤 규정 Review 경로가 비어 있으면 결과와 Evidence에 즉시 경고하되 dispatch 자체는 실패로 바꾸지 않는다. `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
 | `herdr-harness observe PATH TASK_ID [worker\|reviewer]` | 기존 Agent를 재조회하고 Evidence에 추가 |
 | `herdr-harness adopt PATH TASK_ID worker\|reviewer --pane PANE --agent NAME [--provider P]` | 사람이 직접 띄운 Agent를 Harness 추적에 등록(`--print-only` 폴백의 마지막 단계) |
 | `herdr-harness close-agent PATH TASK_ID [worker\|reviewer] [--force]` | Harness runtime에 등록된 Pane만 정리 |
@@ -573,6 +579,21 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 `draft -> ready` 요청 때 활성 슬롯이 가득 찼거나 의존 Task가 아직 `completed`가 아니면 Task를 실패시키거나 과할당하지 않고 같은 호출에서 `queued`로 원자적으로 기록합니다. 두 사유는 서로 독립으로 판정하며 해당하는 것을 모두 `[WARN]`으로 남깁니다 — 슬롯 상황에 따라 의존성 판정이 달라지지 않습니다. 다만 선언한 의존 Task 파일 자체가 없으면 정상 대기가 아니라 계획 오류이므로 슬롯 상황과 무관하게 거부하고, 이미 `queued`인 Task에 대한 명시적 `ready` 요청도 의존성이 미충족이면 상태를 바꾸지 않고 실패합니다. `queued`는 Worker dispatch 대상이 아닙니다. 사용자 승인으로 한 Task가 `completed`가 되면 프로젝트 queue lock 안에서 빈 슬롯을 다시 계산하고, 의존성이 모두 `completed`인 queued Task를 Task ID 오름차순으로 빈 슬롯 수만큼만 `ready`로 승격합니다. 각 승격은 `events.tsv`에 남고 자동 처리는 거기서 끝납니다. lock을 푼 뒤 방금 완료된 Task 한 건의 `report --task` 요약도 출력하지만 읽기 전용 부가 작업일 뿐이라 실패해도 완료 전이를 바꾸지 않습니다. Agent dispatch, Review, `awaiting_approval`, 사용자 완료 승인은 자동으로 이어지지 않습니다. 이미 활성 상태가 설정 상한을 넘은 프로젝트는 `validate`가 `[WARN]`으로 보고하되 기존 Task를 임의로 강등하거나 검증 전체를 실패시키지 않습니다.
 
 `dispatch`는 프롬프트 미전달로 확인된 경우의 1회 재전송 외에는 Task 재시도, 상태 전이, blocked 응답 또는 Provider failover를 수행하지 않습니다. Orchestrator는 반환된 `dispatch_result`를 확인한 뒤 사용자 승인 경계를 지키며 다음 스텝을 호출합니다.
+
+### Context Packet UTF-8과 Reviewer 산출물 경로
+
+직전 Evidence·AC 결과·Review를 Context Packet에 넣을 때는 `gawk`의 `substr`로
+각 줄을 기본 `max_columns=500` **문자** 경계에서 자릅니다. 긴 한글 줄을 바이트
+중간에서 자르면 Packet이 유효한 UTF-8이 아니게 되어 `herdr agent prompt`가 거부할
+수 있기 때문입니다. `gawk`가 없거나 실행에 실패하면 바이트 기반 도구로 폴백하지
+않고 Packet에 발췌 생략 표식과 stderr 경고를 남깁니다. `herdr-harness doctor`에서
+먼저 설치 상태를 확인하세요.
+
+Reviewer dispatch가 끝난 즉시 `.harness/reviews/TASK_ID-*.md`를 확인합니다. 파일이
+없으면 `review_artifact=missing_required_path`와 경고를 출력하고 raw/정본 Evidence에
+기록합니다. 이미 끝난 Agent 턴을 실패로 바꾸거나, Provider의 다른 작업 경로에서
+파일을 자동으로 옮기지는 않습니다. 사람이 Agent 출력·작업 경로를 확인해 조치한
+뒤 다음 상태 전이를 진행합니다.
 
 Task별 수동 검토 예외가 필요하면 `reviewer: user` 또는 `reviewer: human`을 지정하거나, Worker와 Reviewer가 같은 Provider인 Task에만 다음 블록을 명시합니다.
 

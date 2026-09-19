@@ -227,6 +227,16 @@ cmd_doctor() {
     printf '[OPTION]  %-8s (없으면 codex 모델 조회(models --refresh)가 안 됨)\n' jq
   fi
 
+  # Context Packet의 Review·Evidence 발췌는 gawk substr로 UTF-8 문자 경계를
+  # 보장한다. 없을 때 바이트 절단으로 폴백하면 Packet이 깨져 dispatch 자체가
+  # 막히므로, 선택 도구처럼 조용히 넘기지 않고 doctor에서 바로 알린다.
+  if command -v gawk >/dev/null 2>&1; then
+    printf '[OK]      %-8s %s\n' gawk "$(command -v gawk)"
+  else
+    printf '[MISSING] %-8s (없으면 Context Packet 발췌의 UTF-8 문자 경계를 보장할 수 없음)\n' gawk
+    failed=1
+  fi
+
   # 원격 실행 모드용 도구는 옵션이다 — 없다고 doctor를 실패시키지 않는다.
   # 프로젝트별 연결 진단은 `herdr-harness remote [PATH] doctor`가 한다.
   for command_name in ssh sshfs sshpass; do
