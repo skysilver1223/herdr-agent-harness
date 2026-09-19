@@ -354,14 +354,20 @@ _herdr_harness_completions() {
       fi
       ;;
     report)
-      if (( COMP_CWORD == 2 )); then
+      if [[ "$prev" == --task ]]; then
+        local report_root="${COMP_WORDS[1]:-.}"
+        [[ "$report_root" == -* ]] && report_root=.
+        _herdr_harness_task_ids "$report_root" "$cur"
+      elif (( COMP_CWORD == 2 )); then
         COMPREPLY=($(compgen -d -- "$cur"))
         _herdr_harness_note "$cur" \
-          "구문::herdr-harness report [PATH] [--live] [--json]" \
+          "구문::herdr-harness report [PATH] [--task TASK_ID|--all] [--live] [--json]" \
           "PATH::Harness 프로젝트 디렉터리 (생략하면 현재 디렉터리)" \
           "help::herdr-harness help report"
       else
         _herdr_harness_describe "$cur" \
+          "--task::특정 완료 Task 한 건을 요약" \
+          "--all::완료된 Task 전체를 요약" \
           "--live::Herdr Agent 목록 대조를 명시적으로 수행" \
           "--json::기계 판독 가능한 JSON으로 출력"
       fi

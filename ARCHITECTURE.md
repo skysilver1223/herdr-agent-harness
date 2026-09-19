@@ -87,17 +87,18 @@ Worker는 `completed`를 선언하지 않습니다. 정상 Task에서는 Reviewe
 
 활성 슬롯은 `ready|active|submitted|reviewing|changes_requested|blocked|handover_required|awaiting_approval`이며 `draft|queued|completed`는 제외합니다. `MAX_ACTIVE_TASKS`가 설정되어 있으면 양의 정수인지 엄격히 확인한 뒤 프로젝트 설정보다 우선하고, 없으면 `limits.max_active_tasks`를 엄격히 읽습니다. 잘못된 값에는 fallback하지 않습니다. 기존 프로젝트가 이미 상한을 넘었으면 `validate`는 읽기 전용 `[WARN]`만 내며, 새 `draft -> ready` 요청은 프로젝트 queue lock 아래 `queued`로 바꿉니다. 의존성과 슬롯은 서로 독립으로 판정하고 해당하는 사유를 모두 `[WARN]`으로 남깁니다 — 슬롯이 가득 찼다는 이유로 의존성 판정을 건너뛰지 않습니다. 선언한 의존 Task 파일이 없는 것은 정상 대기가 아니라 계획 오류이므로 슬롯 상황과 무관하게 거부합니다.
 
-`completed` 전이는 같은 queue lock을 잡은 채 빈 슬롯을 계산하고, 의존성이 모두 끝난 queued Task를 Task ID 오름차순으로 슬롯 수만큼만 `ready`로 승격합니다. 파일 교체와 각 transition event를 남긴 뒤 lock을 풀고 기본 `report` 요약을 출력합니다. 보고는 읽기 전용 부가 작업이므로 실패·지연이 전이 결과나 종료코드를 바꾸지 않으며, 자동 경로에서는 Herdr를 호출하지 않습니다. `queued`는 dispatch 대상이 아니며, 승격 경로와 보고는 Agent dispatch·`reviewing`·`awaiting_approval`·사용자 승인으로 이어지지 않습니다. lock 획득에 실패하면 어떤 Task 상태도 바꾸지 않고 명시적으로 실패합니다.
+`completed` 전이는 같은 queue lock을 잡은 채 빈 슬롯을 계산하고, 의존성이 모두 끝난 queued Task를 Task ID 오름차순으로 슬롯 수만큼만 `ready`로 승격합니다. 파일 교체와 각 transition event를 남긴 뒤 lock을 풀고 방금 완료된 Task 한 건의 `report --task` 요약을 출력합니다. 보고는 읽기 전용 부가 작업이므로 실패·지연이 전이 결과나 종료코드를 바꾸지 않으며, 자동 경로에서는 Herdr를 호출하지 않습니다. `queued`는 dispatch 대상이 아니며, 승격 경로와 보고는 Agent dispatch·`reviewing`·`awaiting_approval`·사용자 승인으로 이어지지 않습니다. lock 획득에 실패하면 어떤 Task 상태도 바꾸지 않고 명시적으로 실패합니다.
 
 ### 5.1 완료 보고와 진척율
 
-`herdr-harness report [PATH] [--live] [--json]`는 Task YAML의 `status`를 유일한
-진척율 정본으로 읽습니다. 현재 Wave(상태가 `active`인 Wave, 없으면 `approved`인
-Wave를 파일명 순서로 선택)와 프로젝트 전체를 분리해 완료 막대와 모든 상태별
+`herdr-harness report [PATH] [--task TASK_ID|--all] [--live] [--json]`는 Task YAML의 `status`를 유일한
+진척율 정본으로 읽습니다. 현재 Wave는 미완료 Task를 하나라도 가진 Wave 중 파일명상
+가장 최신 것을 고르고, 모두 완료됐을 때만 가장 최신 Wave를 fallback으로 씁니다. Wave와 프로젝트 전체를 분리해 완료 막대와 모든 상태별
 개수를 출력하므로, 각 층의 상태별 합계는 그 층 Task 수와 일치합니다. Wave·Task가
 없는 프로젝트도 분모 0을 표시할 뿐 실패하지 않습니다.
 
-출력은 네 블록이다: completed Task의 제목·역할별 Provider/모델·최신 Review 판정·AC
+출력은 네 블록이다: 기본은 가장 최근 completed Task 한 건(완료 전이 자동 출력은 방금
+완료된 한 건, `--task`는 지정 한 건, `--all`은 전체)의 제목·역할별 Provider/모델·최신 Review 판정·AC
 검증 요약·Attempt 수, Wave/전체 진척율, ready·실제 승격 가능한 queued·승인 대기,
 STATE.md 표와 YAML의 드리프트·활성 슬롯 상한이다. `STATE.md`를 고치거나 다른 파일을
 쓰지 않는다. 기본 경로와 completed 자동 출력은 Herdr·네트워크를 호출하지 않으며,

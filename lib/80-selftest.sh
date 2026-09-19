@@ -3286,13 +3286,16 @@ STUB
   # --- report: Task YAML 정본의 완료 요약·진척율 ---------------------------
   # report는 status의 확장이 아니다. 기본/완료 자동 경로에서 Herdr를 부르거나
   # 파일을 쓰면 완료 전이의 신뢰성과 속도가 외부 상태에 묶인다.
-  local report_project report_empty report_output report_json report_log report_stub_dir
-  local report_snapshot_before report_snapshot_after transition_report noncompleted_report
+  local report_project report_empty report_wave_project report_output report_json report_log report_stub_dir
+  local report_snapshot_before report_snapshot_after transition_report noncompleted_report report_all_output report_task_output report_wave_output
   report_project="$test_root/report-project"
   report_empty="$test_root/report-empty"
   bash "$SELF_PATH" init "$report_project" --name report-project --goal "report 검증" >/dev/null
   bash "$SELF_PATH" init "$report_empty" --name report-empty --goal "report 경계 검증" >/dev/null
+  report_wave_project="$test_root/report-current-wave"
+  bash "$SELF_PATH" init "$report_wave_project" --name report-current-wave --goal "현재 Wave 선택 검증" >/dev/null
   rm -f -- "$report_empty/.harness/waves/TEMPLATE.yaml"
+  rm -f -- "$report_wave_project/.harness/waves/TEMPLATE.yaml"
   sed -i 's/^- 상태: draft$/- 상태: approved/' "$report_project/.harness/SPEC.md"
 
   make_report_task() {
@@ -3354,6 +3357,39 @@ EOF
   git -C "$report_project" -c user.name=harness-test -c user.email=test@example.invalid \
     commit -q -m "test: report baseline" || true
 
+  # 완료된 레거시 Wave가 앞에 여럿 남아 있어도, 상태가 아니라 미완료 Task를
+  # 기준으로 가장 최신 Wave를 골라야 한다.
+  local report_wave_task report_wave_state
+  for report_wave_task in task-wave-legacy-001 task-wave-legacy-002 task-wave-current; do
+    case "$report_wave_task" in
+      task-wave-current) report_wave_state=ready ;;
+      *) report_wave_state=completed ;;
+    esac
+    sed -e "s/^task_id: .*/task_id: $report_wave_task/" \
+        -e 's/^milestone_id: .*/milestone_id: milestone-wave/' \
+        -e "s/^status: .*/status: $report_wave_state/" \
+        "$report_wave_project/.harness/tasks/TEMPLATE.yaml" \
+      >"$report_wave_project/.harness/tasks/$report_wave_task.yaml"
+  done
+  cat >"$report_wave_project/.harness/waves/wave-001.yaml" <<'EOF'
+wave_id: wave-001
+status: approved
+tasks:
+  - task_id: task-wave-legacy-001
+EOF
+  cat >"$report_wave_project/.harness/waves/wave-002.yaml" <<'EOF'
+wave_id: wave-002
+status: approved
+tasks:
+  - task_id: task-wave-legacy-002
+EOF
+  cat >"$report_wave_project/.harness/waves/wave-009.yaml" <<'EOF'
+wave_id: wave-009
+status: approved
+tasks:
+  - task_id: task-wave-current
+EOF
+
   report_stub_dir="$test_root/report-herdr-stub"
   report_log="$test_root/report-herdr.log"
   mkdir -p "$report_stub_dir"
@@ -3381,6 +3417,10 @@ REPORT_HERDR_STUB
     die "report STATE.md 드리프트를 찾지 못했습니다."
   printf '%s\n' "$report_output" | grep -q '승격 가능한 queued: task-report-queued' ||
     die "report 승격 가능한 queued Task를 찾지 못했습니다."
+  report_wave_output="$(bash "$SELF_PATH" report "$report_wave_project")" ||
+    die "현재 Wave 선택용 report가 실패했습니다."
+  printf '%s\n' "$report_wave_output" | grep -q '^Wave wave-009 .* 0/1 ' ||
+    die "완료된 레거시 Wave 대신 최신 미완료 Wave를 고르지 못했습니다."
   PATH="$report_stub_dir:$PATH" HH_REPORT_HERDR_LOG="$report_log" \
     bash "$SELF_PATH" report "$report_project" --json >"$test_root/report.json" || die "report --json이 실패했습니다."
   python3 - "$test_root/report.json" <<'REPORT_JSON_CHECK'
@@ -3403,6 +3443,10 @@ REPORT_JSON_CHECK
     die "completed 전이가 report 때문에 실패했습니다."
   printf '%s\n' "$transition_report" | grep -q '^## 완료된 Task 요약$' ||
     die "completed 전이에 report 자동 출력이 없습니다."
+  printf '%s\n' "$transition_report" | grep -q -- '- task-report-wait —' ||
+    die "completed 자동 report가 방금 완료한 Task를 요약하지 않았습니다."
+  ! printf '%s\n' "$transition_report" | grep -q -- '- task-report-done —' ||
+    die "completed 자동 report가 과거 완료 Task를 누적했습니다."
   noncompleted_report="$(PATH="$report_stub_dir:$PATH" HH_REPORT_HERDR_LOG="$report_log" \
     bash "$SELF_PATH" transition "$report_project" task-report-ready active)" ||
     die "비완료 전이가 실패했습니다."
@@ -3411,9 +3455,28 @@ REPORT_JSON_CHECK
   local saved_report_function
   saved_report_function="$(declare -f cmd_report)"
   cmd_report() { return 73; }
-  _transition_emit_completion_report "$report_project" >/dev/null ||
+  _transition_emit_completion_report "$report_project" task-report-wait >/dev/null ||
     die "report 실패 격리 래퍼가 성공으로 끝나지 않았습니다."
   eval "$saved_report_function"
+
+  report_output="$(bash "$SELF_PATH" report "$report_project")" ||
+    die "기본 report가 최근 완료 Task를 읽지 못했습니다."
+  printf '%s\n' "$report_output" | grep -q -- '- task-report-wait —' ||
+    die "기본 report가 가장 최근 완료 Task를 고르지 못했습니다."
+  ! printf '%s\n' "$report_output" | grep -q -- '- task-report-done —' ||
+    die "기본 report가 과거 완료 Task를 누적했습니다."
+  report_task_output="$(bash "$SELF_PATH" report "$report_project" --task task-report-done)" ||
+    die "report --task이 실패했습니다."
+  printf '%s\n' "$report_task_output" | grep -q -- '- task-report-done —' ||
+    die "report --task이 지정 Task를 요약하지 않았습니다."
+  ! printf '%s\n' "$report_task_output" | grep -q -- '- task-report-wait —' ||
+    die "report --task이 다른 완료 Task를 섞었습니다."
+  report_all_output="$(bash "$SELF_PATH" report "$report_project" --all)" ||
+    die "report --all이 실패했습니다."
+  printf '%s\n' "$report_all_output" | grep -q -- '- task-report-done —' ||
+    die "report --all이 과거 완료 Task를 누락했습니다."
+  printf '%s\n' "$report_all_output" | grep -q -- '- task-report-wait —' ||
+    die "report --all이 최근 완료 Task를 누락했습니다."
 
   report_output="$(PATH="$report_stub_dir:$PATH" HH_REPORT_HERDR_LOG="$report_log" bash "$SELF_PATH" report "$report_empty")" ||
     die "Task/Wave 없는 report가 실패했습니다."
@@ -3769,6 +3832,8 @@ EOF
     'PASS: report 자동 출력'
     'PASS: report 읽기 전용과 Herdr 비의존'
     'PASS: report 경계 조건'
+    'PASS: report 현재 Wave 선택'
+    'PASS: report 완료 요약 범위'
     'PASS: 도움말 정합성 (dispatch↔help 요약·상세↔탭 완성 설명, 없는 명령 거부)'
     'PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호 미저장/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키)'
     'PASS: Task Lock (동시 획득 거부/release/stale 회수)'

@@ -359,6 +359,8 @@ PASS: report 진척율 계산
 PASS: report 자동 출력
 PASS: report 읽기 전용과 Herdr 비의존
 PASS: report 경계 조건
+PASS: report 현재 Wave 선택
+PASS: report 완료 요약 범위
 PASS: 도움말 정합성 (dispatch↔help 요약·상세↔탭 완성 설명, 없는 명령 거부)
 PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호 미저장/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키)
 PASS: Task Lock (동시 획득 거부/release/stale 회수)
@@ -463,19 +465,27 @@ herdr-harness status ~/Projects/snmp-normalizer --live --json
 
 ```bash
 herdr-harness report ~/Projects/snmp-normalizer
+herdr-harness report ~/Projects/snmp-normalizer --task task-023
+herdr-harness report ~/Projects/snmp-normalizer --all
 herdr-harness report ~/Projects/snmp-normalizer --live
 herdr-harness report ~/Projects/snmp-normalizer --json | jq .
 ```
 
 `report`는 Task YAML 상태를 정본으로 현재 Wave와 전체의 완료 막대·상태별 합계,
-완료된 Task의 Worker/Reviewer·모델·최신 Review·AC 결과·Attempt 수, 다음 `ready`
+기본으로 가장 최근에 완료된 Task 1건의 Worker/Reviewer·모델·최신 Review·AC 결과·Attempt 수, 다음 `ready`
 Task·승격 가능한 `queued` Task·사용자 승인 대기, `STATE.md` 표 드리프트와 활성
 슬롯 상한을 보여 줍니다. 파일을 쓰지 않으며, Task나 Wave가 없어도 `0/0`으로
 정상 출력합니다. 기본 호출은 Herdr를 호출하지 않습니다. `--live`를 명시한 경우에만
 Herdr Agent 목록을 runtime 추적 정보와 대조합니다.
 
-`awaiting_approval -> completed` 전이가 성공하면 같은 호출의 끝에서 이 기본
-보고가 자동 출력됩니다. 이는 완료 승인이나 다음 dispatch를 자동화하지 않으며,
+`--task TASK_ID`는 특정 완료 Task 한 건을, `--all`은 완료된 Task 전체를 요약합니다.
+자동 출력은 언제나 방금 `completed`가 된 Task 한 건만 보여 주므로 과거 완료 이력이
+누적되어 현재 결과를 가리지 않습니다. 현재 Wave는 상태가 남은 Wave가 아니라 미완료
+Task를 하나라도 가진 Wave 중 가장 최신 Wave를 고릅니다. 모두 끝났다면 가장 최신 Wave를
+표시합니다.
+
+`awaiting_approval -> completed` 전이가 성공하면 같은 호출의 끝에서 방금 완료된
+Task를 `--task`로 고른 보고가 자동 출력됩니다. 이는 완료 승인이나 다음 dispatch를 자동화하지 않으며,
 보고 생성 실패도 이미 성공한 상태 전이의 종료코드나 결과를 바꾸지 않습니다.
 
 ## 명령 사용법 찾기
@@ -547,7 +557,7 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | `herdr-harness validate [PATH] [--wave ID] [--no-git]` | Git 기준선, Task/Wave, Provider, 의존성, 실행 상한과 write scope를 읽기 전용 검증 |
 | `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제. `submitted`로 갈 때는 Acceptance Criteria의 `verified_by` 명령을 직접 실행하고 하나라도 실패하면 거부 |
 | `herdr-harness approve PATH TASK_ID --confirm-user-approval` | 사용자 명시 승인 확인 후 승인 증거를 원자적으로 기록하고 기존 `transition` 게이트로 `completed` 전이 |
-| `herdr-harness report [PATH] [--live] [--json]` | 완료 요약·현재 Wave/전체 진척율·다음 할 일·STATE.md 드리프트를 읽기 전용으로 출력. 기본은 Herdr 미호출, `--live`만 Herdr 대조 |
+| `herdr-harness report [PATH] [--task TASK_ID\|--all] [--live] [--json]` | 최근 완료 1건(또는 `--task` 한 건·`--all` 전체) 요약·현재 Wave/전체 진척율·다음 할 일·STATE.md 드리프트를 읽기 전용으로 출력. 기본은 Herdr 미호출, `--live`만 Herdr 대조 |
 | `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS(상한 300000)] [--print-only] [--extra-prompt FILE] [--cwd DIR]` | 같은 Task·역할의 살아 있는 기존 Agent가 있으면 이름·Pane과 `close-agent` 사용법을 안내하고 Pane 생성 전에 거부. 그 외에는 역할별 모델을 선택하고 프리미엄 승인·Provider 기본값 누출 차단을 적용한 뒤 Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--timeout`이 300000ms를 넘으면 Pane을 만들기 전에 거부. agent start 실패 시 실패 단계·안전한 분류·raw Evidence 경로를 표면화하고 자신이 만든 Pane을 자동 회수(회수 실패도 표면화). `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
 | `herdr-harness observe PATH TASK_ID [worker\|reviewer]` | 기존 Agent를 재조회하고 Evidence에 추가 |
 | `herdr-harness adopt PATH TASK_ID worker\|reviewer --pane PANE --agent NAME [--provider P]` | 사람이 직접 띄운 Agent를 Harness 추적에 등록(`--print-only` 폴백의 마지막 단계) |
@@ -560,7 +570,7 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 
 활성 슬롯은 `ready|active|submitted|reviewing|changes_requested|blocked|handover_required|awaiting_approval`만 셉니다. `draft|queued|completed`는 제외합니다. 상한은 유효한 양의 `MAX_ACTIVE_TASKS`가 가장 우선하고, 환경 변수가 없으면 `.harness/project.yaml`의 `limits.max_active_tasks`를 사용합니다. 빈 값·0·음수·숫자가 아닌 값은 기본값으로 조용히 대체하지 않고 명시적으로 실패합니다.
 
-`draft -> ready` 요청 때 활성 슬롯이 가득 찼거나 의존 Task가 아직 `completed`가 아니면 Task를 실패시키거나 과할당하지 않고 같은 호출에서 `queued`로 원자적으로 기록합니다. 두 사유는 서로 독립으로 판정하며 해당하는 것을 모두 `[WARN]`으로 남깁니다 — 슬롯 상황에 따라 의존성 판정이 달라지지 않습니다. 다만 선언한 의존 Task 파일 자체가 없으면 정상 대기가 아니라 계획 오류이므로 슬롯 상황과 무관하게 거부하고, 이미 `queued`인 Task에 대한 명시적 `ready` 요청도 의존성이 미충족이면 상태를 바꾸지 않고 실패합니다. `queued`는 Worker dispatch 대상이 아닙니다. 사용자 승인으로 한 Task가 `completed`가 되면 프로젝트 queue lock 안에서 빈 슬롯을 다시 계산하고, 의존성이 모두 `completed`인 queued Task를 Task ID 오름차순으로 빈 슬롯 수만큼만 `ready`로 승격합니다. 각 승격은 `events.tsv`에 남고 자동 처리는 거기서 끝납니다. lock을 푼 뒤 `report` 기본 요약도 출력하지만 읽기 전용 부가 작업일 뿐이라 실패해도 완료 전이를 바꾸지 않습니다. Agent dispatch, Review, `awaiting_approval`, 사용자 완료 승인은 자동으로 이어지지 않습니다. 이미 활성 상태가 설정 상한을 넘은 프로젝트는 `validate`가 `[WARN]`으로 보고하되 기존 Task를 임의로 강등하거나 검증 전체를 실패시키지 않습니다.
+`draft -> ready` 요청 때 활성 슬롯이 가득 찼거나 의존 Task가 아직 `completed`가 아니면 Task를 실패시키거나 과할당하지 않고 같은 호출에서 `queued`로 원자적으로 기록합니다. 두 사유는 서로 독립으로 판정하며 해당하는 것을 모두 `[WARN]`으로 남깁니다 — 슬롯 상황에 따라 의존성 판정이 달라지지 않습니다. 다만 선언한 의존 Task 파일 자체가 없으면 정상 대기가 아니라 계획 오류이므로 슬롯 상황과 무관하게 거부하고, 이미 `queued`인 Task에 대한 명시적 `ready` 요청도 의존성이 미충족이면 상태를 바꾸지 않고 실패합니다. `queued`는 Worker dispatch 대상이 아닙니다. 사용자 승인으로 한 Task가 `completed`가 되면 프로젝트 queue lock 안에서 빈 슬롯을 다시 계산하고, 의존성이 모두 `completed`인 queued Task를 Task ID 오름차순으로 빈 슬롯 수만큼만 `ready`로 승격합니다. 각 승격은 `events.tsv`에 남고 자동 처리는 거기서 끝납니다. lock을 푼 뒤 방금 완료된 Task 한 건의 `report --task` 요약도 출력하지만 읽기 전용 부가 작업일 뿐이라 실패해도 완료 전이를 바꾸지 않습니다. Agent dispatch, Review, `awaiting_approval`, 사용자 완료 승인은 자동으로 이어지지 않습니다. 이미 활성 상태가 설정 상한을 넘은 프로젝트는 `validate`가 `[WARN]`으로 보고하되 기존 Task를 임의로 강등하거나 검증 전체를 실패시키지 않습니다.
 
 `dispatch`는 프롬프트 미전달로 확인된 경우의 1회 재전송 외에는 Task 재시도, 상태 전이, blocked 응답 또는 Provider failover를 수행하지 않습니다. Orchestrator는 반환된 `dispatch_result`를 확인한 뒤 사용자 승인 경계를 지키며 다음 스텝을 호출합니다.
 

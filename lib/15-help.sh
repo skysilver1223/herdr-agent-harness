@@ -211,20 +211,27 @@ EOF
       ;;
     report) cat <<EOF
 구문:
-  $SCRIPT_NAME report [PATH] [--live] [--json]
+  $SCRIPT_NAME report [PATH] [--task TASK_ID|--all] [--live] [--json]
 
 무엇을 하나:
-  Task YAML을 정본으로 완료된 Task의 제목·Worker/Reviewer와 모델·최신 Review·AC
+  Task YAML을 정본으로 가장 최근에 완료된 Task의 제목·Worker/Reviewer와 모델·최신 Review·AC
   결과·Attempt 수, 현재 Wave와 전체 진척율, ready/승격 가능한 queued/사용자
   승인 대기, STATE.md 표와의 드리프트·활성 슬롯 상한을 한 번에 읽기 전용으로
   보여 준다. Task가 없거나 Wave가 없어도 0 나눗셈 없이 출력한다.
 
+  기본 요약은 가장 최근 완료 1건이다. --task TASK_ID는 특정 완료 Task 한 건을,
+  --all은 모든 완료 Task를 보여 준다. completed 전이 뒤 자동 출력은 방금 완료된
+  Task 한 건만 보여 준다.
+
   기본은 Herdr를 호출하지 않는다. --live를 명시했을 때만 Herdr Agent 목록과
-  runtime 추적 정보를 대조한다. completed 전이 성공 뒤에도 같은 기본 보고가
+  runtime 추적 정보를 대조한다. completed 전이 성공 뒤에는 방금 완료된 Task를
+  --task로 고른 같은 보고가
   자동으로 출력되지만, 보고 생성 실패는 이미 끝난 상태 전이를 실패시키지 않는다.
 
 예시:
   $SCRIPT_NAME report .
+  $SCRIPT_NAME report . --task task-023
+  $SCRIPT_NAME report . --all
   $SCRIPT_NAME report . --live
   $SCRIPT_NAME report . --json | jq .
 EOF

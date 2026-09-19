@@ -289,19 +289,28 @@ _report_statuses() {
 }
 
 _report_current_wave() {
-  local root="$1" wanted path status
+  # 현재 Wave는 Wave 문서 상태가 아니라 실제 Task 진행으로 고른다. 끝난 옛
+  # approved Wave가 정리되지 않아도 그것을 현재 작업으로 잘못 보이지 않게,
+  # 미완료 Task를 하나라도 가진 Wave 중 파일명상 가장 최신 것을 택한다.
+  # 그런 Wave가 없을 때만 가장 최신 Wave를 안전한 표시용 fallback으로 쓴다.
+  local root="$1" path task_id task_path status latest_wave="" latest_incomplete=""
   local -a wave_paths=()
   mapfile -t wave_paths < <(compgen -G "$root/.harness/waves/*.yaml" | LC_ALL=C sort)
-  for wanted in active approved; do
-    for path in "${wave_paths[@]}"; do
-      [[ "${path##*/}" != TEMPLATE.yaml ]] || continue
-      status="$(yaml_scalar "$path" status optional)"
-      [[ "$status" == "$wanted" ]] || continue
-      basename "$path" .yaml
-      return 0
-    done
+  for path in "${wave_paths[@]}"; do
+    [[ "${path##*/}" != TEMPLATE.yaml ]] || continue
+    latest_wave="$(basename "$path" .yaml)"
+    while IFS= read -r task_id; do
+      [[ -n "$task_id" ]] || continue
+      task_path="$root/.harness/tasks/$task_id.yaml"
+      [[ -f "$task_path" ]] || continue
+      status="$(yaml_scalar "$task_path" status)"
+      if [[ "$status" != completed ]]; then
+        latest_incomplete="$latest_wave"
+        break
+      fi
+    done < <(_report_wave_task_ids "$path")
   done
-  return 0
+  printf '%s\n' "${latest_incomplete:-$latest_wave}"
 }
 
 _report_wave_task_ids() {
@@ -331,6 +340,31 @@ _report_attempt_count() {
   done
   shopt -u nullglob
   printf '%s' "$count"
+}
+
+_report_latest_completed_task() {
+  # events.tsv는 append-only이므로 마지막 completed 전이의 Task가 수동 report의
+  # "가장 최근 완료"다. 과거 Harness 또는 사람이 만든 fixture처럼 이력이 없으면
+  # Task ID 정렬의 마지막 completed Task로 결정적으로 fallback한다.
+  local root="$1" events="$root/.harness/evidence/events.tsv"
+  local stamp event task_id from_state to_state detail path latest=""
+  if [[ -f "$events" ]]; then
+    while IFS=$'\t' read -r stamp event task_id from_state to_state detail; do
+      [[ "$event" == transition && "$to_state" == completed ]] || continue
+      path="$root/.harness/tasks/$task_id.yaml"
+      [[ -f "$path" ]] || continue
+      [[ "$(yaml_scalar "$path" status)" == completed ]] || continue
+      latest="$task_id"
+    done < "$events"
+  fi
+  if [[ -z "$latest" ]]; then
+    while IFS= read -r task_id; do
+      path="$root/.harness/tasks/$task_id.yaml"
+      [[ "$(yaml_scalar "$path" status)" == completed ]] || continue
+      latest="$task_id"
+    done < <(task_ids "$root" | LC_ALL=C sort)
+  fi
+  printf '%s\n' "$latest"
 }
 
 _report_latest_checks_summary() {
@@ -419,19 +453,28 @@ _report_live_summary() {
 }
 
 cmd_report() {
-  local root_arg="." live=0 json=0
+  local root_arg="." live=0 json=0 all=0 requested_task=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --live) live=1 ;;
       --json) json=1 ;;
+      --all) all=1 ;;
+      --task)
+        [[ $# -ge 2 ]] || die "--task 값이 필요합니다."
+        [[ -z "$requested_task" ]] || die "--task 옵션이 중복됐습니다."
+        requested_task="$2"
+        shift ;;
       -h|--help)
-        printf '사용법: %s report [PATH] [--live] [--json]\n' "$SCRIPT_NAME"
+        printf '사용법: %s report [PATH] [--task TASK_ID|--all] [--live] [--json]\n' "$SCRIPT_NAME"
         return 0 ;;
       -*) die "알 수 없는 report 옵션: $1" ;;
       *) root_arg="$1" ;;
     esac
     shift
   done
+
+  [[ "$all" -eq 0 || -z "$requested_task" ]] ||
+    die "--task 와 --all 은 함께 쓸 수 없습니다."
 
   local root wave wave_path task_id path status title worker reviewer worker_model reviewer_model
   local total=0 wave_total=0 active_slots=0 max_active=0 current_state state_row
@@ -470,6 +513,23 @@ cmd_report() {
       drifts+=("$task_id: STATE.md=$state_row, YAML=$status")
     fi
   done < <(task_ids "$root" | LC_ALL=C sort)
+
+  # 완료 요약은 평소 한 건만 보여 준다. 자동 completed 경로는 --task로 방금
+  # 끝난 Task를 명시하고, 수동 기본은 event log의 최신 completed 전이를 따른다.
+  if [[ -n "$requested_task" ]]; then
+    path="$root/.harness/tasks/$requested_task.yaml"
+    [[ -f "$path" ]] || die "Task 파일이 없습니다: $path"
+    [[ "$(yaml_scalar "$path" status)" == completed ]] ||
+      die "완료된 Task만 요약할 수 있습니다: $requested_task"
+    completed_tasks=("$requested_task")
+  elif (( all == 0 )); then
+    task_id="$(_report_latest_completed_task "$root")"
+    if [[ -n "$task_id" ]]; then
+      completed_tasks=("$task_id")
+    else
+      completed_tasks=()
+    fi
+  fi
 
   max_active="$(project_max_active_tasks "$root")"
   local available=$((max_active - active_slots))
