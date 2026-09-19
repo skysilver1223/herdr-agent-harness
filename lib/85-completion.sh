@@ -217,6 +217,7 @@ _herdr_harness_subcommand_help() {
     "models::모델 허용 목록·등급 해석·프리미엄 정책 조회·갱신" \
     "start::프로젝트 디렉터리에서 Herdr Session 열기" \
     "status::STATE.md 출력 (--live로 문서·Herdr·Git 대조)" \
+    "report::완료 요약·진척율·다음 할 일·드리프트 (기본 Herdr 미호출)" \
     "validate::상태를 바꾸지 않고 정합성만 검사" \
     "transition::Task 상태를 전이표에 따라 전이" \
     "approve::사용자 승인 기록 후 completed로 전이" \
@@ -266,7 +267,7 @@ _herdr_harness_completions() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local subcommands="init sync-templates models start status doctor test uninstall validate transition approve dispatch observe adopt close-agent quota-check quota-retry auto-step remote completion help"
+  local subcommands="init sync-templates models start status report doctor test uninstall validate transition approve dispatch observe adopt close-agent quota-check quota-retry auto-step remote completion help"
 
   if (( COMP_CWORD == 1 )); then
     local described=()
@@ -350,6 +351,19 @@ _herdr_harness_completions() {
         _herdr_harness_describe "$cur" \
           "--live::문서 상태를 실제 Herdr Pane·Git과 대조해 DRIFT 표시" \
           "--json::결과를 JSON으로 출력 (jq로 파이프)"
+      fi
+      ;;
+    report)
+      if (( COMP_CWORD == 2 )); then
+        COMPREPLY=($(compgen -d -- "$cur"))
+        _herdr_harness_note "$cur" \
+          "구문::herdr-harness report [PATH] [--live] [--json]" \
+          "PATH::Harness 프로젝트 디렉터리 (생략하면 현재 디렉터리)" \
+          "help::herdr-harness help report"
+      else
+        _herdr_harness_describe "$cur" \
+          "--live::Herdr Agent 목록 대조를 명시적으로 수행" \
+          "--json::기계 판독 가능한 JSON으로 출력"
       fi
       ;;
     validate)

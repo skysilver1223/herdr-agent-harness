@@ -87,11 +87,25 @@ Worker는 `completed`를 선언하지 않습니다. 정상 Task에서는 Reviewe
 
 활성 슬롯은 `ready|active|submitted|reviewing|changes_requested|blocked|handover_required|awaiting_approval`이며 `draft|queued|completed`는 제외합니다. `MAX_ACTIVE_TASKS`가 설정되어 있으면 양의 정수인지 엄격히 확인한 뒤 프로젝트 설정보다 우선하고, 없으면 `limits.max_active_tasks`를 엄격히 읽습니다. 잘못된 값에는 fallback하지 않습니다. 기존 프로젝트가 이미 상한을 넘었으면 `validate`는 읽기 전용 `[WARN]`만 내며, 새 `draft -> ready` 요청은 프로젝트 queue lock 아래 `queued`로 바꿉니다. 의존성과 슬롯은 서로 독립으로 판정하고 해당하는 사유를 모두 `[WARN]`으로 남깁니다 — 슬롯이 가득 찼다는 이유로 의존성 판정을 건너뛰지 않습니다. 선언한 의존 Task 파일이 없는 것은 정상 대기가 아니라 계획 오류이므로 슬롯 상황과 무관하게 거부합니다.
 
-`completed` 전이는 같은 queue lock을 잡은 채 빈 슬롯을 계산하고, 의존성이 모두 끝난 queued Task를 Task ID 오름차순으로 슬롯 수만큼만 `ready`로 승격합니다. 파일 교체와 각 transition event를 남긴 뒤 호출은 끝납니다. `queued`는 dispatch 대상이 아니며, 승격 경로는 Agent dispatch·`reviewing`·`awaiting_approval`·사용자 승인으로 이어지지 않습니다. lock 획득에 실패하면 어떤 Task 상태도 바꾸지 않고 명시적으로 실패합니다.
+`completed` 전이는 같은 queue lock을 잡은 채 빈 슬롯을 계산하고, 의존성이 모두 끝난 queued Task를 Task ID 오름차순으로 슬롯 수만큼만 `ready`로 승격합니다. 파일 교체와 각 transition event를 남긴 뒤 lock을 풀고 기본 `report` 요약을 출력합니다. 보고는 읽기 전용 부가 작업이므로 실패·지연이 전이 결과나 종료코드를 바꾸지 않으며, 자동 경로에서는 Herdr를 호출하지 않습니다. `queued`는 dispatch 대상이 아니며, 승격 경로와 보고는 Agent dispatch·`reviewing`·`awaiting_approval`·사용자 승인으로 이어지지 않습니다. lock 획득에 실패하면 어떤 Task 상태도 바꾸지 않고 명시적으로 실패합니다.
 
-일반 상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`를 사용합니다. `submitted`에는 Attempt와 Evidence(정본 YAML — 이름과 필수 필드를 함께 확인), `handover_required`에는 `.harness/handovers/TASK-handover-*.md` 인계 문서, 정상 AI 검토의 `awaiting_approval`에는 `판정: APPROVED`인 Review가 필요합니다. 수동 검토 예외는 Review 파일 없이 `submitted -> awaiting_approval`로만 이동할 수 있습니다. 또한 `submitted` 전이에서는 Harness가 Task의 `acceptance_criteria[].verified_by`를 **직접 실행**하고 하나라도 실패하면 전이를 거부합니다(§5.1). 사용자가 완료를 명시적으로 승인한 뒤에는 `herdr-harness approve PATH TASK_ID --confirm-user-approval`이 정상 Task에는 Review 경로를, 수동 예외 Task에는 정책 사유를 승인 기록에 남기고 기존 `transition ... completed` 게이트를 호출합니다. Agent Pane 호출 차단과 명시 승인 플래그는 두 경로에서 동일합니다.
+### 5.1 완료 보고와 진척율
 
-### 5.1 Acceptance Criteria 게이트
+`herdr-harness report [PATH] [--live] [--json]`는 Task YAML의 `status`를 유일한
+진척율 정본으로 읽습니다. 현재 Wave(상태가 `active`인 Wave, 없으면 `approved`인
+Wave를 파일명 순서로 선택)와 프로젝트 전체를 분리해 완료 막대와 모든 상태별
+개수를 출력하므로, 각 층의 상태별 합계는 그 층 Task 수와 일치합니다. Wave·Task가
+없는 프로젝트도 분모 0을 표시할 뿐 실패하지 않습니다.
+
+출력은 네 블록이다: completed Task의 제목·역할별 Provider/모델·최신 Review 판정·AC
+검증 요약·Attempt 수, Wave/전체 진척율, ready·실제 승격 가능한 queued·승인 대기,
+STATE.md 표와 YAML의 드리프트·활성 슬롯 상한이다. `STATE.md`를 고치거나 다른 파일을
+쓰지 않는다. 기본 경로와 completed 자동 출력은 Herdr·네트워크를 호출하지 않으며,
+`--live`를 명시한 수동 호출만 Herdr Agent 목록을 runtime meta와 대조한다.
+
+일반 상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`를 사용합니다. `submitted`에는 Attempt와 Evidence(정본 YAML — 이름과 필수 필드를 함께 확인), `handover_required`에는 `.harness/handovers/TASK-handover-*.md` 인계 문서, 정상 AI 검토의 `awaiting_approval`에는 `판정: APPROVED`인 Review가 필요합니다. 수동 검토 예외는 Review 파일 없이 `submitted -> awaiting_approval`로만 이동할 수 있습니다. 또한 `submitted` 전이에서는 Harness가 Task의 `acceptance_criteria[].verified_by`를 **직접 실행**하고 하나라도 실패하면 전이를 거부합니다(§5.2). 사용자가 완료를 명시적으로 승인한 뒤에는 `herdr-harness approve PATH TASK_ID --confirm-user-approval`이 정상 Task에는 Review 경로를, 수동 예외 Task에는 정책 사유를 승인 기록에 남기고 기존 `transition ... completed` 게이트를 호출합니다. Agent Pane 호출 차단과 명시 승인 플래그는 두 경로에서 동일합니다.
+
+### 5.2 Acceptance Criteria 게이트
 
 `verified_by`는 지금까지 Skill 문서의 지시였을 뿐이라, Agent가 실행하지 않았거나 실패를 무시해도 `submitted`로 넘어갔습니다. 이제 게이트를 Harness가 직접 잡습니다.
 
@@ -102,7 +116,7 @@ Worker는 `completed`를 선언하지 않습니다. 정상 Task에서는 Reviewe
 - **동일 명령 중복 실행 캐시**: 동일한 `command` 문자열을 가진 조건이 여러 개 있을 경우 한 번의 `submitted` 검증 안에서는 최초 실행의 종료 코드와 출력을 재사용합니다. 실패 제출 차단·AC별 `result` 독립 기록·원격 실행 제한 등은 그대로 적용되며, 다음 검증 호출(재시도)에서는 캐시를 비우고 다시 실행합니다.
 - 결과는 `.harness/evidence/TASK-attempt-N-checks.yaml`(기준별 `exit_code`·`result`·`output_tail`, `summary`)에 남고 다음 Context Packet에 주입됩니다.
 
-### 5.2 Evidence 구조
+### 5.3 Evidence 구조
 
 Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실제 저장소 상태가 일치하는가" 하나입니다. 그 판단에 쓰이는 필드만 정본으로 두고 긴 원문은 분리합니다(Agent에게 보낸 Context Packet 전문은 Evidence가 아니라 `.harness/runtime/`에 있습니다).
 
@@ -136,7 +150,7 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 3. Orchestrator가 `validate [PATH] --wave ID`로 실행 전제를 검사합니다.
 4. `ready` Task에만 `transition ... active` 후 `dispatch ... worker`로 Worker 한 턴을 실행합니다. `queued`는 완료 전이가 `ready`로 승격할 때까지 선택하지 않습니다. Herdr나 Provider CLI 문제로 이 경로가 막히면 `dispatch ... --print-only`로 실행할 명령만 받아 사람이 직접 띄운 뒤 `adopt`로 등록합니다(§7.1).
 5. `running`, `blocked`, `prompt_not_delivered`, `unknown`, `timeout`, `stalled`이면 `observe`로 상태를 재조회하고 Orchestrator가 사용자 질문, 대기 또는 중단을 결정합니다.
-6. Attempt와 Evidence가 준비되면 `transition ... submitted`를 수행합니다. 이 시점에 Harness가 Acceptance Criteria를 직접 실행하고, 모두 통과해야 전이됩니다(§5.1).
+6. Attempt와 Evidence가 준비되면 `transition ... submitted`를 수행합니다. 이 시점에 Harness가 Acceptance Criteria를 직접 실행하고, 모두 통과해야 전이됩니다(§5.2).
 7. 정상 Task는 `transition ... reviewing` 후 `dispatch ... reviewer`로 다른 Provider의 읽기 전용 Review 한 턴을 실행하고, 판정에 따라 `changes_requested` 또는 `awaiting_approval`로 전이합니다.
 8. 수동 검토 예외 Task는 Reviewer dispatch와 `reviewing`을 생략하고 `transition ... awaiting_approval`을 호출합니다. Harness는 Task별 예외와 사유를 다시 확인하며 정상 Task의 직접 전이는 거부합니다.
 9. 사용자가 현재 Task의 완료를 명시적으로 승인한 뒤 Orchestrator가 `approve ... --confirm-user-approval`을 호출합니다. 명령은 Task ID·`awaiting_approval`과 정상 Task의 최신 `APPROVED` Review 또는 수동 예외 사유를 검증하고 승인 파일을 원자적으로 기록한 뒤 기존 `transition` 게이트로 `completed` 전이합니다. 그 전이가 빈 슬롯을 만든 경우에만 queued Task를 `ready`까지 유한 승격합니다. 사용자 의도를 추론하거나 무승인으로 호출하지 않습니다.

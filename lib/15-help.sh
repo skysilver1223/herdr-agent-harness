@@ -18,6 +18,7 @@ HARNESS_COMMAND_SUMMARIES=(
   "models:Provider별 모델 허용 목록·등급 해석·프리미엄 정책을 조회하고 갱신한다"
   "start:프로젝트 디렉터리에서 Herdr Session을 연다"
   "status:STATE.md를 출력한다 (--live로 문서·Herdr·Git 대조)"
+  "report:완료 요약·Wave/전체 진척율·다음 할 일·드리프트를 읽기 전용으로 보여 준다"
   "validate:상태를 바꾸지 않고 문서·정책·Git 정합성만 검사한다"
   "transition:Task 상태를 전이표와 게이트에 따라 강제 전이한다"
   "approve:사용자 승인을 기록하고 awaiting_approval을 completed로 만든다"
@@ -206,6 +207,26 @@ EOF
   $SCRIPT_NAME status .
   $SCRIPT_NAME status . --live
   $SCRIPT_NAME status . --live --json | jq .
+EOF
+      ;;
+    report) cat <<EOF
+구문:
+  $SCRIPT_NAME report [PATH] [--live] [--json]
+
+무엇을 하나:
+  Task YAML을 정본으로 완료된 Task의 제목·Worker/Reviewer와 모델·최신 Review·AC
+  결과·Attempt 수, 현재 Wave와 전체 진척율, ready/승격 가능한 queued/사용자
+  승인 대기, STATE.md 표와의 드리프트·활성 슬롯 상한을 한 번에 읽기 전용으로
+  보여 준다. Task가 없거나 Wave가 없어도 0 나눗셈 없이 출력한다.
+
+  기본은 Herdr를 호출하지 않는다. --live를 명시했을 때만 Herdr Agent 목록과
+  runtime 추적 정보를 대조한다. completed 전이 성공 뒤에도 같은 기본 보고가
+  자동으로 출력되지만, 보고 생성 실패는 이미 끝난 상태 전이를 실패시키지 않는다.
+
+예시:
+  $SCRIPT_NAME report .
+  $SCRIPT_NAME report . --live
+  $SCRIPT_NAME report . --json | jq .
 EOF
       ;;
     validate) cat <<EOF

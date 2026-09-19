@@ -541,6 +541,16 @@ _transition_promote_queued() {
   done < <(task_ids "$root" | LC_ALL=C sort)
 }
 
+# 완료 보고는 상태 전이가 끝난 뒤의 부가 출력일 뿐이다. 기본 호출에는 --live를
+# 붙이지 않아 Herdr 가용성과 지연이 전이 경로에 들어오지 않게 한다.
+_transition_emit_completion_report() {
+  local root="$1"
+  if ! cmd_report "$root"; then
+    info "완료 보고를 생성하지 못했습니다. 상태 전이는 이미 반영됐습니다. report를 다시 실행해 확인하세요."
+  fi
+  return 0
+}
+
 cmd_transition() {
   local root_arg="" task_id="" to_state="" note=""
   while [[ $# -gt 0 ]]; do
@@ -710,6 +720,10 @@ cmd_transition() {
     _runtime_lock_release "$root" __project_queue__ "$queue_token"
     trap - EXIT INT TERM
   fi
+
+  # queue lock을 푼 뒤 읽기 전용 보고를 덧붙인다. 보고 실패가 전이 종료코드를
+  # 바꾸지 않도록 래퍼가 언제나 성공으로 돌아온다.
+  [[ "$to_state" != completed ]] || _transition_emit_completion_report "$root"
 }
 
 # ---------------------------------------------------------------------------

@@ -3283,6 +3283,144 @@ STUB
   set -e
   [[ "$failure_status" -ne 0 ]] || die "잘못된 --approval-mode 값이 통과했습니다."
 
+  # --- report: Task YAML 정본의 완료 요약·진척율 ---------------------------
+  # report는 status의 확장이 아니다. 기본/완료 자동 경로에서 Herdr를 부르거나
+  # 파일을 쓰면 완료 전이의 신뢰성과 속도가 외부 상태에 묶인다.
+  local report_project report_empty report_output report_json report_log report_stub_dir
+  local report_snapshot_before report_snapshot_after transition_report noncompleted_report
+  report_project="$test_root/report-project"
+  report_empty="$test_root/report-empty"
+  bash "$SELF_PATH" init "$report_project" --name report-project --goal "report 검증" >/dev/null
+  bash "$SELF_PATH" init "$report_empty" --name report-empty --goal "report 경계 검증" >/dev/null
+  rm -f -- "$report_empty/.harness/waves/TEMPLATE.yaml"
+  sed -i 's/^- 상태: draft$/- 상태: approved/' "$report_project/.harness/SPEC.md"
+
+  make_report_task() {
+    local report_task_id="$1" report_state="$2" report_title="$3"
+    {
+      sed -e "s/^task_id: .*/task_id: $report_task_id/" \
+          -e 's/^milestone_id: .*/milestone_id: milestone-report/' \
+          -e "s/^title: .*/title: $report_title/" \
+          -e "s/^status: .*/status: $report_state/" \
+          "$report_project/.harness/tasks/TEMPLATE.yaml"
+      printf 'worker_model: report-worker-model\nreviewer_model: report-reviewer-model\n'
+    } >"$report_project/.harness/tasks/$report_task_id.yaml"
+  }
+  make_report_task task-report-done completed '완료 보고 Task'
+  make_report_task task-report-ready ready '다음 작업'
+  make_report_task task-report-queued queued '승격 대기 작업'
+  make_report_task task-report-wait awaiting_approval '승인 대기 작업'
+  make_report_task task-report-blocked blocked 'Wave 밖 Task'
+  cat >"$report_project/.harness/waves/wave-report.yaml" <<'EOF'
+schema_version: '1.0'
+wave_id: wave-report
+milestone_id: milestone-report
+title: report wave
+status: active
+tasks:
+  - task_id: task-report-done
+    parallel_group: 1
+  - task_id: task-report-ready
+    parallel_group: 1
+  - task_id: task-report-queued
+    parallel_group: 1
+dependencies: []
+approval:
+  user_approved: true
+EOF
+  printf '# Attempt 1\n' >"$report_project/.harness/attempts/task-report-done-attempt-1.md"
+  printf '# Attempt 2\n' >"$report_project/.harness/attempts/task-report-done-attempt-2.md"
+  printf '판정: APPROVED\n' >"$report_project/.harness/reviews/task-report-done-review-1.md"
+  cat >"$report_project/.harness/evidence/task-report-done-attempt-2-checks.yaml" <<'EOF'
+task: task-report-done
+attempt: 2
+checks:
+summary:
+  total: 3
+  passed: 2
+  failed: 0
+  manual: 1
+EOF
+  cat >"$report_project/.harness/STATE.md" <<'EOF'
+# State
+
+| Task | 상태 |
+|---|---|
+| task-report-done | completed |
+| task-report-ready | active |
+EOF
+  printf 'Task: task-report-wait\n승인: yes\n' >"$report_project/.harness/decisions/task-report-wait-approval.md"
+  git -C "$report_project" -c user.name=harness-test -c user.email=test@example.invalid add .
+  git -C "$report_project" -c user.name=harness-test -c user.email=test@example.invalid \
+    commit -q -m "test: report baseline" || true
+
+  report_stub_dir="$test_root/report-herdr-stub"
+  report_log="$test_root/report-herdr.log"
+  mkdir -p "$report_stub_dir"
+  cat >"$report_stub_dir/herdr" <<'REPORT_HERDR_STUB'
+#!/usr/bin/env bash
+printf 'herdr %s\n' "$*" >>"${HH_REPORT_HERDR_LOG:?}"
+exit 125
+REPORT_HERDR_STUB
+  chmod +x "$report_stub_dir/herdr"
+
+  report_snapshot_before="$(find "$report_project" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum)"
+  report_output="$(PATH="$report_stub_dir:$PATH" HH_REPORT_HERDR_LOG="$report_log" bash "$SELF_PATH" report "$report_project")" ||
+    die "report 기본 호출이 실패했습니다."
+  report_snapshot_after="$(find "$report_project" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum)"
+  [[ "$report_snapshot_before" == "$report_snapshot_after" ]] ||
+    die "report 기본 호출이 프로젝트 파일을 썼습니다."
+  [[ ! -s "$report_log" ]] || die "report 기본 호출이 Herdr를 불렀습니다."
+  printf '%s\n' "$report_output" | grep -q '^## 완료된 Task 요약$' || die "report 완료 요약 블록이 없습니다."
+  printf '%s\n' "$report_output" | grep -q 'task-report-done.*완료 보고 Task' || die "report 완료 Task 제목이 없습니다."
+  printf '%s\n' "$report_output" | grep -q '최신 Review: APPROVED, AC: Attempt 2: pass 2 / manual 1 / fail 0 (전체 3), Attempt: 2' ||
+    die "report Review/AC/Attempt 요약이 틀립니다."
+  printf '%s\n' "$report_output" | grep -q '^Wave wave-report .* 1/3 ' || die "report Wave 진척율이 틀립니다."
+  printf '%s\n' "$report_output" | grep -q '^전체 .* 1/5 ' || die "report 전체 진척율이 틀립니다."
+  printf '%s\n' "$report_output" | grep -q 'task-report-ready: STATE.md=active, YAML=ready' ||
+    die "report STATE.md 드리프트를 찾지 못했습니다."
+  printf '%s\n' "$report_output" | grep -q '승격 가능한 queued: task-report-queued' ||
+    die "report 승격 가능한 queued Task를 찾지 못했습니다."
+  PATH="$report_stub_dir:$PATH" HH_REPORT_HERDR_LOG="$report_log" \
+    bash "$SELF_PATH" report "$report_project" --json >"$test_root/report.json" || die "report --json이 실패했습니다."
+  python3 - "$test_root/report.json" <<'REPORT_JSON_CHECK'
+import json, sys
+data = json.load(open(sys.argv[1], encoding='utf-8'))
+assert data['progress']['wave']['id'] == 'wave-report'
+assert data['progress']['wave']['total'] == 3
+assert data['progress']['overall']['total'] == 5
+assert sum(data['progress']['states'].values()) == 5
+assert data['next']['promotable_queued'] == ['task-report-queued']
+REPORT_JSON_CHECK
+  [[ ! -s "$report_log" ]] || die "report --json 기본 경로가 Herdr를 불렀습니다."
+  PATH="$report_stub_dir:$PATH" HH_REPORT_HERDR_LOG="$report_log" \
+    bash "$SELF_PATH" report "$report_project" --live >/dev/null || die "report --live가 Herdr 실패를 처리하지 못했습니다."
+  grep -qx 'herdr agent list' "$report_log" || die "report --live가 Herdr 대조를 호출하지 않았습니다."
+
+  # completed에서만 보고가 붙고, 임의의 report 실패는 전이 성공을 오염시키지 않는다.
+  transition_report="$(PATH="$report_stub_dir:$PATH" HH_REPORT_HERDR_LOG="$report_log" \
+    bash "$SELF_PATH" transition "$report_project" task-report-wait completed)" ||
+    die "completed 전이가 report 때문에 실패했습니다."
+  printf '%s\n' "$transition_report" | grep -q '^## 완료된 Task 요약$' ||
+    die "completed 전이에 report 자동 출력이 없습니다."
+  noncompleted_report="$(PATH="$report_stub_dir:$PATH" HH_REPORT_HERDR_LOG="$report_log" \
+    bash "$SELF_PATH" transition "$report_project" task-report-ready active)" ||
+    die "비완료 전이가 실패했습니다."
+  ! printf '%s\n' "$noncompleted_report" | grep -q '^## 완료된 Task 요약$' ||
+    die "completed가 아닌 전이에 report가 자동 출력됐습니다."
+  local saved_report_function
+  saved_report_function="$(declare -f cmd_report)"
+  cmd_report() { return 73; }
+  _transition_emit_completion_report "$report_project" >/dev/null ||
+    die "report 실패 격리 래퍼가 성공으로 끝나지 않았습니다."
+  eval "$saved_report_function"
+
+  report_output="$(PATH="$report_stub_dir:$PATH" HH_REPORT_HERDR_LOG="$report_log" bash "$SELF_PATH" report "$report_empty")" ||
+    die "Task/Wave 없는 report가 실패했습니다."
+  printf '%s\n' "$report_output" | grep -q 'Wave: 선택 가능한 Wave가 없습니다 (0/0, 0%)' ||
+    die "Wave 없는 report 경계 출력이 틀립니다."
+  printf '%s\n' "$report_output" | grep -q '^전체 .* 0/0 ' || die "Task 없는 report 경계 출력이 틀립니다."
+
   # 도움말 정합성: 명령 목록이 세 곳(99-main.sh의 case, 15-help.sh의 요약표와
   # topic 분기, 85-completion.sh의 설명 목록)에 흩어져 있어 쉽게 갈라진다.
   # 하나라도 빠지면 사용자는 "탭에는 있는데 help는 없는" 명령을 만난다.
@@ -3627,6 +3765,10 @@ EOF
     'PASS: 역할별 승인 모드 하위 호환 (빈 키·키 없음·정책 없음에서 전역과 동일, init 기본 빈 값)'
     'PASS: 역할별 승인 모드 오버라이드 (역할 키 > 전역 > ask, Worker 샌드박스 유지 + Reviewer 상향, 대칭·빈 값 폴백·기록 일치)'
     'PASS: 역할별 승인 모드 안전성 (무효값 거부·역할 격리·허용목록 불변·전역 관용 보존·sync 보존)'
+    'PASS: report 진척율 계산'
+    'PASS: report 자동 출력'
+    'PASS: report 읽기 전용과 Herdr 비의존'
+    'PASS: report 경계 조건'
     'PASS: 도움말 정합성 (dispatch↔help 요약·상세↔탭 완성 설명, 없는 명령 거부)'
     'PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호 미저장/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키)'
     'PASS: Task Lock (동시 획득 거부/release/stale 회수)'

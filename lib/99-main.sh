@@ -10,6 +10,7 @@ main() {
     models) cmd_models "$@" ;;
     start) cmd_start "$@" ;;
     status) cmd_status "$@" ;;
+    report) cmd_report "$@" ;;
     validate) cmd_validate "$@" ;;
     transition) cmd_transition "$@" ;;
     approve) cmd_approve "$@" ;;
