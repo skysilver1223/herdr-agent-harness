@@ -955,8 +955,14 @@ EOF
     die "doctor가 gawk 부재와 Context Packet 영향을 명시하지 않았습니다."
   grep -q 'Context Packet.*UTF-8' "$HARNESS_LIB_DIR/70-status.sh" ||
     die "doctor 구현에 gawk 의존성 설명이 없습니다."
-  grep -q 'gawk' "$(dirname "$SELF_PATH")/README.md" ||
-    die "README에 gawk Context Packet 의존성 설명이 없습니다."
+  local gawk_readme
+  gawk_readme="$(dirname "$SELF_PATH")/README.md"
+  if [[ -f "$gawk_readme" ]]; then
+    grep -q 'gawk' "$gawk_readme" ||
+      die "README에 gawk Context Packet 의존성 설명이 없습니다."
+  else
+    info "README.md가 없어(설치본) gawk Context Packet 의존성 검사는 건너뜁니다."
+  fi
 
   expect_fail "dispatch 잘못된 ROLE" \
     bash "$SELF_PATH" dispatch "$test_project" task-001 architect
@@ -3881,6 +3887,35 @@ EOF
     done
   done
 
+  # 설치본에는 launcher·lib/·templates/만 있고 저장소 README.md·install.sh는 없다.
+  # 이 배치를 실제로 다시 실행해, 저장소 파일을 전제한 새 자체 테스트가 재발하지
+  # 않게 한다. 하위 test는 같은 검사를 다시 띄우지 않아 재귀를 막는다.
+  if [[ "${HH_HARNESS_INSTALLED_CONTEXT_SELFTEST:-0}" != 1 ]]; then
+    local installed_context_root installed_context_output installed_context_status
+    installed_context_root="$(mktemp -d "$test_root/installed-context.XXXXXX")"
+    mkdir -p "$installed_context_root/lib" "$installed_context_root/templates"
+    cp "$SELF_PATH" "$installed_context_root/harness.sh"
+    cp -a "$HARNESS_LIB_DIR/." "$installed_context_root/lib/"
+    cp -a "$HARNESS_TEMPLATE_DIR/." "$installed_context_root/templates/"
+    [[ ! -e "$installed_context_root/README.md" && ! -e "$installed_context_root/install.sh" ]] ||
+      die "설치본 fixture에 저장소 파일이 섞였습니다."
+
+    set +e
+    installed_context_output="$(
+      HH_HARNESS_INSTALLED_CONTEXT_SELFTEST=1 \
+      HARNESS_LIB_DIR="$installed_context_root/lib" \
+      HARNESS_TEMPLATE_DIR="$installed_context_root/templates" \
+      bash "$installed_context_root/harness.sh" test 2>&1
+    )"
+    installed_context_status=$?
+    set -e
+    [[ "$installed_context_status" -eq 0 ]] ||
+      die "설치본 배치 자체 테스트가 실패했습니다."
+    printf '%s' "$installed_context_output" |
+      grep -q 'README.md가 없어(설치본) gawk Context Packet 의존성 검사는 건너뜁니다.' ||
+      die "설치본 배치가 gawk README 검사를 건너뛴 사실을 알리지 않았습니다."
+  fi
+
   # 출력 목록 자체를 한 곳에서 정의하고 README의 기대 출력 블록과 비교한다.
   # cmd_test를 다시 실행하지 않으므로 Agent 호출·네트워크 접근·재귀 실행이 없다.
   local pass_lines=(
@@ -3985,4 +4020,7 @@ EOF
     fi
     printf '%s\n' "$pass_line"
   done
+  if [[ "${HH_HARNESS_INSTALLED_CONTEXT_SELFTEST:-0}" != 1 ]]; then
+    printf '%s\n' 'PASS: 설치본 배치 자체 테스트'
+  fi
 }
