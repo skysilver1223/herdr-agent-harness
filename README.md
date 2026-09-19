@@ -351,6 +351,9 @@ PASS: 호출자 게이트 (Agent Pane의 transition·approve 거부, 사람 Pane
 PASS: Agent 호출 없음
 PASS: 탭 완성 스크립트 문법
 PASS: Agent 승인 정책 (기본 auto/인수표/ask 무인수/문자·플래그·값·모드별 권한상승 거부/반환값 실패/정책 없음/init 값)
+PASS: 역할별 승인 모드 하위 호환 (빈 키·키 없음·정책 없음에서 전역과 동일, init 기본 빈 값)
+PASS: 역할별 승인 모드 오버라이드 (역할 키 > 전역 > ask, Worker 샌드박스 유지 + Reviewer 상향, 대칭·빈 값 폴백·기록 일치)
+PASS: 역할별 승인 모드 안전성 (무효값 거부·역할 격리·허용목록 불변·전역 관용 보존·sync 보존)
 PASS: 도움말 정합성 (dispatch↔help 요약·상세↔탭 완성 설명, 없는 명령 거부)
 PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호 미저장/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키)
 PASS: Task Lock (동시 획득 거부/release/stale 회수)
@@ -678,6 +681,27 @@ Agent를 띄울 때마다 "이 명령을 실행할까요? (y/n)"을 반복해서
 - claude의 `bypassPermissions`는 디렉터리마다 처음 한 번 확인 화면을 띄울 수 있고, 그러면 `herdr agent start`가 그 화면에서 멈춥니다. 기본값 `auto`(`acceptEdits`)는 그 화면이 없습니다.
 - 실제로 쓰인 모드와 인수는 Attempt·Evidence 문서에 기록됩니다.
 - 이 파일이 없는 예전 프로젝트에서는 인수를 붙이지 않습니다(= `ask`와 같음).
+
+#### 역할별 승인 모드 오버라이드
+
+`approval_mode`는 프로젝트 전체에 하나뿐인 스칼라입니다. 그래서 Reviewer 하나를 올리려다 Worker까지 함께 올라가는 문제가 실제로 발생했습니다 — Reviewer(agy)가 `git diff --cached` 같은 읽기 전용 명령의 승인 화면에서 멈춰 리뷰 산출물 없이 세션이 끝나자(ORPHAN) 전역을 `bypass`로 올렸고, 그 결과 codex Worker의 `--dangerously-bypass-approvals-and-sandbox`까지 켜져 **네트워크·파일시스템 샌드박스가 Worker 쪽에서 풀렸습니다.**
+
+역할마다 필요한 권한이 다릅니다. Reviewer는 Write Scope가 `.harness/reviews/`로 묶여 있고 소스·테스트 직접 수정이 역할 지침으로 금지돼 있어 셸 명령을 자유롭게 돌려도 위험이 작지만, Worker는 실제로 코드를 쓰므로 Provider Sandbox를 유지하는 편이 낫습니다.
+
+```yaml
+agent_policy:
+  approval_mode: 'auto'             # 전역 기본값
+  worker_approval_mode: ''          # 빈 값 = 미지정 → 전역 auto를 쓴다
+  reviewer_approval_mode: 'bypass'  # Reviewer만 승인 화면 없이
+```
+
+- 우선순위는 **`<role>_approval_mode` > `approval_mode` > `ask`** 입니다. 역할은 `worker`와 `reviewer` 둘뿐입니다(`dispatch`의 역할이 그 둘뿐입니다).
+- **빈 문자열은 "미지정"**이며 전역 값으로 떨어집니다. 키가 아예 없는 예전 정책도 같습니다 — 그래서 이 기능이 생겨도 **기존 프로젝트의 dispatch 인수는 한 글자도 바뀌지 않습니다.**
+- 이 키는 역할별로 **최소 권한**을 주기 위한 것이지 Worker 등급을 올리는 용도가 아닙니다. 방향은 대칭이라 `worker_approval_mode`로 Worker만 낮추거나 올릴 수도 있지만, 올리는 쪽은 그만큼 Worker의 샌드박스를 포기한다는 뜻입니다.
+- **오버라이드는 허용 인수 목록을 넓히지 않습니다.** 역할이 `bypass`를 쓰면 `<provider>_bypass` 칸이 선택될 뿐이고, 그 값은 여전히 모드별 허용 플래그·허용 값 검사를 그대로 통과해야 합니다. `auto`인 역할에 `--dangerously-*`를 넣는 것은 종전대로 거부됩니다.
+- **전역 키는 관용적이지만 역할 키는 엄격합니다.** 전역 `approval_mode`에 유효하지 않은 값이 있으면 종전처럼 경고 후 `ask`로 취급하지만(하위 호환), `reviewer_approval_mode: 'bypasss'` 같은 오타는 **Pane을 만들기 전에 `dispatch`를 거부**합니다. 폴백하거나 `ask`로 넘기면 Agent가 첫 명령에서 멈춰 — 이 기능이 없애려던 ORPHAN이 그대로 재현되기 때문입니다.
+- Attempt·Evidence의 `Approval mode`에는 전역 값이 아니라 **그 역할에 실제로 적용된 모드**가 남고, 역할 키에서 온 경우 `bypass (reviewer_approval_mode)`처럼 출처를 함께 적습니다.
+- `sync-templates`는 사용자가 채운 역할 키 값을 보존합니다.
 
 ### Task별 모델 등급·속도 — 승인 인수와 분리된 정책 경로
 

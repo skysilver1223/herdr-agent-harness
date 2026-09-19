@@ -838,6 +838,53 @@ _runtime_agent_arg_allowlist() {
   esac
 }
 
+# 역할별 승인 모드 해석 — 우선순위: <role>_approval_mode > 전역 approval_mode > ask.
+#
+# 승인 등급이 전역 스칼라 하나뿐이면 Reviewer 하나를 bypass로 올리려다 Worker의
+# Provider Sandbox까지 함께 풀린다(2026-09-18 실측). 역할 키를 먼저 보게 해서
+# "Worker는 샌드박스 유지, Reviewer만 상향" 같은 조합을 정책 파일로 표현한다.
+#
+# 빈 문자열은 "미지정"이며 전역으로 떨어진다 — sync-templates가 키만 전파하고
+# 값을 비워 두는 경우가 정상 동작이어야 하기 때문이다.
+#
+# 전역 키는 관용적(유효하지 않으면 경고 후 ask), 역할 키는 엄격(거부)이다.
+# 전역의 관용은 기존 프로젝트의 동작이라 바꾸면 하위 호환이 깨지고, 역할 키는
+# 새로 쓰는 사람이 방금 적은 값이라 오타를 조용히 무시할 이유가 없다.
+#
+# 반환: 0=해석 성공(RUNTIME_APPROVAL_MODE/RUNTIME_APPROVAL_MODE_SOURCE 설정),
+#       1=역할 키 값이 유효하지 않다.
+_runtime_resolve_approval_mode() {
+  local policy="$1" role="${2:-}" value=""
+  RUNTIME_APPROVAL_MODE=ask
+  RUNTIME_APPROVAL_MODE_SOURCE=default
+  [[ -f "$policy" ]] || return 0
+  # 역할 이름은 _runtime_yaml_scalar의 awk 정규식에 그대로 박히므로, 키를
+  # 조립하기 전에 문자 집합을 좁힌다.
+  if [[ "$role" =~ ^[a-z][a-z_]*$ ]]; then
+    value="$(_runtime_yaml_scalar "$policy" "${role}_approval_mode")"
+  fi
+  if [[ -n "$value" ]]; then
+    case "$value" in
+      ask|auto|bypass) ;;
+      *)
+        printf 'agent-policy.yaml의 %s_approval_mode 값이 유효하지 않습니다: %s (허용: ask, auto, bypass)\n' \
+          "$role" "$value" >&2
+        return 1
+        ;;
+    esac
+    RUNTIME_APPROVAL_MODE="$value"
+    RUNTIME_APPROVAL_MODE_SOURCE=role
+    return 0
+  fi
+  # 전역 값은 유효성 판단 없이 원문 그대로 올린다 — 관용 처리는 호출부의 몫이고,
+  # 기록에는 정책 파일에 적힌 값이 그대로 남아야 한다.
+  value="$(_runtime_yaml_scalar "$policy" approval_mode)"
+  [[ -n "$value" ]] || return 0
+  RUNTIME_APPROVAL_MODE="$value"
+  RUNTIME_APPROVAL_MODE_SOURCE=global
+  return 0
+}
+
 # 실패는 die가 아니라 반환값으로 알린다.
 #
 # cmd_dispatch는 auto-step 안에서 커맨드 치환으로 불린다. 그 안에서 die하면
@@ -846,16 +893,20 @@ _runtime_agent_arg_allowlist() {
 # 자기 문맥에서 멈출 수 있다.
 # 반환: 0=인수를 출력했다(없을 수도 있다), 1=정책 값이 유효하지 않다.
 _runtime_agent_args() {
-  local root="$1" provider="$2" policy mode value token flag flag_value
+  local root="$1" provider="$2" role="${3:-}" policy mode value token flag flag_value
   local -a allowed=()
   policy="$root/.harness/policies/agent-policy.yaml"
   [[ -f "$policy" ]] || return 0
-  mode="$(_runtime_yaml_scalar "$policy" approval_mode)"
-  [[ -n "$mode" ]] || mode=ask
+  # 역할 키가 유효하지 않으면 Pane을 만들기 전에 멈춘다. 폴백이나 ask 취급은
+  # "적힌 값과 실제 적용 값이 다른" 상태를 만들고, 특히 ask는 승인 인수를 아예
+  # 붙이지 않아 Agent가 첫 명령에서 정지한다 — 이 경로가 없애려는 ORPHAN 그 자체다.
+  _runtime_resolve_approval_mode "$policy" "$role" || return 1
+  mode="$RUNTIME_APPROVAL_MODE"
   case "$mode" in
     ask) return 0 ;;
     auto|bypass) ;;
     *)
+      # 여기까지 온 유효하지 않은 값은 전역 키뿐이다(역할 키는 위에서 거부됐다).
       printf '경고: agent-policy.yaml의 approval_mode 값이 유효하지 않습니다: %s (ask로 취급)\n' "$mode" >&2
       return 0
       ;;
@@ -1370,12 +1421,24 @@ _runtime_select_model() {
   return 0
 }
 
+# Attempt·Evidence에 남길 "실제로 적용된" 승인 모드. _runtime_agent_args와 같은
+# 해석기를 쓴다 — 갈라지면 역할 오버라이드가 걸렸는데 기록에는 전역 값이 남아
+# 감사 기록이 거짓이 된다.
 _runtime_approval_mode() {
-  local root="$1" policy mode
+  local root="$1" role="${2:-}" policy
   policy="$root/.harness/policies/agent-policy.yaml"
   [[ -f "$policy" ]] || { printf 'ask (정책 파일 없음)'; return 0; }
-  mode="$(_runtime_yaml_scalar "$policy" approval_mode)"
-  printf '%s' "${mode:-ask}"
+  # 경고는 _runtime_agent_args가 한 번만 내고 dispatch를 멈춘다. 여기서는
+  # 기록이 정직하도록 적힌 값을 그대로 보여 준다.
+  if ! _runtime_resolve_approval_mode "$policy" "$role" 2>/dev/null; then
+    printf '%s (유효하지 않음)' "$(_runtime_yaml_scalar "$policy" "${role}_approval_mode")"
+    return 0
+  fi
+  if [[ "$RUNTIME_APPROVAL_MODE_SOURCE" == role ]]; then
+    printf '%s (%s_approval_mode)' "$RUNTIME_APPROVAL_MODE" "$role"
+    return 0
+  fi
+  printf '%s' "$RUNTIME_APPROVAL_MODE"
 }
 
 _runtime_start_agent_when_ready() {

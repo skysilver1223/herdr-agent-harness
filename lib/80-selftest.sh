@@ -3121,6 +3121,161 @@ STUB
   [[ -z "$(_runtime_agent_args "$approval_project" claude)" ]] ||
     die "agent-policy.yaml이 없는데 인수가 붙었습니다."
 
+  # ---------------------------------------------------------------------------
+  # 역할별 승인 모드 오버라이드(<role>_approval_mode)
+  # 전역 스칼라 하나로는 Reviewer를 올리려다 Worker의 Provider Sandbox까지
+  # 함께 풀린다(2026-09-18 실측). 역할 키가 그 조합을 표현하되, 키가 없는
+  # 기존 정책의 동작은 한 글자도 바뀌면 안 된다.
+  # ---------------------------------------------------------------------------
+  local role_project="$test_root/role-approval-project"
+  bash "$SELF_PATH" init "$role_project" --name role-approval --goal "역할별 승인 모드" >/dev/null
+  local role_policy="$role_project/.harness/policies/agent-policy.yaml"
+
+  # init 기본값은 빈 값이어야 한다 — 지정하지 않으면 전역을 쓰는 종전 동작이다.
+  grep -q "^  worker_approval_mode: ''$" "$role_policy" ||
+    die "init 기본 worker_approval_mode가 빈 값이 아닙니다: $role_policy"
+  grep -q "^  reviewer_approval_mode: ''$" "$role_policy" ||
+    die "init 기본 reviewer_approval_mode가 빈 값이 아닙니다: $role_policy"
+
+  # (1) 하위 호환 — 역할 키가 비어 있거나 아예 없을 때 role 인자를 줘도
+  #     주지 않았을 때와 결과가 같아야 한다.
+  local legacy_expected_claude legacy_expected_codex
+  legacy_expected_claude="$(_runtime_agent_args "$role_project" claude)"
+  legacy_expected_codex="$(_runtime_agent_args "$role_project" codex)"
+  [[ "$legacy_expected_claude" == "--permission-mode acceptEdits" ]] ||
+    die "역할 오버라이드 도입 후 기본 claude 인수가 달라졌습니다: $legacy_expected_claude"
+  local role_name
+  for role_name in worker reviewer; do
+    [[ "$(_runtime_agent_args "$role_project" claude "$role_name")" == "$legacy_expected_claude" ]] ||
+      die "빈 역할 키인데 claude 인수가 전역과 다릅니다: $role_name"
+    [[ "$(_runtime_agent_args "$role_project" codex "$role_name")" == "$legacy_expected_codex" ]] ||
+      die "빈 역할 키인데 codex 인수가 전역과 다릅니다: $role_name"
+    [[ "$(_runtime_approval_mode "$role_project" "$role_name")" == "auto" ]] ||
+      die "빈 역할 키인데 기록 모드가 전역 값이 아닙니다: $role_name"
+  done
+  # 키 자체가 없는 구버전 정책도 같아야 한다(sync-templates 이전 프로젝트).
+  sed -i "/^  worker_approval_mode:/d; /^  reviewer_approval_mode:/d" "$role_policy"
+  for role_name in worker reviewer; do
+    [[ "$(_runtime_agent_args "$role_project" claude "$role_name")" == "$legacy_expected_claude" ]] ||
+      die "역할 키가 없는 구버전 정책에서 claude 인수가 달라졌습니다: $role_name"
+    [[ "$(_runtime_approval_mode "$role_project" "$role_name")" == "auto" ]] ||
+      die "역할 키가 없는 구버전 정책에서 기록 모드가 달라졌습니다: $role_name"
+  done
+  # 정책 파일이 아예 없는 경우도 role 인자와 무관해야 한다.
+  mv "$role_policy" "$role_policy.bak"
+  [[ -z "$(_runtime_agent_args "$role_project" claude reviewer)" ]] ||
+    die "정책 파일이 없는데 역할 경로에서 인수가 붙었습니다."
+  [[ "$(_runtime_approval_mode "$role_project" reviewer)" == "ask (정책 파일 없음)" ]] ||
+    die "정책 파일이 없을 때 기록 문구가 달라졌습니다."
+  mv "$role_policy.bak" "$role_policy"
+  printf "  worker_approval_mode: ''\n  reviewer_approval_mode: ''\n" >>"$role_policy"
+
+  # (2) 오버라이드 동작 — 원래 목적인 "Worker 샌드박스 유지 + Reviewer만 상향".
+  sed -i "s|^  reviewer_approval_mode: .*$|  reviewer_approval_mode: 'bypass'|" "$role_policy"
+  [[ "$(_runtime_agent_args "$role_project" codex worker)" == "--ask-for-approval never --sandbox workspace-write" ]] ||
+    die "Reviewer 오버라이드가 Worker의 codex 샌드박스 인수까지 바꿨습니다."
+  [[ "$(_runtime_agent_args "$role_project" codex reviewer)" == "--dangerously-bypass-approvals-and-sandbox" ]] ||
+    die "reviewer_approval_mode=bypass가 codex에 적용되지 않았습니다."
+  [[ "$(_runtime_agent_args "$role_project" claude reviewer)" == "--permission-mode bypassPermissions" ]] ||
+    die "reviewer_approval_mode=bypass가 claude에 적용되지 않았습니다."
+  [[ "$(_runtime_agent_args "$role_project" agy reviewer)" == "--dangerously-skip-permissions" ]] ||
+    die "reviewer_approval_mode=bypass가 agy에 적용되지 않았습니다."
+  # 기록은 전역이 아니라 실제 적용값을 가리켜야 한다(감사 기록이 거짓이 되면 안 된다).
+  [[ "$(_runtime_approval_mode "$role_project" reviewer)" == "bypass (reviewer_approval_mode)" ]] ||
+    die "Reviewer 기록 모드가 실제 적용값을 가리키지 않습니다: $(_runtime_approval_mode "$role_project" reviewer)"
+  [[ "$(_runtime_approval_mode "$role_project" worker)" == "auto" ]] ||
+    die "지정하지 않은 Worker의 기록 모드가 전역 값이 아닙니다."
+
+  # 반대 방향도 대칭으로 된다 — Worker만 올리고 Reviewer는 전역.
+  sed -i "s|^  reviewer_approval_mode: .*$|  reviewer_approval_mode: ''|" "$role_policy"
+  sed -i "s|^  worker_approval_mode: .*$|  worker_approval_mode: 'bypass'|" "$role_policy"
+  [[ "$(_runtime_agent_args "$role_project" claude worker)" == "--permission-mode bypassPermissions" ]] ||
+    die "worker_approval_mode=bypass가 적용되지 않았습니다."
+  [[ "$(_runtime_agent_args "$role_project" claude reviewer)" == "--permission-mode acceptEdits" ]] ||
+    die "빈 reviewer 키가 전역 auto로 떨어지지 않았습니다."
+
+  # 역할 키로 전역보다 낮추는 것도 된다 — ask면 인수를 붙이지 않는다.
+  sed -i "s|^  approval_mode: .*$|  approval_mode: 'bypass'|" "$role_policy"
+  sed -i "s|^  worker_approval_mode: .*$|  worker_approval_mode: ''|" "$role_policy"
+  sed -i "s|^  reviewer_approval_mode: .*$|  reviewer_approval_mode: 'ask'|" "$role_policy"
+  [[ -z "$(_runtime_agent_args "$role_project" claude reviewer)" ]] ||
+    die "reviewer_approval_mode=ask인데 인수가 붙었습니다."
+  [[ "$(_runtime_agent_args "$role_project" claude worker)" == "--permission-mode bypassPermissions" ]] ||
+    die "전역 bypass가 Worker에 적용되지 않았습니다."
+  sed -i "s|^  approval_mode: .*$|  approval_mode: 'auto'|" "$role_policy"
+  sed -i "s|^  reviewer_approval_mode: .*$|  reviewer_approval_mode: ''|" "$role_policy"
+
+  # (3) 안전성 — 역할 키의 오타는 Pane을 만들기 전에 거부한다.
+  local bad_role_value
+  for role_name in worker reviewer; do
+    for bad_role_value in 'bypasss' 'AUTO' 'yes' '--dangerously-skip-permissions'; do
+      sed -i "s|^  ${role_name}_approval_mode: .*$|  ${role_name}_approval_mode: '$bad_role_value'|" "$role_policy"
+      set +e
+      ( _runtime_agent_args "$role_project" claude "$role_name" ) >/dev/null 2>&1
+      failure_status=$?
+      set -e
+      [[ "$failure_status" -ne 0 ]] ||
+        die "역할 키의 유효하지 않은 값이 통과했습니다: ${role_name}_approval_mode=$bad_role_value"
+      # 다른 역할은 같은 정책에서도 영향을 받지 않아야 한다.
+      local other_role
+      [[ "$role_name" == worker ]] && other_role=reviewer || other_role=worker
+      [[ "$(_runtime_agent_args "$role_project" claude "$other_role")" == "--permission-mode acceptEdits" ]] ||
+        die "한 역할의 무효값이 다른 역할까지 막았습니다: $role_name -> $other_role"
+      sed -i "s|^  ${role_name}_approval_mode: .*$|  ${role_name}_approval_mode: ''|" "$role_policy"
+    done
+  done
+
+  # 오버라이드는 허용 인수 목록을 넓히지 않는다 — 모드별 허용 목록이 그대로다.
+  sed -i "s|^  reviewer_approval_mode: .*$|  reviewer_approval_mode: 'auto'|" "$role_policy"
+  sed -i "s|^  claude_auto: .*$|  claude_auto: '--permission-mode bypassPermissions'|" "$role_policy"
+  set +e
+  ( _runtime_agent_args "$role_project" claude reviewer ) >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] ||
+    die "역할 오버라이드가 auto 모드의 허용 목록을 넓혔습니다."
+  sed -i "s|^  claude_auto: .*$|  claude_auto: '--permission-mode acceptEdits'|" "$role_policy"
+  sed -i "s|^  agy_auto: .*$|  agy_auto: '--dangerously-skip-permissions'|" "$role_policy"
+  set +e
+  ( _runtime_agent_args "$role_project" agy reviewer ) >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] ||
+    die "역할 오버라이드가 agy auto 허용 목록을 넓혔습니다."
+  sed -i "s|^  agy_auto: .*$|  agy_auto: '--mode accept-edits'|" "$role_policy"
+
+  # 전역 키의 기존 관용(경고 후 ask)은 바뀌지 않는다 — 하위 호환.
+  sed -i "s|^  reviewer_approval_mode: .*$|  reviewer_approval_mode: ''|" "$role_policy"
+  sed -i "s|^  approval_mode: .*$|  approval_mode: 'nonsense'|" "$role_policy"
+  local lenient_output lenient_status
+  set +e
+  lenient_output="$( _runtime_agent_args "$role_project" claude reviewer 2>/dev/null )"
+  lenient_status=$?
+  set -e
+  [[ "$lenient_status" -eq 0 && -z "$lenient_output" ]] ||
+    die "전역 approval_mode의 관용 처리가 바뀌었습니다 (status=$lenient_status, out=$lenient_output)."
+  _runtime_agent_args "$role_project" claude reviewer 2>&1 >/dev/null | grep -q 'approval_mode' ||
+    die "전역 approval_mode 무효값 경고가 사라졌습니다."
+
+  # 역할 키는 전역이 유효해도 엄격하다 — 조용한 폴백이 없어야 한다.
+  sed -i "s|^  approval_mode: .*$|  approval_mode: 'auto'|" "$role_policy"
+  sed -i "s|^  reviewer_approval_mode: .*$|  reviewer_approval_mode: 'bypasss'|" "$role_policy"
+  set +e
+  ( _runtime_agent_args "$role_project" claude reviewer ) >/dev/null 2>&1
+  failure_status=$?
+  set -e
+  [[ "$failure_status" -ne 0 ]] ||
+    die "전역이 유효할 때 역할 키 오타가 조용히 폴백했습니다."
+  # 기록에도 유효하지 않다는 사실이 남아야 한다.
+  _runtime_approval_mode "$role_project" reviewer 2>/dev/null | grep -q '유효하지 않음' ||
+    die "역할 키 무효값이 기록 문구에 드러나지 않습니다."
+
+  # sync-templates가 사용자가 채운 역할 키 값을 되돌리지 않아야 한다.
+  sed -i "s|^  reviewer_approval_mode: .*$|  reviewer_approval_mode: 'bypass'|" "$role_policy"
+  bash "$SELF_PATH" sync-templates "$role_project" --apply >/dev/null
+  grep -q "^  reviewer_approval_mode: 'bypass'$" "$role_policy" ||
+    die "sync-templates가 사용자가 지정한 reviewer_approval_mode를 되돌렸습니다."
+
   # init의 --approval-mode 값 검증.
   set +e
   bash "$SELF_PATH" init "$test_root/bad-approval" --name bad --goal g --approval-mode nonsense >/dev/null 2>&1
@@ -3469,6 +3624,9 @@ EOF
     'PASS: Agent 호출 없음'
     'PASS: 탭 완성 스크립트 문법'
     'PASS: Agent 승인 정책 (기본 auto/인수표/ask 무인수/문자·플래그·값·모드별 권한상승 거부/반환값 실패/정책 없음/init 값)'
+    'PASS: 역할별 승인 모드 하위 호환 (빈 키·키 없음·정책 없음에서 전역과 동일, init 기본 빈 값)'
+    'PASS: 역할별 승인 모드 오버라이드 (역할 키 > 전역 > ask, Worker 샌드박스 유지 + Reviewer 상향, 대칭·빈 값 폴백·기록 일치)'
+    'PASS: 역할별 승인 모드 안전성 (무효값 거부·역할 격리·허용목록 불변·전역 관용 보존·sync 보존)'
     'PASS: 도움말 정합성 (dispatch↔help 요약·상세↔탭 완성 설명, 없는 명령 거부)'
     'PASS: 원격 실행 모드 (opt-in 게이트/setup 생성·--force·비밀번호 미저장/하위 명령 오타 거부/SSH 옵션·경로 인젝션 차단/YAML 주석·중복 키)'
     'PASS: Task Lock (동시 획득 거부/release/stale 회수)'

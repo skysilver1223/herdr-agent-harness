@@ -88,6 +88,8 @@ cmd_help_topic() {
     ask    Provider 기본값 — 도구 실행마다 물어본다
     auto   파일 편집·작업 트리 안의 명령은 자동 승인 (기본값)
     bypass 도구 실행 승인을 전부 건너뛴다
+  역할별로 다르게 주려면 생성 후 agent-policy.yaml의
+  worker_approval_mode·reviewer_approval_mode를 채운다(빈 값이면 전역을 쓴다).
 
 예시:
   $SCRIPT_NAME init ~/Projects/snmp-normalizer \\
@@ -274,6 +276,15 @@ EOF
   쓰인 모드와 인수는 Attempt·Evidence 문서에 남는다.
   이 파일이 없는 기존 프로젝트(init 이전 버전)에서는 인수를 붙이지 않는다 —
   ask와 같게 동작하므로, 필요하면 파일을 직접 만들어 넣는다.
+
+  역할별 오버라이드: worker_approval_mode·reviewer_approval_mode를 적으면 그
+  역할에만 전역 approval_mode보다 먼저 적용된다. 우선순위는
+  <role>_approval_mode > approval_mode > ask이고, 빈 값은 미지정이라 전역으로
+  떨어진다(키가 없는 기존 정책은 동작이 그대로다). Reviewer만 승인 화면 없이
+  돌리고 Worker의 Provider Sandbox는 유지하는 식으로 역할별 최소 권한을 주는
+  용도이며, 허용 인수 목록은 넓어지지 않는다.
+  전역 키는 관용적이지만(유효하지 않으면 경고 후 ask) 역할 키는 엄격하다 —
+  ask|auto|bypass가 아니면 Pane을 만들기 전에 dispatch를 거부한다.
 
 모델 선택:
   Task YAML은 역할별 *_model, *_tier, *_effort를 선택적으로 선언한다. 모델

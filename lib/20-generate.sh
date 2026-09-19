@@ -14,6 +14,9 @@ write_project_templates() {
   local root="$1"
   DOC_NAME="$2" DOC_ORCHESTRATOR="$3" DOC_WORKER="$4" DOC_REVIEWER="$5" DOC_FALLBACK="$6"
   DOC_APPROVAL_MODE="${7:-auto}"
+  # 역할 오버라이드의 기본값은 빈 값이다 — 지정하지 않으면 전역 approval_mode를
+  # 그대로 쓰는 종전 동작이어야 한다.
+  DOC_WORKER_APPROVAL_MODE='' DOC_REVIEWER_APPROVAL_MODE=''
   DOC_CLAUDE_AUTO='--permission-mode acceptEdits'
   DOC_CLAUDE_BYPASS='--permission-mode bypassPermissions'
   DOC_CODEX_AUTO='--ask-for-approval never --sandbox workspace-write'
@@ -54,6 +57,8 @@ write_project_templates() {
       fi
     done <<'POLICY_FIELDS'
 approval_mode:DOC_APPROVAL_MODE
+worker_approval_mode:DOC_WORKER_APPROVAL_MODE
+reviewer_approval_mode:DOC_REVIEWER_APPROVAL_MODE
 claude_auto:DOC_CLAUDE_AUTO
 claude_bypass:DOC_CLAUDE_BYPASS
 codex_auto:DOC_CODEX_AUTO

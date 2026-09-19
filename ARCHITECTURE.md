@@ -211,6 +211,12 @@ Agent가 기동되는 디렉터리는 기본값이 Harness 워크스페이스이
 
 사라지는 것은 **도구 단위 승인**뿐이며 상태 전이와 완료 승인은 그대로 사람 몫입니다. 정책 파일은 임의의 Provider 옵션을 넣는 통로가 아니라, Provider별·모드별로 허용 플래그와 값이 고정된 표입니다. 실제로 쓰인 모드와 인수는 Attempt·Evidence에 기록되고, 이 파일이 없는 예전 프로젝트에서는 인수를 붙이지 않습니다(= `ask`).
 
+승인 등급은 역할별로 나눌 수 있습니다. `<role>_approval_mode`(`worker_approval_mode`·`reviewer_approval_mode`)가 있으면 그 역할에만 전역 `approval_mode`보다 먼저 적용되고, 우선순위는 **역할 키 > 전역 > `ask`** 입니다. 전역 스칼라 하나만 있던 동안에는 Reviewer의 승인 화면 정지를 풀려고 전역을 `bypass`로 올리면 Worker의 Provider Sandbox까지 함께 풀렸습니다 — 역할 키는 그 결합을 끊기 위한 것입니다.
+
+해석은 `_runtime_resolve_approval_mode`(`lib/50-runtime.sh`) 한 곳에서만 하고, 승인 인수를 만드는 `_runtime_agent_args`와 기록용 문자열을 만드는 `_runtime_approval_mode`가 같은 해석기를 씁니다. 둘이 갈라지면 역할 오버라이드가 걸렸는데 Attempt에는 전역 값이 남아 감사 기록이 거짓이 됩니다.
+
+빈 문자열은 "미지정"이라 전역으로 떨어지고, 키가 없는 기존 정책은 동작이 그대로입니다. 오버라이드는 `_runtime_agent_arg_allowlist`를 넓히지 않습니다 — 역할이 고른 모드의 `<provider>_<mode>` 값은 여전히 같은 모드별 검사를 통과해야 합니다. 전역 키는 유효하지 않으면 경고 후 `ask`로 취급하는 기존 관용을 유지하지만(하위 호환), 역할 키는 유효하지 않으면 Pane 생성 전에 dispatch를 거부합니다. 관용적 폴백은 "적힌 값과 실제 적용 값이 다른" 상태를 만들고, 특히 `ask`로 떨어뜨리면 Agent가 첫 명령에서 멈춰 이 경로가 없애려는 ORPHAN이 그대로 재현됩니다.
+
 모델 선택은 도구 승인 인수와 분리된 타입 있는 경로다. Task YAML의 역할별
 `worker_model`/`reviewer_model` → Task의 `worker_tier`/`reviewer_tier` →
 `agent-policy.yaml`의 `worker_default_tier`/`reviewer_default_tier` →

@@ -120,11 +120,12 @@ cmd_dispatch() {
   local selected_effort effort_source effort_record
   local model_degradation="" model_failure_reason="" model_quarantine=""
   local -a agent_args=()
-  approval_mode="$(_runtime_approval_mode "$root")"
+  # 역할을 넘긴다 — 정책의 <role>_approval_mode가 전역보다 우선한다.
+  approval_mode="$(_runtime_approval_mode "$root" "$role")"
   # _runtime_agent_args는 die하지 않고 반환값으로 실패를 알린다 — auto-step처럼
   # cmd_dispatch가 커맨드 치환 안에서 불릴 때 안쪽 die가 삼켜지면 검증 실패가
   # 조용한 무인수 실행으로 바뀌기 때문이다. 여기서 명시적으로 멈춘다.
-  if ! approval_args_raw="$(_runtime_agent_args "$root" "$provider")"; then
+  if ! approval_args_raw="$(_runtime_agent_args "$root" "$provider" "$role")"; then
     die "agent-policy.yaml의 승인 정책 값이 유효하지 않아 dispatch를 중단합니다."
   fi
   read -r -a agent_args <<<"$approval_args_raw"

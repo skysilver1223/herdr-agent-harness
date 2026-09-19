@@ -11,6 +11,26 @@ agent_policy:
   #          범위가 묶인 프로젝트에서만 쓴다.
   approval_mode: '@@APPROVAL_MODE@@'
 
+  # 역할별 오버라이드. 우선순위는 <role>_approval_mode > approval_mode > ask이며,
+  # 빈 값은 "미지정"이라 전역 approval_mode로 떨어진다(기본값 = 빈 값 = 종전 동작).
+  #
+  # 역할마다 필요한 권한이 다를 때 쓴다. Reviewer는 Write Scope가 리뷰 문서로
+  # 묶여 있어 셸 명령을 자유롭게 돌려야 하고, Worker는 Provider Sandbox를
+  # 유지하는 편이 낫다 — 전역 스칼라 하나로는 Reviewer를 올리려다 Worker의
+  # 샌드박스까지 함께 풀린다.
+  #
+  #   worker_approval_mode: 'auto'      # Worker는 샌드박스 유지
+  #   reviewer_approval_mode: 'bypass'  # Reviewer만 승인 화면 없이
+  #
+  # 이 키는 역할별로 **최소 권한**을 주기 위한 것이지 Worker 등급을 올리는
+  # 용도가 아니다. 오버라이드는 허용 인수 목록을 넓히지 않는다 — 선택된 모드의
+  # <provider>_<mode> 값은 그대로 같은 검사를 통과해야 한다.
+  #
+  # 전역 approval_mode와 달리 이 키는 엄격하다. ask|auto|bypass가 아닌 값이면
+  # 경고 후 넘어가지 않고 Pane을 만들기 전에 dispatch를 거부한다.
+  worker_approval_mode: '@@WORKER_APPROVAL_MODE@@'
+  reviewer_approval_mode: '@@REVIEWER_APPROVAL_MODE@@'
+
   # approval_mode를 Provider CLI 인수로 옮기는 표. dispatch는 이 값을 공백으로
   # 나눠 `herdr agent start ... -- <인수>`로 그대로 넘긴다. 빈 값이면 인수를
   # 붙이지 않는다(= 그 Provider는 ask와 같게 동작한다).

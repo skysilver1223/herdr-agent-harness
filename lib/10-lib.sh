@@ -157,6 +157,8 @@ emit_doc() {
       -e "s|@@ORCHESTRATOR@@|${DOC_ORCHESTRATOR}|g" \
       -e "s|@@FALLBACK@@|${DOC_FALLBACK}|g" \
       -e "s|@@APPROVAL_MODE@@|${DOC_APPROVAL_MODE:-auto}|g" \
+      -e "s|@@WORKER_APPROVAL_MODE@@|${DOC_WORKER_APPROVAL_MODE:-}|g" \
+      -e "s|@@REVIEWER_APPROVAL_MODE@@|${DOC_REVIEWER_APPROVAL_MODE:-}|g" \
       -e "s|@@CLAUDE_AUTO@@|${DOC_CLAUDE_AUTO:---permission-mode acceptEdits}|g" \
       -e "s|@@CLAUDE_BYPASS@@|${DOC_CLAUDE_BYPASS:---permission-mode bypassPermissions}|g" \
       -e "s|@@CODEX_AUTO@@|${DOC_CODEX_AUTO:---ask-for-approval never --sandbox workspace-write}|g" \
