@@ -588,7 +588,7 @@ _runtime_prompt_activity_unchanged() {
 
 _runtime_normalize_state() {
   local get_status="$1" get_output="$2" prompt_status="${3:-0}" prompt_output="${4:-}"
-  local baseline_output="${5:-}" baseline_available=0
+  local baseline_output="${5:-}" prompt_delivery="${6:-}" baseline_available=0
   local state combined display_state
   combined="$prompt_output $get_output"
   # Agent가 실제로 사라졌으면 다른 신호보다 agent_lost가 더 실행 가능한 정보다.
@@ -597,12 +597,9 @@ _runtime_normalize_state() {
     return
   fi
 
-  # 테스트와 독립 호출은 5번째 인수로 기준 JSON을 넘길 수 있다. dispatch는
-  # _runtime_wait_repl_ready가 프롬프트 직전에 잡아 둔 값을 사용한다.
+  # dispatch만 5번째 인수로 프롬프트 직전 기준 JSON을 넘긴다. observe는
+  # 이전 dispatch의 전역 기준값을 재사용하면 안 되므로 현재 상태만 본다.
   if (( $# >= 5 )); then
-    baseline_available=1
-  elif [[ "${RUNTIME_PROMPT_BASELINE_AVAILABLE:-0}" == 1 ]]; then
-    baseline_output="${RUNTIME_PROMPT_BASELINE_OUTPUT:-}"
     baseline_available=1
   fi
 
@@ -612,21 +609,25 @@ _runtime_normalize_state() {
     blocked) printf 'blocked' ;;
     unknown) printf 'unknown' ;;
     idle|done)
-      if (( baseline_available == 1 )) &&
-         _runtime_prompt_activity_unchanged "$baseline_output" "$get_output"; then
-        printf 'prompt_not_delivered'
-      elif (( baseline_available == 1 && prompt_status == 0 )); then
-        # 재전송 뒤 prompt_output에는 첫 실패 문자열도 남아 있다. 최신 전송이
-        # 성공했고 활동 지표가 변했다면 과거 stalled 문구보다 이 확인이 우선이다.
-        printf 'settled'
-      elif printf '%s' "$combined" | grep -qi 'agent_prompt_stalled'; then
-        printf 'stalled'
-      elif (( prompt_status != 0 )) &&
-           printf '%s' "$combined" | grep -Eqi 'timed?[ -]?out|timeout'; then
-        printf 'timeout'
-      else
-        printf 'settled'
-      fi
+      # revision/state_change_seq는 REPL 부팅 노이즈만으로도 움직인다. 따라서
+      # 이 함수는 두 값의 변화로 delivered/settled를 추론하지 않는다. dispatch가
+      # 프롬프트 전송과 병행해 수집한 명시적인 양성 신호만 전달 결과가 된다.
+      case "$prompt_delivery" in
+        prompt_not_delivered|prompt_delivery_unconfirmed) printf '%s' "$prompt_delivery" ;;
+        confirmed) printf 'settled' ;;
+        *)
+          # observe처럼 전송 확인 문맥이 없는 호출은 Herdr의 현재 상태만
+          # 정규화한다. dispatch는 항상 여섯 번째 인수로 확인 결과를 넘긴다.
+          if (( baseline_available == 1 )); then
+            printf 'prompt_delivery_unconfirmed'
+          elif (( prompt_status != 0 )) &&
+               printf '%s' "$combined" | grep -Eqi 'timed?[ -]?out|timeout'; then
+            printf 'timeout'
+          else
+            printf 'settled'
+          fi
+          ;;
+      esac
       ;;
     *)
       display_state="${state:-(빈 값)}"
@@ -796,11 +797,11 @@ _runtime_context_packet() {
 # 화면에 먹히고 Agent는 아무 일도 하지 않은 채 idle로 남는다. 기존 구현은
 # 이 상태를 settled로 반환했지만 실제로는 한 턴도 돌지 않았다(agy에서 반복 관측).
 #
-# 그래서 (1) 프롬프트 전에 REPL이 안정적으로 idle인지 확인하고 활동 지표를
-# 기록한 뒤, (2) 전송 후에도 revision/state_change_seq가 둘 다 그대로인
-# idle/done을 prompt_not_delivered로 판정해 1회만 다시 보낸다. 기존
-# agent_prompt_stalled도 같은 1회 경로를 유지한다. Agent 출력에 Packet 본문이
-# 보이는지는 Provider 렌더링·스크롤백에 좌우되므로 전달 근거로 쓰지 않는다.
+# 그래서 (1) 프롬프트 전에 REPL이 안정적으로 idle/done인지 확인하고, (2) 전송
+# 대기와 병행해 안정 idle/done -> working 전이 또는 Provider별 Packet 유래 제목
+# 변화를 양성 신호로 확인한다. revision/state_change_seq 변화는 부팅 노이즈일 수
+# 있으므로 전달 근거가 아니다. Agent 출력에 Packet 본문이 보이는지도 Provider
+# 렌더링·스크롤백에 좌우되므로 전달 근거로 쓰지 않는다.
 # ---------------------------------------------------------------------------
 _runtime_wait_repl_ready() {
   local agent_name="$1" minimum_s="${2:-3}" deadline_s="${3:-40}"
@@ -817,8 +818,8 @@ _runtime_wait_repl_ready() {
     esac
     # 연속 2회 idle이어야 "안정"으로 본다 — 부팅 중 한 번 스치는 idle과 구분한다.
     if (( stable >= 2 )); then
-      # 프롬프트 직전의 revision/state_change_seq 기준값이다. 준비 확인에 쓴
-      # 직전 응답을 재사용하지 않고 한 번 더 읽어 그 사이의 변화를 놓치지 않는다.
+      # 프롬프트 직전 기준값이다. 준비 확인에 쓴 직전 응답을 재사용하지 않고
+      # 한 번 더 읽어 제목·상태 전이 비교의 기준을 확정한다.
       if status_line="$(herdr agent get "$agent_name" 2>/dev/null)"; then
         RUNTIME_PROMPT_BASELINE_OUTPUT="$status_line"
         RUNTIME_PROMPT_BASELINE_AVAILABLE=1
@@ -828,8 +829,8 @@ _runtime_wait_repl_ready() {
     sleep 2
     waited=$((waited + 2))
   done
-  # 준비 상한을 넘겨도 기존처럼 dispatch는 계속한다. 다만 가능한 경우에는
-  # 마지막 순간의 활동 지표를 잡아 거짓 settled 판정을 막는다.
+  # 준비 상한을 넘겨도 기존처럼 dispatch는 계속한다. 가능한 경우 마지막
+  # 응답을 제목·상태 전이 비교의 기준으로 남긴다.
   if status_line="$(herdr agent get "$agent_name" 2>/dev/null)"; then
     RUNTIME_PROMPT_BASELINE_OUTPUT="$status_line"
     RUNTIME_PROMPT_BASELINE_AVAILABLE=1
@@ -846,33 +847,103 @@ _runtime_repl_boot_seconds() {
   esac
 }
 
-# 첫 전송을 한 번 더 시도해도 안전한가.
-#
-# 프롬프트 전후 revision/state_change_seq가 둘 다 불변이고 Agent가 idle/done이면
-# Herdr 명령의 성공 여부와 무관하게 첫 텍스트가 처리되지 않은 경우다. 기존의
-# `agent_prompt_stalled` + idle/done 조건도 보조 신호로 유지한다. 반대로 활동
-# 지표가 변한 정상 턴은 화면에 Packet 헤더가 없더라도 절대 재전송하지 않는다.
-#
-# blocked는 신뢰 확인·승인 UI일 수 있다. 그 UI에 Enter를 자동 입력하거나
-# Prompt를 반복하지 않고, 호출자가 Evidence를 보고 사용자에게 묻도록 둔다.
+# dispatch의 프롬프트 확인 대기 상한. 이 대기는 `agent prompt --wait`와 동시에
+# 실행하므로 dispatch --timeout에 이 시간이 직렬로 더해지지 않는다. Herdr
+# start의 최대 300000ms와 별도로 15000ms보다 길게 관측하지 않으며, 호출자가
+# 더 짧은 --timeout을 주면 그 안으로 줄인다.
+_runtime_prompt_confirmation_timeout_ms() {
+  local dispatch_timeout_ms="$1" cap=15000
+  (( dispatch_timeout_ms < cap )) && cap="$dispatch_timeout_ms"
+  printf '%s' "$cap"
+}
+
+_runtime_title_is_prompt_derived() {
+  local provider="$1" task_id="$2" before_output="$3" after_output="$4"
+  local before_title after_title
+  before_title="$(_runtime_json_field "$before_output" terminal_title_stripped)"
+  after_title="$(_runtime_json_field "$after_output" terminal_title_stripped)"
+  case "$provider" in
+    # Codex는 Packet 요약과 " | TASK_ID"를 제목으로 만든다는 실측을 사용한다.
+    codex)
+      [[ -n "$after_title" && "$after_title" != "$before_title" &&
+         "$after_title" == *" | $task_id" ]]
+      ;;
+    # Claude 제목은 Packet 유래이나 task_id를 포함하지 않을 수 있으므로, 전송
+    # 직전 제목과 달라진 비어 있지 않은 제목만 보조 양성 신호로 쓴다.
+    claude) [[ -n "$after_title" && "$after_title" != "$before_title" ]] ;;
+    # agy는 셸 경로를 제목으로 남겨 Packet 유래를 증명하지 못한다.
+    agy) return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 안정 idle/done 기준값 뒤에 Agent가 working으로 전이했는지, 또는 Provider별
+# 제목이 Packet 유래로 바뀌었는지를 기다린다. 반환값 대신 전역 값을 쓰는 이유는
+# get 실패 원문을 호출자가 Evidence에 보존하면서 set -e 아래에서도 멈추지 않게
+# 하기 위함이다.
+_runtime_wait_prompt_confirmation() {
+  local provider="$1" agent_name="$2" task_id="$3" baseline_output="$4" timeout_ms="$5"
+  local deadline_s status_line status=0 state
+  RUNTIME_PROMPT_CONFIRMATION="prompt_delivery_unconfirmed"
+  RUNTIME_PROMPT_CONFIRMATION_GET_OUTPUT=""
+  RUNTIME_PROMPT_CONFIRMATION_GET_STATUS=1
+  deadline_s=$(( SECONDS + (timeout_ms + 999) / 1000 ))
+  while :; do
+    if status_line="$(herdr agent get "$agent_name" 2>&1)"; then
+      status=0
+    else
+      status=$?
+    fi
+    RUNTIME_PROMPT_CONFIRMATION_GET_OUTPUT="$status_line"
+    RUNTIME_PROMPT_CONFIRMATION_GET_STATUS="$status"
+    if (( status == 0 )); then
+      state="$(_runtime_json_field "$status_line" agent_status)"
+      if [[ "$state" == working ]] ||
+         _runtime_title_is_prompt_derived "$provider" "$task_id" "$baseline_output" "$status_line"; then
+        RUNTIME_PROMPT_CONFIRMATION="confirmed"
+        return 0
+      fi
+      # 시작 양성 신호 없이 terminal 상태에 이르면, 부팅 노이즈가 revision을
+      # 바꿨더라도 전달을 증명하지 못한다. 이 경우만 기존 1회 재전송 후보다.
+      if [[ "$state" == idle || "$state" == done ]]; then
+        RUNTIME_PROMPT_CONFIRMATION="prompt_not_delivered"
+        return 1
+      fi
+      # blocked는 신뢰/승인 UI일 수 있다. 입력하거나 재전송하지 않고 상한까지
+      # 기다린 뒤 판정 불가로 남긴다.
+    fi
+    (( SECONDS >= deadline_s )) && break
+    sleep 1
+  done
+  return 1
+}
+
+# agent prompt의 --wait가 한 턴 종료를 기다리는 동안 위 확인을 병행한다.
+# 따라서 확인 대기 상한은 --timeout 뒤에 추가로 붙지 않으며, prompt 프로세스는
+# 항상 wait해 회수하므로 백그라운드/고아 프로세스를 남기지 않는다.
+_runtime_prompt_with_confirmation() {
+  local provider="$1" agent_name="$2" task_id="$3" prompt_text="$4" timeout_ms="$5"
+  local baseline_output="$6" confirmation_timeout_ms="$7" prompt_file prompt_pid status
+  prompt_file="$(mktemp "${TMPDIR:-/tmp}/herdr-harness-prompt.XXXXXX")"
+  herdr agent prompt "$agent_name" "$prompt_text" --wait --timeout "$timeout_ms" >"$prompt_file" 2>&1 &
+  prompt_pid=$!
+  _runtime_wait_prompt_confirmation "$provider" "$agent_name" "$task_id" \
+    "$baseline_output" "$confirmation_timeout_ms" || true
+  set +e
+  wait "$prompt_pid"
+  status=$?
+  set -e
+  RUNTIME_PROMPT_OUTPUT="$(<"$prompt_file")"
+  RUNTIME_PROMPT_STATUS="$status"
+  rm -f -- "$prompt_file"
+}
+
+# 첫 전송을 한 번 더 시도해도 안전한가는 양성 신호를 얻지 못한 terminal
+# 미전달에만 적용한다. 정상 전달은 working 전이/제목 신호로 confirmed가 되므로
+# 절대 중복 전송하지 않으며, blocked와 판정 불가는 사람이 확인한다.
 _runtime_prompt_needs_retry() {
-  local get_status="$1" get_output="$2" prompt_status="$3" prompt_output="$4"
-  local baseline_output="${5:-}" baseline_available=0 state
-  if (( $# >= 5 )); then
-    baseline_available=1
-  elif [[ "${RUNTIME_PROMPT_BASELINE_AVAILABLE:-0}" == 1 ]]; then
-    baseline_output="${RUNTIME_PROMPT_BASELINE_OUTPUT:-}"
-    baseline_available=1
-  fi
-  state="$(_runtime_json_field "$get_output" agent_status)"
-  if (( get_status == 0 && baseline_available == 1 )) &&
-     [[ "$state" == idle || "$state" == done ]] &&
-     _runtime_prompt_activity_unchanged "$baseline_output" "$get_output"; then
-    return 0
-  fi
-  (( prompt_status != 0 && get_status == 0 )) || return 1
-  printf '%s' "$prompt_output" | grep -qi 'agent_prompt_stalled' || return 1
-  [[ "$state" == idle || "$state" == done ]]
+  local confirmation="${1:-}"
+  [[ "$confirmation" == prompt_not_delivered ]]
 }
 
 # ---------------------------------------------------------------------------

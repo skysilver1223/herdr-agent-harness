@@ -221,7 +221,7 @@ _herdr_harness_subcommand_help() {
     "validate::상태를 바꾸지 않고 정합성만 검사" \
     "transition::Task 상태를 전이표에 따라 전이" \
     "approve::사용자 승인 기록 후 completed로 전이" \
-    "dispatch::기존 Agent 중복을 막고 역할+모델 정책으로 한 턴 실행" \
+    "dispatch::중복 Agent를 막고 양성 신호로 프롬프트 전달을 확인해 한 턴 실행" \
     "observe::실행 중인 Agent 출력을 다시 읽어 갱신" \
     "adopt::사람이 직접 띄운 Agent를 Harness에 등록" \
     "close-agent::Harness가 만든 Agent Pane 정리" \

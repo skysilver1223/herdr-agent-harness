@@ -3979,6 +3979,11 @@ REPORT_JSON_CHECK
       RUNTIME_PROMPT_BASELINE_OUTPUT='{"agent_status":"idle","revision":1,"state_change_seq":1}'
       RUNTIME_PROMPT_BASELINE_AVAILABLE=1
     }
+    _runtime_prompt_with_confirmation() {
+      RUNTIME_PROMPT_OUTPUT='ok'
+      RUNTIME_PROMPT_STATUS=0
+      RUNTIME_PROMPT_CONFIRMATION=confirmed
+    }
     _runtime_warn_model_policy_mismatch() { :; }
     HERDR_ENV=1 cmd_dispatch "$review_report_project" task-review-report reviewer
   )" || die "Review 경로 이탈 fixture dispatch가 실패했습니다."
@@ -3993,54 +3998,57 @@ REPORT_JSON_CHECK
   grep -q '규정 경로 .*task-review-report' "$review_report_yaml" ||
     die "Reviewer Review 경로 이탈이 정본 Evidence 요약에 기록되지 않았습니다."
 
-  # --- 프롬프트 전달 재시도 판정 --------------------------------------------
-  #
-  # 출력에 Packet 헤더가 있는지는 Provider UI·스크롤백에 좌우되므로 신호가
-  # 아니다. Herdr가 lifecycle을 못 봤다(agent_prompt_stalled) + Agent가 아직
-  # idle일 때만 한 번 재시도해야 정상 턴을 중복 실행하지 않는다.
-  _runtime_prompt_needs_retry 0 '{"agent_status":"idle"}' 1 'agent_prompt_stalled' ||
-    die "idle 상태의 유실된 프롬프트를 재시도 대상으로 판정하지 못했습니다."
-  ! _runtime_prompt_needs_retry 0 '{"agent_status":"done"}' 0 'agent_prompt_stalled' ||
-    die "정상 종료된 프롬프트를 재시도 대상으로 판정했습니다."
-  ! _runtime_prompt_needs_retry 0 '{"agent_status":"blocked"}' 1 'agent_prompt_stalled' ||
-    die "확인/승인 UI가 막힌 프롬프트를 자동 재시도 대상으로 판정했습니다."
-  ! _runtime_prompt_needs_retry 0 '{"agent_status":"idle"}' 1 'other failure' ||
-    die "원인을 모르는 프롬프트 실패를 재시도 대상으로 판정했습니다."
+  # --- 프롬프트 전달 양성 신호 ----------------------------------------------
+  # Agent 출력이 아니라 Herdr의 안정 idle/done -> working 전이와, codex/claude
+  # 에서만 Packet 유래 제목 변화를 확인한다.
+  _runtime_prompt_needs_retry prompt_not_delivered ||
+    die "확인된 미전달을 재시도 대상으로 판정하지 못했습니다."
+  ! _runtime_prompt_needs_retry confirmed ||
+    die "양성 신호가 확인된 정상 턴을 재시도 대상으로 판정했습니다."
+  ! _runtime_prompt_needs_retry prompt_delivery_unconfirmed ||
+    die "판정 불가 턴을 자동 재시도 대상으로 판정했습니다."
 
   # --- Herdr Agent 상태 정규화 ---------------------------------------------
   # 실제 CLI가 반환하는 다섯 상태와 프롬프트 전후 활동 지표를 JSON 표본으로만
   # 검사한다. 여기서 herdr를 부르면 자체 테스트가 Agent 쿼터를 소모한다.
-  local activity_before activity_changed idle_unchanged done_unchanged
-  local normalized unknown_warning
-  activity_before='{"agent_status":"idle","revision":1,"state_change_seq":7}'
-  activity_changed='{"agent_status":"idle","revision":2,"state_change_seq":8}'
-  idle_unchanged='{"agent_status":"idle","revision":1,"state_change_seq":7}'
-  done_unchanged='{"agent_status":"done","revision":1,"state_change_seq":7}'
+  local activity_before activity_changed boot_noise_done
+  local normalized unknown_warning legacy_boot_noise_result
+  activity_before='{"agent_status":"idle","revision":1,"state_change_seq":7,"terminal_title_stripped":"task-028"}'
+  activity_changed='{"agent_status":"done","revision":2,"state_change_seq":8,"terminal_title_stripped":"개선 | task-028"}'
+  boot_noise_done='{"agent_status":"done","revision":2,"state_change_seq":47,"terminal_title_stripped":"task-028"}'
 
-  [[ "$(_runtime_normalize_state 0 '{"agent_status":"working","revision":2,"state_change_seq":8}' 0 '' "$activity_before")" == running ]] ||
+  _runtime_title_is_prompt_derived codex task-028 "$activity_before" "$activity_changed" ||
+    die "codex Packet 유래 제목을 양성 신호로 판정하지 못했습니다."
+  ! _runtime_title_is_prompt_derived agy task-028 "$activity_before" "$activity_changed" ||
+    die "agy 셸 제목을 Packet 유래 양성 신호로 사용했습니다."
+  [[ "$(_runtime_normalize_state 0 '{"agent_status":"working","revision":2,"state_change_seq":8}' 0 '' "$activity_before" confirmed)" == running ]] ||
     die "working을 running으로 정규화하지 못했습니다(정상 작업 회귀)."
-  [[ "$(_runtime_normalize_state 0 "$activity_changed" 0 '' "$activity_before")" == settled ]] ||
-    die "활동 지표가 변한 idle을 settled로 정규화하지 못했습니다."
-  [[ "$(_runtime_normalize_state 0 '{"agent_status":"done","revision":2,"state_change_seq":8}' 0 '' "$activity_before")" == settled ]] ||
-    die "활동 지표가 변한 done을 settled로 정규화하지 못했습니다."
-  [[ "$(_runtime_normalize_state 0 '{"agent_status":"done","revision":2,"state_change_seq":8}' 0 'agent_prompt_stalled' "$activity_before")" == settled ]] ||
-    die "재전송 성공 뒤 남은 이전 stalled 문구를 현재 실패로 오판했습니다."
+  [[ "$(_runtime_normalize_state 0 "$activity_changed" 0 '' "$activity_before" confirmed)" == settled ]] ||
+    die "확인된 terminal 상태를 settled로 정규화하지 못했습니다."
+  [[ "$(_runtime_normalize_state 0 "$boot_noise_done" 0 '' "$activity_before" prompt_not_delivered)" == prompt_not_delivered ]] ||
+    die "양성 신호 없는 terminal 상태를 prompt_not_delivered로 분리하지 못했습니다."
   [[ "$(_runtime_normalize_state 0 '{"agent_status":"blocked","revision":1,"state_change_seq":7}' 0 '' "$activity_before")" == blocked ]] ||
     die "blocked 정규화가 기존 결과를 보존하지 못했습니다."
   [[ "$(_runtime_normalize_state 0 '{"agent_status":"unknown","revision":1,"state_change_seq":7}' 0 '' "$activity_before")" == unknown ]] ||
     die "unknown을 error와 분리하지 못했습니다."
 
-  normalized="$(_runtime_normalize_state 0 "$idle_unchanged" 0 '' "$activity_before")"
+  if _runtime_prompt_activity_unchanged "$activity_before" "$boot_noise_done"; then
+    legacy_boot_noise_result=prompt_not_delivered
+  else
+    legacy_boot_noise_result=settled
+  fi
+  [[ "$legacy_boot_noise_result" == settled ]] ||
+    die "부팅 노이즈 fixture가 구 구현의 settled 오판을 재현하지 못했습니다."
+  normalized="$(_runtime_normalize_state 0 "$boot_noise_done" 0 '' "$activity_before" prompt_not_delivered)"
   [[ "$normalized" == prompt_not_delivered ]] ||
-    die "활동 지표가 불변인 idle을 prompt_not_delivered로 판정하지 못했습니다: $normalized"
-  normalized="$(_runtime_normalize_state 0 "$done_unchanged" 0 '' "$activity_before")"
-  [[ "$normalized" == prompt_not_delivered && "$normalized" != settled ]] ||
-    die "활동 지표가 불변인 done을 거짓 settled로 판정했습니다: $normalized"
+    die "부팅 노이즈 fixture가 새 구현에서 미전달로 바뀌지 않았습니다: $normalized"
+  [[ "$(_runtime_prompt_confirmation_timeout_ms 300000)" == 15000 && "$(_runtime_prompt_confirmation_timeout_ms 5000)" == 5000 ]] ||
+    die "프롬프트 확인 대기 상한이 dispatch --timeout 안으로 제한되지 않습니다."
   [[ "$(_runtime_normalize_state 1 '' 0 '' "$activity_before")" == agent_lost ]] ||
     die "agent get 실패의 agent_lost 결과를 보존하지 못했습니다."
 
   unknown_warning="$(mktemp)"
-  normalized="$(_runtime_normalize_state 0 '{"agent_status":"rebooting","revision":2,"state_change_seq":8}' 0 '' "$activity_before" 2>"$unknown_warning")"
+  normalized="$(_runtime_normalize_state 0 '{"agent_status":"rebooting","revision":2,"state_change_seq":8}' 0 '' "$activity_before" confirmed 2>"$unknown_warning")"
   [[ "$normalized" == unknown ]] || {
     rm -f -- "$unknown_warning"
     die "미지의 agent_status를 unknown으로 정규화하지 못했습니다: $normalized"
@@ -4051,10 +4059,70 @@ REPORT_JSON_CHECK
   }
   rm -f -- "$unknown_warning"
 
-  _runtime_prompt_needs_retry 0 "$idle_unchanged" 0 '' "$activity_before" ||
-    die "지표 불변으로 확인된 prompt_not_delivered를 1회 재시도 대상으로 판정하지 못했습니다."
-  ! _runtime_prompt_needs_retry 0 "$activity_changed" 0 '' "$activity_before" ||
-    die "지표가 변한 정상 idle을 재시도 대상으로 판정했습니다."
+  # dispatch 전체 fixture: 정상 전달은 working 양성 신호 후 재전송하지 않고,
+  # 부팅 노이즈 미전달은 별도 결과·Evidence·event로 남긴다. 상태 파일을 써서
+  # 백그라운드 prompt와 get 호출 순서도 실제 Agent 없이 결정적으로 고정한다.
+  local prompt_signal_project prompt_signal_output prompt_signal_log prompt_signal_state
+  prompt_signal_project="$test_root/prompt-signal-project"
+  cp -a "$test_project" "$prompt_signal_project"
+  prompt_signal_log="$test_root/prompt-signal.log"
+  prompt_signal_state="$test_root/prompt-signal.state"
+  printf '0\n' >"$prompt_signal_state"
+  prompt_signal_output="$(
+    herdr() {
+      case "${1:-}:${2:-}" in
+        pane:split) printf '{"pane_id":"wSIGNAL:p1"}\n' ;;
+        agent:start) printf 'ok\n' ;;
+        agent:prompt) printf 'prompt\n' >>"$prompt_signal_log"; printf 'ok\n' ;;
+        agent:get)
+          local n; n="$(<"$prompt_signal_state")"; n=$((n + 1)); printf '%s\n' "$n" >"$prompt_signal_state"
+          if (( n == 1 )); then
+            printf '{"agent_status":"working","revision":1,"state_change_seq":7,"terminal_title_stripped":"task-001"}\n'
+          else
+            printf '{"agent_status":"done","revision":1,"state_change_seq":8,"terminal_title_stripped":"task-001"}\n'
+          fi ;;
+        agent:read) printf 'normal completed turn\n' ;;
+        *) return 125 ;;
+      esac
+    }
+    _runtime_wait_repl_ready() { RUNTIME_PROMPT_BASELINE_OUTPUT='{"agent_status":"idle","revision":1,"state_change_seq":7,"terminal_title_stripped":"task-001"}'; RUNTIME_PROMPT_BASELINE_AVAILABLE=1; }
+    _runtime_warn_model_policy_mismatch() { :; }
+    HERDR_ENV=1 cmd_dispatch "$prompt_signal_project" task-001 reviewer
+  )" || die "정상 전달 fixture dispatch가 실패했습니다."
+  printf '%s' "$prompt_signal_output" | grep -q '^dispatch_result=settled$' ||
+    die "정상 전달 fixture가 settled로 끝나지 않았습니다."
+  [[ "$(wc -l <"$prompt_signal_log")" == 1 ]] ||
+    die "정상 전달 fixture에서 Prompt가 재전송됐습니다."
+
+  local prompt_missing_project prompt_missing_output prompt_missing_log
+  prompt_missing_project="$test_root/prompt-missing-project"
+  cp -a "$test_project" "$prompt_missing_project"
+  prompt_missing_log="$test_root/prompt-missing.log"
+  prompt_missing_output="$(
+    herdr() {
+      case "${1:-}:${2:-}" in
+        pane:split) printf '{"pane_id":"wMISSING:p1"}\n' ;;
+        agent:start) printf 'ok\n' ;;
+        agent:prompt) printf 'prompt\n' >>"$prompt_missing_log"; printf 'ok\n' ;;
+        agent:get) printf '{"agent_status":"done","revision":2,"state_change_seq":47,"terminal_title_stripped":"task-001"}\n' ;;
+        agent:read) printf '> Ask Codex to do anything\n' ;;
+        *) return 125 ;;
+      esac
+    }
+    _runtime_wait_repl_ready() { RUNTIME_PROMPT_BASELINE_OUTPUT='{"agent_status":"idle","revision":1,"state_change_seq":7,"terminal_title_stripped":"task-001"}'; RUNTIME_PROMPT_BASELINE_AVAILABLE=1; }
+    _runtime_warn_model_policy_mismatch() { :; }
+    HERDR_ENV=1 cmd_dispatch "$prompt_missing_project" task-001 reviewer
+  )" || die "미전달 fixture dispatch가 실패했습니다."
+  printf '%s' "$prompt_missing_output" | grep -q '^dispatch_result=prompt_not_delivered$' ||
+    die "양성 신호 없는 미전달 fixture가 settled로 끝났습니다."
+  [[ "$(wc -l <"$prompt_missing_log")" == 2 ]] ||
+    die "미전달 fixture의 재전송 상한(1회)을 지키지 못했습니다."
+  local prompt_missing_raw
+  prompt_missing_raw="$(find "$prompt_missing_project/.harness/evidence/raw" -name 'task-001-reviewer-attempt-*.md' -type f | sort | tail -n 1)"
+  grep -q 'Prompt 전달 확인: prompt_not_delivered' "$prompt_missing_raw" ||
+    die "미전달 판정이 raw Evidence에 기록되지 않았습니다."
+  grep -q 'prompt_delivery=prompt_not_delivered' "$prompt_missing_project/.harness/evidence/events.tsv" ||
+    die "미전달 판정이 dispatch event에 기록되지 않았습니다."
 
   # --- Secret 스캐너: 낱말 가운데 접두사는 오탐이 아니어야 한다 -------------
   #
@@ -4217,6 +4285,10 @@ EOF
     'PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정'
     'PASS: Review 경로 이탈 보고 (규정 경로 누락을 결과·Evidence에 기록, dispatch 비실패)'
     'PASS: Agent 상태 정규화'
+    'PASS: 프롬프트 전달 양성 신호'
+    'PASS: 프롬프트 미전달 구분 보고'
+    'PASS: 부팅 노이즈 오판 차단'
+    'PASS: 정상 전달 무재전송'
     'PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)'
     'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)'
     'PASS: AC 전수 실행 대조 (선언·기록 개수 불일치 거부, 누락 criterion_id 보고)'

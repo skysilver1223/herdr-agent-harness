@@ -332,6 +332,10 @@ PASS: 역할별 읽기 지침 정합 및 Context 보존
 PASS: dispatch 추가 지시(--extra-prompt 주입·순서·Secret 차단)와 안전한 프롬프트 재시도 판정
 PASS: Review 경로 이탈 보고 (규정 경로 누락을 결과·Evidence에 기록, dispatch 비실패)
 PASS: Agent 상태 정규화
+PASS: 프롬프트 전달 양성 신호
+PASS: 프롬프트 미전달 구분 보고
+PASS: 부팅 노이즈 오판 차단
+PASS: 정상 전달 무재전송
 PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)
 PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)
 PASS: AC 전수 실행 대조 (선언·기록 개수 불일치 거부, 누락 criterion_id 보고)

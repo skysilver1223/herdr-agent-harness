@@ -42,7 +42,7 @@ cmd_dispatch() {
   local root task_file runtime_dir context provider attempt started_at baseline
   local pane_output pane_status pane_id agent_name start_output start_status
   local prompt_output prompt_status get_output get_status read_output read_status result
-  local prompt_resent=0
+  local prompt_resent=0 prompt_confirmation="" prompt_confirmation_wait_ms=0
   local attempt_file evidence_file temporary
   # Reviewer 산출물은 Agent 화면 밖의 규정 경로에만 유효하다. Provider가 다른
   # 경로에 파일을 썼어도 Harness가 임의로 옮기지는 않고, 이 dispatch 직후 사람이
@@ -285,32 +285,43 @@ cmd_dispatch() {
     # Provider REPL이 입력을 받을 수 있게 될 때까지 기다린다. 이 대기가 없으면
     # 부팅·신뢰 확인·로그인 화면이 Packet을 먹고 Agent는 idle로 남는다.
     _runtime_wait_repl_ready "$agent_name" "$(_runtime_repl_boot_seconds "$provider")"
+    prompt_confirmation_wait_ms="$(_runtime_prompt_confirmation_timeout_ms "$timeout")"
+    _runtime_prompt_with_confirmation "$provider" "$agent_name" "$task_id" "$(cat "$context")" \
+      "$timeout" "${RUNTIME_PROMPT_BASELINE_OUTPUT:-}" "$prompt_confirmation_wait_ms"
+    prompt_output="$RUNTIME_PROMPT_OUTPUT"
+    prompt_status="$RUNTIME_PROMPT_STATUS"
+    prompt_confirmation="$RUNTIME_PROMPT_CONFIRMATION"
+    # 확인 중 읽은 상태는 working 양성 신호를 보존한다. 최종 상태는 prompt
+    # --wait가 끝난 뒤 별도로 읽어 settled/running을 정규화한다.
     set +e
-    prompt_output="$(herdr agent prompt "$agent_name" "$(cat "$context")" --wait --timeout "$timeout" 2>&1)"
-    prompt_status=$?
     get_output="$(herdr agent get "$agent_name" 2>&1)"
     get_status=$?
     read_output="$(herdr agent read "$agent_name" --source recent-unwrapped --lines 200 2>&1)"
     read_status=$?
     set -e
-    result="$(_runtime_normalize_state "$get_status" "$get_output" "$prompt_status" "$prompt_output")"
+    result="$(_runtime_normalize_state "$get_status" "$get_output" "$prompt_status" "$prompt_output" \
+      "${RUNTIME_PROMPT_BASELINE_OUTPUT:-}" "$prompt_confirmation")"
 
     # Herdr가 lifecycle 변화를 관측하지 못했고 Agent도 계속 idle인 경우에만
     # 재전송한다. 정상 settled 턴은 화면 출력에 Packet 본문이 보이지 않아도
     # 이미 실행된 것이므로 재전송하면 안 된다.
-    if _runtime_prompt_needs_retry "$get_status" "$get_output" "$prompt_status" "$prompt_output"; then
+    if _runtime_prompt_needs_retry "$prompt_confirmation"; then
       info "Provider REPL이 첫 프롬프트를 받지 않은 것으로 확인됐습니다 — 1회 재전송합니다."
       prompt_resent=1
       _runtime_wait_repl_ready "$agent_name" 3
+      _runtime_prompt_with_confirmation "$provider" "$agent_name" "$task_id" "$(cat "$context")" \
+        "$timeout" "${RUNTIME_PROMPT_BASELINE_OUTPUT:-}" "$prompt_confirmation_wait_ms"
+      prompt_output="$prompt_output"$'\n'"$RUNTIME_PROMPT_OUTPUT"
+      prompt_status="$RUNTIME_PROMPT_STATUS"
+      prompt_confirmation="$RUNTIME_PROMPT_CONFIRMATION"
       set +e
-      prompt_output="$prompt_output"$'\n'"$(herdr agent prompt "$agent_name" "$(cat "$context")" --wait --timeout "$timeout" 2>&1)"
-      prompt_status=$?
       get_output="$(herdr agent get "$agent_name" 2>&1)"
       get_status=$?
       read_output="$(herdr agent read "$agent_name" --source recent-unwrapped --lines 200 2>&1)"
       read_status=$?
       set -e
-      result="$(_runtime_normalize_state "$get_status" "$get_output" "$prompt_status" "$prompt_output")"
+      result="$(_runtime_normalize_state "$get_status" "$get_output" "$prompt_status" "$prompt_output" \
+        "${RUNTIME_PROMPT_BASELINE_OUTPUT:-}" "$prompt_confirmation")"
     fi
   fi
 
@@ -353,7 +364,7 @@ cmd_dispatch() {
   temporary="$(mktemp "$root/.harness/evidence/.capture.XXXXXX")"
   {
     printf '# Evidence: %s / %s / Attempt %s\n\n' "$task_id" "$role" "$attempt"
-    printf -- '- Captured: %s\n- Dispatch result: %s\n- Model: %s\n- Model source: %s\n- Model approval: %s\n- Model degradation: %s\n- Effort: %s\n- Effort source: %s\n- Model failure reason: %s\n- Model quarantine: %s\n- Approval mode: %s\n- Prompt exit: %s\n- Agent get exit: %s\n- Agent read exit: %s\n- Prompt 재전송: %s\n- 추가 지시 파일: %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$result" "$model_record" "$model_source" "$model_approval" "${model_degradation:-(없음)}" "$effort_record" "$effort_source" "${model_failure_reason:-(없음)}" "${model_quarantine:-(없음)}" "$approval_mode" "$prompt_status" "$get_status" "$read_status" "$( ((prompt_resent==1)) && printf 'yes(1회)' || printf 'no')" "${extra_prompt:-(없음)}"
+    printf -- '- Captured: %s\n- Dispatch result: %s\n- Model: %s\n- Model source: %s\n- Model approval: %s\n- Model degradation: %s\n- Effort: %s\n- Effort source: %s\n- Model failure reason: %s\n- Model quarantine: %s\n- Approval mode: %s\n- Prompt exit: %s\n- Prompt 전달 확인: %s (대기 상한 %sms)\n- Agent get exit: %s\n- Agent read exit: %s\n- Prompt 재전송: %s\n- 추가 지시 파일: %s\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$result" "$model_record" "$model_source" "$model_approval" "${model_degradation:-(없음)}" "$effort_record" "$effort_source" "${model_failure_reason:-(없음)}" "${model_quarantine:-(없음)}" "$approval_mode" "$prompt_status" "${prompt_confirmation:-(해당 없음)}" "$prompt_confirmation_wait_ms" "$get_status" "$read_status" "$( ((prompt_resent==1)) && printf 'yes(1회)' || printf 'no')" "${extra_prompt:-(없음)}"
     if [[ -n "$start_failure_stage" ]]; then
       printf -- '- Start failure stage: %s\n- Start failure classification: %s\n- Pane cleanup: %s\n\n' \
         "$start_failure_stage" "$start_failure_class" "$pane_cleanup_summary"
@@ -392,7 +403,7 @@ cmd_dispatch() {
   rm -f -- "$temporary"
   # 정본은 판단에 쓰이는 6필드 YAML이다. Reviewer와 transition은 이것만 읽는다.
   local evidence_summary
-  evidence_summary="dispatch 결과 $result (Provider $provider, 모델 $model_record, 출처 $model_source, 속도 $effort_record, 속도 출처 $effort_source, 프리미엄 모델 승인 $model_approval, 모델 강등 ${model_degradation:-(없음)}, 모델 실패 ${model_failure_reason:-(없음)}, 승인 모드 $approval_mode). 원문은 raw 참조."
+  evidence_summary="dispatch 결과 $result (Provider $provider, 프롬프트 전달 확인 ${prompt_confirmation:-(해당 없음)}, 확인 대기 상한 ${prompt_confirmation_wait_ms}ms, 모델 $model_record, 출처 $model_source, 속도 $effort_record, 속도 출처 $effort_source, 프리미엄 모델 승인 $model_approval, 모델 강등 ${model_degradation:-(없음)}, 모델 실패 ${model_failure_reason:-(없음)}, 승인 모드 $approval_mode). 원문은 raw 참조."
   if [[ -n "$start_failure_stage" ]]; then
     evidence_summary="$evidence_summary 실패 단계 $start_failure_stage, 분류 $start_failure_class, Pane 정리 $pane_cleanup_summary."
   fi
@@ -402,13 +413,17 @@ cmd_dispatch() {
   _runtime_write_evidence_yaml "$root" "$task_id" "$role" "$attempt" "$result" \
     "$evidence_summary" 0
   _runtime_write_result "$root" "$task_id" "$role" "$result"
-  append_event "$root" dispatch "$task_id" "$role" "$result" "provider=$provider pane=$pane_id attempt=$attempt${review_artifact_status:+ review_artifact=$review_artifact_status}"
+  append_event "$root" dispatch "$task_id" "$role" "$result" "provider=$provider pane=$pane_id attempt=$attempt prompt_delivery=${prompt_confirmation:-(not_applicable)} confirmation_wait_ms=$prompt_confirmation_wait_ms${review_artifact_status:+ review_artifact=$review_artifact_status}"
   if [[ "$review_artifact_status" == missing_required_path ]]; then
     printf '경고: %s\n' "$review_artifact_note" >&2
     printf 'review_artifact=missing_required_path\n'
   fi
   printf 'dispatch_result=%s\n' "$result"
-  [[ "$result" == settled || "$result" == blocked ]]
+  # 미전달/판정 불가는 Agent·Harness 오류가 아니라 사람이 확인할 관측 결과다.
+  # dispatch 자체를 실패 처리하면 Evidence·event는 남아도 호출자가 즉시 죽어
+  # task-025의 "알리되 죽이지 않는다" 원칙을 깨므로 성공 종료로 돌려준다.
+  [[ "$result" == settled || "$result" == blocked ||
+     "$result" == prompt_not_delivered || "$result" == prompt_delivery_unconfirmed ]]
 }
 
 # ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@ HARNESS_COMMAND_SUMMARIES=(
   "validate:상태를 바꾸지 않고 문서·정책·Git 정합성만 검사한다"
   "transition:Task 상태를 전이표와 게이트에 따라 강제 전이한다"
   "approve:사용자 승인을 기록하고 awaiting_approval을 completed로 만든다"
-  "dispatch:기존 Agent 중복을 막고 Task의 역할·모델 정책에 맞는 Agent를 한 턴 실행한다"
+  "dispatch:중복 Agent를 막고 양성 신호로 프롬프트 전달을 확인해 한 턴 실행한다"
   "observe:이미 실행 중인 Agent의 출력을 다시 읽어 Evidence를 갱신한다"
   "adopt:사람이 직접 띄운 Agent를 Harness 추적에 등록한다"
   "close-agent:Harness가 만든 Agent Pane을 정리한다"
@@ -429,9 +429,16 @@ agent start 실패 처리:
 
 프롬프트 전달 보장:
   Provider REPL이 입력을 받을 수 있을 때까지 기다린 뒤 보낸다(agy는 부팅이
-  느려 더 기다린다). Herdr가 lifecycle 변화를 못 봐 agent_prompt_stalled을
-  반환하고 Agent가 계속 idle일 때만 1회 다시 보낸다. 확인/승인 UI(blocked)는
-  자동 입력하지 않으며, 재전송 여부는 Evidence에 남는다.
+  느려 더 기다린다). 프롬프트 대기와 동시에 최대 15000ms(더 짧은 --timeout이면
+  그 값) 동안 안정 idle/done -> working 전이를 확인한다. codex·claude에서는
+  Packet 유래 terminal_title_stripped 변화도 보조 신호이며 agy 제목은 쓰지 않는다.
+  revision/state_change_seq 변화나 화면의 Packet 본문은 전달 근거가 아니다.
+
+  양성 신호 없이 idle/done으로 끝나면 prompt_not_delivered로 보고하고 최대 1회만
+  재전송한다. 대기 상한 동안 결론을 못 내리면 prompt_delivery_unconfirmed로
+  보고하며 settled/error로 바꾸거나 자동 재전송하지 않는다. 이 대기는 agent
+  prompt --wait와 병행하므로 --timeout 뒤에 추가 대기되지 않는다. blocked는
+  자동 입력하지 않으며, 확인 결과와 재전송 여부는 Event·Evidence에 남는다.
 EOF
       ;;
     observe) cat <<EOF

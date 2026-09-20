@@ -205,8 +205,9 @@ Review가 있는지 즉시 확인합니다. 없으면 `review_artifact=missing_r
 | Herdr `agent_status` | Harness 결과 | 판정 근거 |
 | --- | --- | --- |
 | `working` | `running` | 정상 진행 중이며 장애로 전이하지 않음 |
-| `idle`, `done` | `settled` | dispatch에서 프롬프트 전후 `revision`·`state_change_seq` 중 하나 이상이 변함 |
-| `idle`, `done` | `prompt_not_delivered` | dispatch에서 두 활동 지표가 모두 불변 |
+| `idle`, `done` | `settled` | dispatch 중 안정 idle/done → `working` 전이 또는 Provider별 Packet 유래 제목 양성 신호가 먼저 확인됨 |
+| `idle`, `done` | `prompt_not_delivered` | 양성 신호 없이 terminal 상태에 도달함(최대 1회 재전송 뒤에도 같음) |
+| 관측 상한 중 비terminal 상태·조회 실패 | `prompt_delivery_unconfirmed` | 양성 신호를 확인하지 못해 settled/error 어느 쪽으로도 추정하지 않음 |
 | `blocked` | `blocked` | 기존 의미 보존 |
 | `unknown` | `unknown` | 관측 실패를 Agent 장애와 분리 |
 | 그 밖의 값 | `unknown` + 원래 값 경고 | Herdr의 새 상태를 조용히 `error`로 뭉개지 않음 |
@@ -215,10 +216,20 @@ Review가 있는지 즉시 확인합니다. 없으면 `review_artifact=missing_r
 | 격리 모델을 건너뛴 턴이 `settled` | `model_degraded` | 강등을 정상 성공으로 숨기지 않음 |
 
 프롬프트 직전 기준값은 REPL 준비 확인 뒤 `herdr agent get`으로 한 번 더 읽습니다.
-`idle`/`done`인데 두 지표가 그대로면 프롬프트 명령의 종료 코드와 관계없이 유실로
-판정하고 기존 경로에서 최대 1회만 재전송합니다. 두 지표 중 하나라도 바뀌어야
-`settled`가 될 수 있습니다. Provider 출력 문자열은 판정 근거로 쓰지 않습니다.
-프롬프트 자체의 기존 `stalled`·`timeout`, 조회 전 기동 단계의 `error`도 유지합니다.
+그 뒤 `agent prompt --wait`와 **동시에** 최대 15000ms(더 짧은 `--timeout`이면 그 값)
+동안 안정 `idle`/`done` → `working` 전이를 확인합니다. 이것이 세 Provider 공통 양성
+신호입니다. codex는 `요약 | TASK_ID`, claude는 전송 전과 달라진 Packet 유래
+`terminal_title_stripped`도 보조 신호로 쓰지만, agy의 제목은 셸 경로라 쓰지 않습니다.
+`revision`·`state_change_seq`는 REPL 부팅 노이즈만으로도 바뀌므로 전달 근거가 아니며,
+화면에 Packet 본문이 보이는지도 판정에 쓰지 않습니다.
+
+양성 신호 없이 `idle`/`done`에 이르면 `prompt_not_delivered`로 보고하고 기존처럼 최대
+1회만 재전송합니다. 대기 상한에 도달하면 `prompt_delivery_unconfirmed`로 별도 보고하며
+`settled`·`error`로 추정하거나 재전송하지 않습니다. 확인 대기는 prompt wait와 병행하므로
+`dispatch --timeout` 뒤에 추가 시간을 붙이지 않고, prompt 프로세스를 항상 회수해 Pane을
+고아로 남기지 않습니다. `blocked`에는 자동 입력·재전송하지 않습니다. 확인 결과는 dispatch
+event와 raw/정본 Evidence에 함께 남습니다. 프롬프트 자체의 기존 `stalled`·`timeout`, 조회 전
+기동 단계의 `error`도 유지합니다.
 
 `--print-only`는 상태를 전혀 남기지 않고(Context Packet만 씀) 실행할 `herdr` 명령만 출력하는 폴백이며, `adopt`는 `herdr agent get`으로 생존을 확인한 뒤에만 등록합니다. `adopt`로 등록한 Pane은 사람이 만든 것이므로 `close-agent`가 `--force` 없이는 닫지 않습니다.
 
