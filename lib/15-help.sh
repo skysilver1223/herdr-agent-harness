@@ -251,7 +251,7 @@ EOF
       ;;
     transition) cat <<EOF
 구문:
-  $SCRIPT_NAME transition PATH TASK_ID TO_STATE [--note TEXT]
+  $SCRIPT_NAME transition PATH TASK_ID TO_STATE [--note TEXT] [--accept-scope-violation "사유"]
 
 무엇을 하나:
   전이표에 있는 경로만 허용하고, 상태마다 요구하는 증거를 확인한 뒤 Task
@@ -265,6 +265,20 @@ Acceptance Criteria (submitted):
   acceptance_check_timeout_seconds, 기본 600초), type: manual-review는 기록만
   하고 막지 않는다(Reviewer 몫). 결과는
   .harness/evidence/TASK-attempt-N-checks.yaml에 남는다.
+
+write_scope 대조와 트리 밖 감시 (submitted):
+  Worker가 dispatch에서 실제로 쓴 트리(--cwd가 있으면 그 디렉터리)의 Git 변경
+  파일을 Task write_scope와 정확히 대조한다. 범위 밖 파일이 하나라도 있으면
+  submitted를 거부하고 전부 Evidence의 TASK-attempt-N-scope.yaml에 기록한다.
+  계약의 누락이 확인된 경우에만 --accept-scope-violation "사유"로 우회할 수
+  있으며, 빈 사유와 Secret 의심 사유는 거부한다. 우회 사실·사유는 Evidence와
+  events.tsv에 남는다.
+
+  dispatch 때 설치본(~/.local/share/herdr-agent-harness, ~/.local/bin/herdr-harness)
+  및 Harness source repository의 HEAD·작업 트리 상태 지문을 읽기 전용으로
+  기록하고 submitted에서 다시 비교한다. 대상이 없거나 해시를 만들 수 없으면
+  미적용을 Evidence에 명시하되 전이를 막지는 않는다. 이 검사는 가드레일이지
+  Agent와 같은 권한에서 동작하는 보안 경계가 아니다.
 
 상태:
   draft ready active submitted blocked handover_required

@@ -104,7 +104,7 @@ STATE.md 표와 YAML의 드리프트·활성 슬롯 상한이다. `STATE.md`를 
 쓰지 않는다. 기본 경로와 completed 자동 출력은 Herdr·네트워크를 호출하지 않으며,
 `--live`를 명시한 수동 호출만 Herdr Agent 목록을 runtime meta와 대조한다.
 
-일반 상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`를 사용합니다. `submitted`에는 Attempt와 Evidence(정본 YAML — 이름과 필수 필드를 함께 확인), `handover_required`에는 `.harness/handovers/TASK-handover-*.md` 인계 문서, 정상 AI 검토의 `awaiting_approval`에는 `판정: APPROVED`인 Review가 필요합니다. 수동 검토 예외는 Review 파일 없이 `submitted -> awaiting_approval`로만 이동할 수 있습니다. 또한 `submitted` 전이에서는 Harness가 Task의 `acceptance_criteria[].verified_by`를 **직접 실행**하고 하나라도 실패하면 전이를 거부합니다(§5.2). 사용자가 완료를 명시적으로 승인한 뒤에는 `herdr-harness approve PATH TASK_ID --confirm-user-approval`이 정상 Task에는 Review 경로를, 수동 예외 Task에는 정책 사유를 승인 기록에 남기고 기존 `transition ... completed` 게이트를 호출합니다. Agent Pane 호출 차단과 명시 승인 플래그는 두 경로에서 동일합니다.
+일반 상태 변경은 `herdr-harness transition PATH TASK_ID TO_STATE`를 사용합니다. `submitted`에는 Attempt와 Evidence(정본 YAML — 이름과 필수 필드를 함께 확인), `handover_required`에는 `.harness/handovers/TASK-handover-*.md` 인계 문서, 정상 AI 검토의 `awaiting_approval`에는 `판정: APPROVED`인 Review가 필요합니다. 수동 검토 예외는 Review 파일 없이 `submitted -> awaiting_approval`로만 이동할 수 있습니다. 또한 `submitted` 전이에서는 Harness가 Task의 `acceptance_criteria[].verified_by`를 **직접 실행**하고 하나라도 실패하면 전이를 거부합니다(§5.2). Worker의 실제 작업 트리(`--cwd`면 그 트리)의 Git 변경은 `write_scope`와 정확히 대조하며, 이탈은 기본적으로 전이를 거부한다. 계약 누락을 감사 기록으로 수용해야 할 때만 비어 있지 않은 사유를 붙인 `--accept-scope-violation`으로 우회할 수 있고, 결과는 scope Evidence와 event log에 남는다. 사용자가 완료를 명시적으로 승인한 뒤에는 `herdr-harness approve PATH TASK_ID --confirm-user-approval`이 정상 Task에는 Review 경로를, 수동 예외 Task에는 정책 사유를 승인 기록에 남기고 기존 `transition ... completed` 게이트를 호출합니다. Agent Pane 호출 차단과 명시 승인 플래그는 두 경로에서 동일합니다.
 
 ### 5.2 Acceptance Criteria 게이트
 
@@ -125,9 +125,10 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 |---|---|---|
 | `evidence/TASK-<role>-attempt-N.yaml` | 정본 — `task`·`role`·`attempt`·`result`·`changes`(`git status --short`)·`status`·`raw` | 추적 |
 | `evidence/TASK-attempt-N-checks.yaml` | AC 검증 결과 | 추적 |
+| `evidence/TASK-attempt-N-scope.yaml` | 실제 변경/write_scope 대조, 우회와 트리 밖 감시 결과 | 추적 |
 | `evidence/raw/TASK-<role>-attempt-N.md` | 원문 덤프 — `git status --short`/`diff --stat`, Agent 상태·출력, `observe` 관측 기록 | 제외 |
 
-정본은 `dispatch`/`observe`만 만들고, 게이트는 글롭이 아니라 이름과 필수 필드를 함께 봅니다 — 빈 YAML 하나로는 통과하지 못합니다. Secret 의심 패턴이 발견되면 원문 대신 요약만 남깁니다. Context Packet에 이전 Evidence·checks·Review를 넣을 때는 `gawk substr`로 줄마다 기본 `max_columns=500` 문자만 남깁니다. 이는 UTF-8 바이트 경계를 보존하기 위한 필수 의존성입니다. gawk가 없거나 실패하면 바이트 절단으로 폴백하지 않고 발췌 생략 표식·경고만 내며, `doctor`는 이를 필수 누락으로 보고합니다.
+정본은 `dispatch`/`observe`만 만들고, 게이트는 글롭이 아니라 이름과 필수 필드를 함께 봅니다 — 빈 YAML 하나로는 통과하지 못합니다. submitted의 scope Evidence는 transition이 별도로 만듭니다. dispatch는 설치본·설치 진입점·Harness source repository의 HEAD/작업 트리 지문을 읽기 전용으로 저장하고, submitted에서 달라진 대상을 scope Evidence에 기록합니다. 대상 또는 해시 도구가 없으면 미적용을 기록하되 전이는 계속합니다. 이는 사후 검출 가드레일이지 Agent와 같은 권한에서 동작하는 보안 경계가 아닙니다. Secret 의심 패턴이 발견되면 원문 대신 요약만 남깁니다. Context Packet에 이전 Evidence·checks·Review를 넣을 때는 `gawk substr`로 줄마다 기본 `max_columns=500` 문자만 남깁니다. 이는 UTF-8 바이트 경계를 보존하기 위한 필수 의존성입니다. gawk가 없거나 실패하면 바이트 절단으로 폴백하지 않고 발췌 생략 표식·경고만 내며, `doctor`는 이를 필수 누락으로 보고합니다.
 
 ## 6. Skills
 

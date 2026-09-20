@@ -334,6 +334,11 @@ PASS: Review 경로 이탈 보고 (규정 경로 누락을 결과·Evidence에 �
 PASS: Agent 상태 정규화
 PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)
 PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)
+PASS: write_scope 실제 변경 대조 (범위 밖 경로 전부 보고·기본 submitted 거부)
+PASS: write_scope 대조 대상 트리 (--cwd Worker Git 트리와 정본 Evidence changes 사용)
+PASS: 작업 트리 밖 변경 감시 (dispatch 지문과 submitted 재대조)
+PASS: 트리 밖 감시 미적용 보고 (대상·해시 불가를 Evidence에 명시하고 전이 유지)
+PASS: 범위 이탈 Evidence 기록 (사유 필수 우회·Event Log·기계 판독 YAML)
 PASS: AC 동일 명령 캐시 및 재실행 방지 (명령문자열 단위 캐시/AC행별 기록 보존/중복 성공 시 제출)
 PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)
 PASS: 이벤트 로그 기록 (전이·sync-templates·quota-retry·auto-step·lock-reclaim·adopt 9곳 + dispatch·observe·quota-check 직접 호출 event, 쿼터 수치 미노출)
@@ -951,6 +956,22 @@ acceptance_criteria:
 - 원격 실행 모드(`remote.yaml`의 `enabled: true`)에서는 같은 명령을 원격에서 실행합니다.
 - 결과는 `.harness/evidence/TASK-attempt-N-checks.yaml`에 남고, Reviewer의 Context Packet에 그대로 주입됩니다.
 
+### submitted의 실제 변경 범위 대조와 트리 밖 감시
+
+`submitted`는 Worker가 실제로 작업한 Git 트리(`--cwd`를 줬다면 그 디렉터리)의
+변경·untracked 파일을 `write_scope`와 정확히 대조합니다. 범위 밖 파일이 하나라도
+있으면 전부 출력하고 전이를 거부합니다. Task 계약 누락이 확인된 경우에만 비어 있지
+않은 사유를 강제한 `--accept-scope-violation "사유"`로 우회할 수 있습니다. 우회 사실과
+사유는 event log와 scope Evidence에 남으며 Secret 의심 사유는 기록하지 않습니다.
+
+dispatch 시에는 설치본(`~/.local/share/herdr-agent-harness/`,
+`~/.local/bin/herdr-harness`)과 Harness source repository의 HEAD·작업 트리 상태를
+읽기 전용 지문으로 기록하고 submitted에서 다시 비교합니다. 대상이 없거나 해시를
+만들 수 없으면 미적용을 Evidence에 명시하되 전이를 막지 않습니다. 결과는
+`.harness/evidence/TASK-attempt-N-scope.yaml`의 `scope_validation` 및
+`outside_tree_watch`에 기계 판독 가능한 YAML로 남습니다. 이는 사후 검출·감사
+가드레일이지, 같은 권한의 Agent를 막는 보안 경계는 아닙니다.
+
 ### Evidence 구조 — 정본 YAML과 `raw/` 분리
 
 Evidence는 "Worker가 말한 것과 실제 저장소 상태가 일치하는가"를 판단하는 데 쓰입니다. 그 판단에 쓰이는 필드만 정본 YAML에 두고, Agent 출력 원문 같은 긴 덤프는 디버깅용으로 분리합니다. Agent에게 보낸 Context Packet 전문은 Evidence가 아니라 `.harness/runtime/TASK-context-ROLE.md`에 있습니다.
@@ -959,6 +980,7 @@ Evidence는 "Worker가 말한 것과 실제 저장소 상태가 일치하는가"
 |---|---|---|
 | `.harness/evidence/TASK-<worker\|reviewer>-attempt-N.yaml` | 정본 — `task`·`role`·`attempt`·`result`·`changes`(`git status --short`)·`status`·`raw` | 추적 |
 | `.harness/evidence/TASK-attempt-N-checks.yaml` | AC 검증 결과 — 기준별 `command`·`exit_code`·`result`·`output_tail`과 `summary` | 추적 |
+| `.harness/evidence/TASK-attempt-N-scope.yaml` | submitted 범위 대조 — 실제 작업 트리·위반·사유 우회와 트리 밖 감시 결과 | 추적 |
 | `.harness/evidence/raw/TASK-<role>-attempt-N.md` | 원문 덤프 — `git status --short`/`diff --stat`, Agent 상태·출력, `observe` 관측 기록 | `.gitignore` 제외 |
 
 `submitted` 게이트는 글롭이 아니라 파일 이름과 필수 필드를 함께 확인합니다. 빈 YAML을 하나 놓아 두는 것으로는 통과하지 못하며, 정본은 `dispatch`/`observe`만 만듭니다. Secret 의심 패턴이 발견되면 원문 대신 요약만 남깁니다.

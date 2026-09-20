@@ -230,7 +230,7 @@ cmd_dispatch() {
   [[ -n "$pane_id" ]] || die "Herdr Pane ID를 추출하지 못했습니다."
 
   _runtime_write_meta "$root" "$task_id" "$role" "$agent_name" "$pane_id" "$provider" "$attempt" 0 \
-    "$selected_model" "$model_source" "$model_approval" "$model_degradation" "$selected_effort" "$effort_source"
+    "$selected_model" "$model_source" "$model_approval" "$model_degradation" "$selected_effort" "$effort_source" "$agent_cwd"
   attempt_file="$root/.harness/attempts/$task_id-attempt-$attempt.md"
   temporary="$(mktemp "$root/.harness/attempts/.attempt.XXXXXX")"
   {
@@ -243,6 +243,10 @@ cmd_dispatch() {
   } >"$temporary"
   _runtime_atomic_copy "$temporary" "$attempt_file"
   rm -f -- "$temporary"
+
+  # submitted 시점에 비교할 트리 밖 감시 기준선이다. 실패를 dispatch 실패로
+  # 바꾸지 않고, 대상 없음·해시 불가도 snapshot의 status로 남긴다.
+  _runtime_capture_outside_watch "$root" "$task_id" "$role" "$attempt"
 
   set +e
   start_output="$(_runtime_start_agent_when_ready "$agent_name" "$provider" "$pane_id" "$timeout" 30 "${agent_args[@]}")"
@@ -323,7 +327,7 @@ cmd_dispatch() {
     printf '경고: 지정 모델 %s의 기동 실패를 확인해 격리했습니다 (%s). 다음 dispatch에서는 이 모델을 건너뛰며, 자동 재시도하지 않습니다. 해제하려면 사람이 %s에서 해당 기록을 지우거나 파일을 삭제하세요.\n' \
       "$selected_model" "$model_failure_reason" "$model_quarantine" >&2
     _runtime_write_meta "$root" "$task_id" "$role" "$agent_name" "$pane_id" "$provider" "$attempt" 0 \
-      "$selected_model" "$model_source" "$model_approval" "$model_degradation" "$selected_effort" "$effort_source"
+      "$selected_model" "$model_source" "$model_approval" "$model_degradation" "$selected_effort" "$effort_source" "$agent_cwd"
     printf -- '- Model quarantine: %s\n- Model failure reason: %s\n' \
       "$model_quarantine" "$model_failure_reason" >>"$attempt_file"
   elif [[ -n "$model_degradation" ]]; then

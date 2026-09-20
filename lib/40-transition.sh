@@ -451,6 +451,184 @@ _transition_require_acceptance_criteria() {
   info "AC 검증 통과: pass $passed / manual $manual / 전체 $total → ${checks_file#"$root/"}"
 }
 
+# ---------------------------------------------------------------------------
+# submitted 범위 검증 — 선언 write_scope와 실제 Worker 트리 변경의 대조
+# ---------------------------------------------------------------------------
+_transition_write_scope_entries() {
+  local task_file="$1" item found=0
+  # 생성 템플릿의 flow list와, 사람이 쓴 block list 모두 같은 고정 필드에서만
+  # 읽는다. glob·부정 패턴은 지원하지 않으며 정확한 상대 경로만 비교한다.
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    printf '%s\n' "$item"
+    found=1
+  done < <(yaml_flow_list "$task_file" write_scope)
+  (( found == 1 )) && return 0
+  awk '
+    /^write_scope:[[:space:]]*$/ { inside=1; next }
+    inside && /^[^[:space:]#]/ { exit }
+    inside && /^  -[[:space:]]+/ {
+      value=$0; sub(/^  -[[:space:]]+/, "", value)
+      sub(/[[:space:]]+#.*/, "", value)
+      gsub(/^['\''"]|['\''"]$/, "", value)
+      if (value != "") print value
+    }
+  ' "$task_file"
+}
+
+_transition_changed_paths() {
+  local tree="$1"
+  command -v git >/dev/null 2>&1 || return 2
+  git -C "$tree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 2
+  # tracked 변경(삭제와 rename 양쪽 포함)과 untracked 파일을 모두 모은다.
+  # -z는 공백이 든 파일명을 보존하고, sort -zu는 중복만 제거한다.
+  { git -C "$tree" diff --name-only --no-renames -z HEAD 2>/dev/null || true
+    git -C "$tree" ls-files --others --exclude-standard -z 2>/dev/null || true; } | LC_ALL=C sort -zu
+}
+
+_transition_scope_evidence_path() {
+  printf '%s/.harness/evidence/%s-attempt-%s-scope.yaml' "$1" "$2" "$3"
+}
+
+_transition_scope_reason_safe() {
+  local reason="$1" temporary
+  temporary="$(mktemp "${TMPDIR:-/tmp}/herdr-scope-reason.XXXXXX")" || return 1
+  printf '%s' "$reason" >"$temporary"
+  if _runtime_has_secret "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  rm -f -- "$temporary"
+  return 0
+}
+
+_transition_write_scope_evidence() {
+  local root="$1" task_id="$2" attempt="$3" tree="$4" tree_status="$5"
+  local scope_status="$6" bypass="$7" reason="$8" watch_status="$9"
+  local changed_file="${10}" violations_file="${11}" watch_file="${12}"
+  local destination temporary line id path status before current kind
+  destination="$(_transition_scope_evidence_path "$root" "$task_id" "$attempt")"
+  temporary="$(mktemp "$root/.harness/evidence/.scope.XXXXXX")"
+  {
+    printf 'task: %s\n' "$(yaml_quote "$task_id")"
+    printf 'attempt: %s\n' "$attempt"
+    printf 'scope_validation:\n'
+    printf '  target_tree: %s\n' "$(yaml_quote "$tree")"
+    printf '  target_tree_status: %s\n' "$(yaml_quote "$tree_status")"
+    printf '  result: %s\n' "$(yaml_quote "$scope_status")"
+    printf '  bypass:\n    accepted: %s\n' "$bypass"
+    [[ "$bypass" != true ]] || printf '    reason: %s\n' "$(yaml_quote "$reason")"
+    printf '  changed_paths:\n'
+    while IFS= read -r -d '' line; do [[ -n "$line" ]] && printf '    - %s\n' "$(yaml_quote "$line")"; done <"$changed_file"
+    printf '  violations:\n'
+    while IFS= read -r line; do [[ -n "$line" ]] && printf '    - %s\n' "$(yaml_quote "$line")"; done <"$violations_file"
+    printf 'outside_tree_watch:\n  result: %s\n  targets:\n' "$(yaml_quote "$watch_status")"
+    if [[ -f "$watch_file" ]]; then
+      while IFS=$'\t' read -r id path status before; do
+        [[ "$id" == id ]] && continue
+        [[ -n "$id" ]] || continue
+        current="-"
+        kind=file
+        [[ "$id" == installed_tree ]] && kind=directory
+        if [[ "$status" == recorded ]]; then
+          if [[ "$kind" == directory ]]; then current="$(_runtime_fingerprint_directory "$path" 2>/dev/null || true)"
+          elif [[ "$id" == source_repository ]]; then current="$(_runtime_fingerprint_git_tree "$path" 2>/dev/null || true)"
+          else current="$(_runtime_hash_file "$path" 2>/dev/null || true)"; [[ -z "$current" ]] || current="sha256:$current"; fi
+          if [[ -z "$current" ]]; then status=unavailable
+          elif [[ "$current" == "$before" ]]; then status=unchanged
+          else status=changed
+          fi
+        fi
+        printf '    - id: %s\n      path: %s\n      baseline_status: %s\n      result: %s\n' \
+          "$(yaml_quote "$id")" "$(yaml_quote "$path")" "$(yaml_quote "${status/unchanged/recorded}")" "$(yaml_quote "$status")"
+      done <"$watch_file"
+    fi
+  } >"$temporary"
+  chmod 0644 "$temporary"
+  mv -f -- "$temporary" "$destination"
+}
+
+_transition_validate_scope() {
+  local root="$1" task_id="$2" task_file="$3" bypass_reason="${4:-}"
+  local meta tree attempt changed violations snapshot watch_status=not_applied tree_status=not_recorded tree_known=0
+  local changed_file violations_file line scope allowed=0 violation_count=0 changed_status
+  meta="$root/.harness/runtime/$task_id-worker.meta"
+  tree="$root"
+  attempt="$(_ac_latest_attempt "$root" "$task_id")"; [[ "$attempt" != 0 ]] || attempt=1
+  if [[ -f "$meta" ]]; then
+    local recorded_cwd recorded_attempt
+    recorded_cwd="$(_runtime_meta_value "$meta" agent_cwd)"
+    recorded_attempt="$(_runtime_meta_value "$meta" attempt)"
+    if [[ -n "$recorded_cwd" ]]; then
+      tree="$recorded_cwd"
+      tree_known=1
+    fi
+    [[ "$recorded_attempt" =~ ^[0-9]+$ ]] && attempt="$recorded_attempt"
+  fi
+  changed_file="$(mktemp "$root/.harness/evidence/.scope-changed.XXXXXX")"
+  violations_file="$(mktemp "$root/.harness/evidence/.scope-violations.XXXXXX")"
+  if (( tree_known == 1 )) && _transition_changed_paths "$tree" >"$changed_file"; then
+    tree_status=available
+    while IFS= read -r -d '' line; do
+      [[ -n "$line" ]] || continue
+      allowed=0
+      while IFS= read -r scope; do
+        [[ "$line" == "$scope" ]] && { allowed=1; break; }
+      done < <(_transition_write_scope_entries "$task_file")
+      if (( allowed == 0 )); then
+        printf '%s\n' "$line" >>"$violations_file"
+        violation_count=$((violation_count + 1))
+      fi
+    done <"$changed_file"
+  fi
+  snapshot="$(_runtime_watch_snapshot_path "$root" "$task_id" worker "$attempt")"
+  if [[ -f "$snapshot" ]]; then
+    watch_status=unchanged
+    local id path status before current kind recorded_count=0
+    while IFS=$'\t' read -r id path status before; do
+      [[ "$id" == id || "$status" != recorded ]] && continue
+      recorded_count=$((recorded_count + 1))
+      kind=file; [[ "$id" == installed_tree ]] && kind=directory
+      if [[ "$kind" == directory ]]; then current="$(_runtime_fingerprint_directory "$path" 2>/dev/null || true)"
+      elif [[ "$id" == source_repository ]]; then current="$(_runtime_fingerprint_git_tree "$path" 2>/dev/null || true)"
+      else current="$(_runtime_hash_file "$path" 2>/dev/null || true)"; [[ -z "$current" ]] || current="sha256:$current"; fi
+      if [[ -z "$current" ]]; then watch_status=unavailable
+      elif [[ "$current" != "$before" ]]; then watch_status=changed
+      fi
+    done <"$snapshot"
+    (( recorded_count > 0 )) || watch_status=not_applied
+  fi
+  local scope_status=pass bypass=false
+  if (( violation_count > 0 )); then
+    if [[ -n "$bypass_reason" ]]; then
+      scope_status=accepted_violation; bypass=true
+    else
+      scope_status=violation
+    fi
+  elif [[ "$tree_status" != available ]]; then
+    scope_status=not_applied
+  fi
+  _transition_write_scope_evidence "$root" "$task_id" "$attempt" "$tree" "$tree_status" \
+    "$scope_status" "$bypass" "$bypass_reason" "$watch_status" "$changed_file" "$violations_file" "$snapshot"
+  rm -f -- "$changed_file" "$violations_file"
+  if (( violation_count > 0 )) && [[ -z "$bypass_reason" ]]; then
+    printf 'write_scope 범위 이탈 — submitted 전이를 거부합니다:\n' >&2
+    sed 's/^/  - /' "$(_transition_scope_evidence_path "$root" "$task_id" "$attempt")" >/dev/null 2>&1 || true
+    # 경로 목록은 Evidence가 아니라 호출자 화면에도 전부 보여야 한다.
+    grep -A999 '^  violations:' "$(_transition_scope_evidence_path "$root" "$task_id" "$attempt")" | sed -n "s/^    - '\(.*\)'$/  - \1/p" >&2 || true
+    printf '사유를 기록하고 계속하려면 --accept-scope-violation "<사유>"를 사용하세요. Evidence: %s\n' \
+      ".harness/evidence/${task_id}-attempt-${attempt}-scope.yaml" >&2
+    return 1
+  fi
+  [[ "$watch_status" != changed ]] || info "작업 트리 밖 감시 변경 감지: .harness/evidence/${task_id}-attempt-${attempt}-scope.yaml"
+  [[ "$watch_status" != not_applied && "$watch_status" != unavailable ]] ||
+    info "작업 트리 밖 감시 미적용/불가 상태를 Evidence에 기록했습니다: .harness/evidence/${task_id}-attempt-${attempt}-scope.yaml"
+  [[ "$scope_status" != not_applied ]] ||
+    info "write_scope 대조를 적용하지 못한 상태를 Evidence에 기록했습니다: .harness/evidence/${task_id}-attempt-${attempt}-scope.yaml"
+  [[ "$bypass" != true ]] || append_event "$root" scope_violation_accepted "$task_id" active submitted "reason=$bypass_reason"
+  return 0
+}
+
 _transition_active_slot_count() {
   local root="$1" task_id path status count=0
   while IFS= read -r task_id; do
@@ -552,12 +730,18 @@ _transition_emit_completion_report() {
 }
 
 cmd_transition() {
-  local root_arg="" task_id="" to_state="" note=""
+  local root_arg="" task_id="" to_state="" note="" accept_scope_violation=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --note) [[ $# -ge 2 ]] || die "--note 값이 필요합니다."; note="$2"; shift 2 ;;
+      --accept-scope-violation)
+        [[ $# -ge 2 && -n "${2//[[:space:]]/}" ]] ||
+          die "--accept-scope-violation에는 비어 있지 않은 사유가 필요합니다."
+        [[ -z "$accept_scope_violation" ]] || die "--accept-scope-violation 플래그가 중복됐습니다."
+        accept_scope_violation="$2"; shift 2
+        ;;
       -h|--help)
-        printf '사용법: %s transition PATH TASK_ID TO_STATE [--note TEXT]\n' "$SCRIPT_NAME"
+        printf '사용법: %s transition PATH TASK_ID TO_STATE [--note TEXT] [--accept-scope-violation "사유"]\n' "$SCRIPT_NAME"
         return 0 ;;
       -*) die "알 수 없는 transition 옵션: $1" ;;
       *)
@@ -600,6 +784,11 @@ cmd_transition() {
   [[ "$from_state" != "$to_state" ]] || die "$task_id 는 이미 $to_state 입니다."
   transition_allowed "$from_state" "$to_state" ||
     die "허용되지 않은 전이입니다: $from_state -> $to_state ($task_id)"
+  [[ -z "$accept_scope_violation" || "$to_state" == submitted ]] ||
+    die "--accept-scope-violation은 submitted 전이에서만 사용할 수 있습니다."
+  if [[ -n "$accept_scope_violation" ]] && ! _transition_scope_reason_safe "$accept_scope_violation"; then
+    die "--accept-scope-violation 사유에 Secret 의심 패턴이 있어 기록을 거부합니다."
+  fi
 
   local write_state="$to_state" write_note="$note" active_slots
 
@@ -673,6 +862,8 @@ cmd_transition() {
       compgen -G "$root/.harness/attempts/${task_id}-attempt-*.md" >/dev/null ||
         die "Attempt 기록이 없어 submitted로 전이할 수 없습니다: .harness/attempts/${task_id}-attempt-*.md"
       _transition_require_evidence "$root" "$task_id"
+      _transition_validate_scope "$root" "$task_id" "$path" "$accept_scope_violation" ||
+        die "write_scope 범위 이탈 때문에 submitted 전이가 거부됐습니다."
       _transition_require_acceptance_criteria "$root" "$task_id" "$path"
       ;;
     reviewing)

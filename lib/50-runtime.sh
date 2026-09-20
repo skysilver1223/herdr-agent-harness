@@ -225,6 +225,10 @@ _runtime_write_meta() {
   local model="${9:-}" model_source="${10:-}" model_approval="${11:-}"
   local model_degradation="${12:-}"
   local effort="${13:-}" effort_source="${14:-}"
+  # dispatch가 실제로 Agent를 띄운 트리다. Harness 프로젝트 root와 다를 수
+  # 있으므로 submitted 시 write_scope 대조와 Evidence changes: 모두 이 값을
+  # 기준으로 삼는다. 구버전 meta에는 이 필드가 없으니 호출자는 root로 폴백한다.
+  local agent_cwd="${15:-}"
   local destination temporary
   destination="$root/.harness/runtime/$task_id-$role.meta"
   temporary="$(mktemp "$root/.harness/runtime/.meta.XXXXXX")"
@@ -242,6 +246,7 @@ _runtime_write_meta() {
     printf 'model_degradation=%s\n' "$model_degradation"
     printf 'effort=%s\n' "$effort"
     printf 'effort_source=%s\n' "$effort_source"
+    printf 'agent_cwd=%s\n' "$agent_cwd"
   } >"$temporary"
   chmod 0644 "$temporary"
   mv -f -- "$temporary" "$destination"
@@ -250,6 +255,128 @@ _runtime_write_meta() {
 _runtime_meta_value() {
   local file="$1" key="$2"
   sed -n "s/^$key=//p" "$file" | head -n 1
+}
+
+# ---------------------------------------------------------------------------
+# 작업 트리 밖 감시 — dispatch 시점의 읽기 전용 지문
+#
+# 이것은 Agent와 같은 권한으로 동작하는 가드레일일 뿐 보안 경계가 아니다. 감시
+# 대상이나 지문 파일을 Agent가 고치면 우회할 수 있다. 그래도 설치본 덮어쓰기와
+# 원본 저장소 직접 수정은 submitted 전에 Evidence로 드러나게 한다.
+# ---------------------------------------------------------------------------
+_runtime_watch_snapshot_path() {
+  printf '%s/.harness/runtime/%s-%s-attempt-%s-outside-watch.tsv' "$1" "$2" "$3" "$4"
+}
+
+_runtime_hash_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- "$path" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 -- "$path" 2>/dev/null | awk '{print $1}'
+  else
+    return 127
+  fi
+}
+
+_runtime_fingerprint_directory() {
+  local directory="$1" list entries item digest
+  [[ -d "$directory" ]] || return 1
+  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || return 127
+  list="$(mktemp "${TMPDIR:-/tmp}/herdr-watch-list.XXXXXX")" || return 1
+  entries="${list}.entries"
+  if ! (cd "$directory" && find . -type f -print0 | LC_ALL=C sort -z) >"$list"; then
+    rm -f -- "$list" "$entries"
+    return 1
+  fi
+  while IFS= read -r -d '' item; do
+    # 파일명과 내용 hash를 함께 넣는다. find 순서·mtime만으로 지문을 만들면
+    # 같은 크기 파일 덮어쓰기를 놓칠 수 있다.
+    digest="$(_runtime_hash_file "$directory/${item#./}")" || {
+      rm -f -- "$list" "$entries"
+      return 1
+    }
+    printf '%s\t%s\n' "${item#./}" "$digest" >>"$entries"
+  done <"$list"
+  digest="$(_runtime_hash_file "$entries")" || {
+    rm -f -- "$list" "$entries"
+    return 1
+  }
+  rm -f -- "$list" "$entries"
+  printf 'sha256:%s' "$digest"
+}
+
+_runtime_fingerprint_git_tree() {
+  local directory="$1" record digest
+  command -v git >/dev/null 2>&1 || return 127
+  git -C "$directory" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  record="$(mktemp "${TMPDIR:-/tmp}/herdr-watch-git.XXXXXX")" || return 1
+  if ! {
+    git -C "$directory" rev-parse HEAD
+    git -C "$directory" status --porcelain=v1 --untracked-files=all
+  } >"$record" 2>/dev/null; then
+    rm -f -- "$record"
+    return 1
+  fi
+  digest="$(_runtime_hash_file "$record")" || {
+    rm -f -- "$record"
+    return 1
+  }
+  rm -f -- "$record"
+  printf 'sha256:%s' "$digest"
+}
+
+_runtime_watch_target_record() {
+  local id="$1" path="$2" kind="$3" fingerprint status
+  if [[ ! -e "$path" ]]; then
+    printf '%s\t%s\tmissing\t-\n' "$id" "$path"
+    return 0
+  fi
+  if [[ "$kind" == directory ]]; then
+    if fingerprint="$(_runtime_fingerprint_directory "$path")"; then status=0; else status=$?; fi
+  else
+    if fingerprint="$(_runtime_hash_file "$path")"; then
+      status=0
+      [[ -n "$fingerprint" ]] && fingerprint="sha256:$fingerprint"
+    else
+      status=$?
+    fi
+  fi
+  case "$status" in
+    0) printf '%s\t%s\trecorded\t%s\n' "$id" "$path" "$fingerprint" ;;
+    127) printf '%s\t%s\tunavailable\t-\n' "$id" "$path" ;;
+    *) printf '%s\t%s\tunavailable\t-\n' "$id" "$path" ;;
+  esac
+}
+
+_runtime_capture_outside_watch() {
+  local root="$1" task_id="$2" role="$3" attempt="$4" destination temporary
+  local install_dir entrypoint source_repo
+  # 테스트·복구 환경에서는 대상만 좁혀 주입할 수 있다. 기본값은 사용자 결정
+  # G2의 설치본 두 곳과, 실행 중인 Harness의 source repository다.
+  install_dir="${HERDR_HARNESS_WATCH_INSTALL_DIR:-$HOME/.local/share/herdr-agent-harness}"
+  entrypoint="${HERDR_HARNESS_WATCH_ENTRYPOINT:-$HOME/.local/bin/herdr-harness}"
+  source_repo="${HERDR_HARNESS_SOURCE_REPO:-$(dirname "$(readlink -f "$SELF_PATH" 2>/dev/null || printf '%s' "$SELF_PATH")")}"
+  destination="$(_runtime_watch_snapshot_path "$root" "$task_id" "$role" "$attempt")"
+  temporary="$(mktemp "$root/.harness/runtime/.outside-watch.XXXXXX")"
+  {
+    printf 'id\tpath\tstatus\tfingerprint\n'
+    _runtime_watch_target_record installed_tree "$install_dir" directory
+    _runtime_watch_target_record installed_entrypoint "$entrypoint" file
+    if [[ -d "$source_repo" ]]; then
+      local fingerprint status
+      if fingerprint="$(_runtime_fingerprint_git_tree "$source_repo")"; then status=0; else status=$?; fi
+      if (( status == 0 )); then
+        printf 'source_repository\t%s\trecorded\t%s\n' "$source_repo" "$fingerprint"
+      else
+        printf 'source_repository\t%s\tunavailable\t-\n' "$source_repo"
+      fi
+    else
+      printf 'source_repository\t%s\tmissing\t-\n' "$source_repo"
+    fi
+  } >"$temporary"
+  chmod 0644 "$temporary"
+  mv -f -- "$temporary" "$destination"
 }
 
 # ---------------------------------------------------------------------------
@@ -391,7 +518,7 @@ _runtime_evidence_raw_path() {
 _runtime_write_evidence_yaml() {
   local root="$1" task_id="$2" role="$3" attempt="$4" status="$5" summary="$6"
   local observations="${7:-0}"
-  local destination temporary raw_relative line
+  local destination temporary raw_relative line change_root meta recorded_cwd
   destination="$(_runtime_evidence_yaml_path "$root" "$task_id" "$role" "$attempt")"
   raw_relative=".harness/evidence/raw/$task_id-$role-attempt-$attempt.md"
   temporary="$(mktemp "$root/.harness/evidence/.evidence-yaml.XXXXXX")"
@@ -401,12 +528,20 @@ _runtime_write_evidence_yaml() {
     printf 'attempt: %s\n' "$attempt"
     printf 'result:\n  summary: %s\n' "$(yaml_quote "$summary")"
     printf 'changes:\n'
+    # --cwd dispatch가 실제로 쓴 트리를 우선한다. meta가 없는 구버전 Evidence
+    # 또는 직접 호출은 Harness 프로젝트 root를 그대로 쓴다.
+    change_root="$root"
+    meta="$root/.harness/runtime/$task_id-$role.meta"
+    recorded_cwd="$(_runtime_meta_value "$meta" agent_cwd 2>/dev/null || true)"
+    if [[ -n "$recorded_cwd" ]] && git -C "$recorded_cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      change_root="$recorded_cwd"
+    fi
     # git status --short 의 경로만 담는다. diff 본문은 raw에 있다.
-    if git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if git -C "$change_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       while IFS= read -r line; do
         [[ -n "$line" ]] || continue
         printf '  - %s\n' "$(yaml_quote "$line")"
-      done < <(git -C "$root" status --short 2>/dev/null || true)
+      done < <(git -C "$change_root" status --short 2>/dev/null || true)
     fi
     printf 'checks:\n'
     printf '  # acceptance_criteria 실행 결과는 transition submitted 시점에 Harness가\n'

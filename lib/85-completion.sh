@@ -432,7 +432,7 @@ _herdr_harness_completions() {
       if (( COMP_CWORD == 2 )); then
         COMPREPLY=($(compgen -d -- "$cur"))
         _herdr_harness_note "$cur" \
-          "구문::herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]" \
+          "구문::herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT] [--accept-scope-violation 사유]" \
           "PATH::Harness 프로젝트 디렉터리" \
           "help::herdr-harness help transition  (전이표와 게이트)"
       elif (( COMP_CWORD == 3 )); then
@@ -447,7 +447,8 @@ _herdr_harness_completions() {
         :
       else
         _herdr_harness_describe "$cur" \
-          "--note::전이 사유를 STATE.md와 이벤트 로그에 남긴다"
+          "--note::전이 사유를 STATE.md와 이벤트 로그에 남긴다" \
+          "--accept-scope-violation::submitted의 write_scope 이탈을 사유와 함께 감사 기록으로 우회"
       fi
       ;;
     approve)

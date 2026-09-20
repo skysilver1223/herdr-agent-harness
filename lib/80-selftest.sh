@@ -269,6 +269,122 @@ AC_PY
   grep -q "  manual: 1$" "$checks_file" || die "manual-review가 기록되지 않았습니다."
   grep -q "  failed: 0$" "$checks_file" || die "AC 실패 수가 0으로 기록되지 않았습니다."
 
+  # --- submitted 실제 변경/write_scope 대조와 트리 밖 감시 -----------------
+  # 실제 dispatch 없이도 Worker가 쓴 별도 --cwd Git 트리를 meta에 고정해,
+  # submitted 게이트가 root가 아니라 그 트리를 읽는지 검증한다.
+  local scope_task="$test_project/.harness/tasks/task-scope.yaml"
+  local scope_tree="$test_root/scope-worker-tree"
+  local watch_install="$test_root/watch-install" watch_entry="$test_root/watch-entry"
+  local watch_source="$test_root/watch-source" scope_output scope_status scope_evidence
+  mkdir -p "$scope_tree" "$watch_install" "$watch_source"
+  git -C "$scope_tree" init -q
+  git -C "$scope_tree" config user.name harness-test
+  git -C "$scope_tree" config user.email test@example.invalid
+  printf 'allowed\n' >"$scope_tree/allowed.txt"
+  git -C "$scope_tree" add allowed.txt && git -C "$scope_tree" commit -q -m baseline
+  printf 'outside\n' >"$scope_tree/outside.txt"
+  git -C "$watch_source" init -q
+  git -C "$watch_source" config user.name harness-test
+  git -C "$watch_source" config user.email test@example.invalid
+  printf 'source baseline\n' >"$watch_source/README"
+  git -C "$watch_source" add README && git -C "$watch_source" commit -q -m baseline
+  printf 'install baseline\n' >"$watch_install/main"
+  printf 'entry baseline\n' >"$watch_entry"
+  sed -e 's/^task_id: .*/task_id: task-scope/' \
+      -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+      -e 's/^status: .*/status: active/' \
+      -e 's|^write_scope:.*|write_scope: [allowed.txt]|' \
+      "$test_project/.harness/tasks/TEMPLATE.yaml" >"$scope_task"
+  _ac_set_criteria "$scope_task" "acceptance_criteria:
+  - criterion_id: AC-001
+    statement: scope gate fixture
+    verified_by:
+      type: command
+      command: 'true'
+"
+  printf '# scope attempt\n' >"$test_project/.harness/attempts/task-scope-attempt-1.md"
+  printf "task: 'task-scope'\nrole: 'worker'\nattempt: 1\nresult:\n  summary: 'x'\nstatus: 'settled'\n" \
+    >"$test_project/.harness/evidence/task-scope-worker-attempt-1.yaml"
+  _runtime_write_meta "$test_project" task-scope worker hh-task-scope-w-1 pane-scope codex 1 0 \
+    '' '' '' '' '' '' "$scope_tree"
+  HERDR_HARNESS_WATCH_INSTALL_DIR="$watch_install" \
+  HERDR_HARNESS_WATCH_ENTRYPOINT="$watch_entry" \
+  HERDR_HARNESS_SOURCE_REPO="$watch_source" \
+    _runtime_capture_outside_watch "$test_project" task-scope worker 1
+  printf 'entry changed\n' >"$watch_entry"
+
+  set +e
+  scope_output="$(HERDR_HARNESS_WATCH_INSTALL_DIR="$watch_install" \
+    HERDR_HARNESS_WATCH_ENTRYPOINT="$watch_entry" \
+    HERDR_HARNESS_SOURCE_REPO="$watch_source" \
+    bash "$SELF_PATH" transition "$test_project" task-scope submitted 2>&1)"
+  scope_status=$?
+  set -e
+  [[ "$scope_status" -ne 0 ]] || die "write_scope 밖 변경이 submitted를 통과했습니다."
+  printf '%s' "$scope_output" | grep -q 'outside.txt' ||
+    die "write_scope 거부 출력에 모든 이탈 경로가 없습니다."
+  scope_evidence="$test_project/.harness/evidence/task-scope-attempt-1-scope.yaml"
+  grep -q "target_tree: '$scope_tree'" "$scope_evidence" ||
+    die "write_scope 대조가 --cwd Worker 트리를 사용하지 않았습니다."
+  grep -q -- "- 'outside.txt'" "$scope_evidence" ||
+    die "scope Evidence에 범위 이탈 경로가 없습니다."
+  grep -q "result: 'changed'" "$scope_evidence" ||
+    die "scope Evidence에 작업 트리 밖 변경 감지가 없습니다."
+
+  # 기본 거부 뒤에도 사유를 강제한 우회만 상태 전이를 열며, Evidence/Event에
+  # 감사 기록을 남긴다.
+  HERDR_HARNESS_WATCH_INSTALL_DIR="$watch_install" \
+  HERDR_HARNESS_WATCH_ENTRYPOINT="$watch_entry" \
+  HERDR_HARNESS_SOURCE_REPO="$watch_source" \
+    bash "$SELF_PATH" transition "$test_project" task-scope submitted \
+      --accept-scope-violation 'Task 계약에 outside.txt가 누락됨' >/dev/null
+  grep -q "result: 'accepted_violation'" "$scope_evidence" ||
+    die "사유 있는 write_scope 우회가 Evidence에 accepted_violation으로 남지 않았습니다."
+  grep -q "reason: 'Task 계약에 outside.txt가 누락됨'" "$scope_evidence" ||
+    die "write_scope 우회 사유가 Evidence에 남지 않았습니다."
+  grep -q 'scope_violation_accepted.*Task 계약에 outside.txt가 누락됨' \
+    "$test_project/.harness/evidence/events.tsv" || die "write_scope 우회 Event가 없습니다."
+  local transition_help_text transition_completion_text
+  transition_help_text="$(bash "$SELF_PATH" help transition)"
+  transition_completion_text="$(bash "$SELF_PATH" completion bash)"
+  printf '%s' "$transition_help_text" | grep -qF -- '--accept-scope-violation' ||
+    die "help transition에 write_scope 우회 옵션 설명이 없습니다."
+  printf '%s' "$transition_completion_text" | grep -qF -- '"--accept-scope-violation::' ||
+    die "탭 완성에 write_scope 우회 옵션 설명이 없습니다."
+  _runtime_write_evidence_yaml "$test_project" task-scope worker 1 settled 'scope cwd evidence' 0
+  grep -q "'?? outside.txt'" "$test_project/.harness/evidence/task-scope-worker-attempt-1.yaml" ||
+    die "정본 Evidence changes:가 Worker --cwd 변경을 담지 않았습니다."
+
+  local no_watch_task="$test_project/.harness/tasks/task-no-watch.yaml"
+  sed -e 's/^task_id: .*/task_id: task-no-watch/' \
+      -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+      -e 's/^status: .*/status: active/' \
+      -e 's|^write_scope:.*|write_scope: [allowed.txt, outside.txt]|' \
+      "$test_project/.harness/tasks/TEMPLATE.yaml" >"$no_watch_task"
+  _ac_set_criteria "$no_watch_task" "acceptance_criteria:
+  - criterion_id: AC-001
+    statement: unavailable watch fixture
+    verified_by:
+      type: command
+      command: 'true'
+"
+  printf '# no watch attempt\n' >"$test_project/.harness/attempts/task-no-watch-attempt-1.md"
+  printf "task: 'task-no-watch'\nrole: 'worker'\nattempt: 1\nresult:\n  summary: 'x'\nstatus: 'settled'\n" \
+    >"$test_project/.harness/evidence/task-no-watch-worker-attempt-1.yaml"
+  _runtime_write_meta "$test_project" task-no-watch worker hh-task-no-watch-w-1 pane-no-watch codex 1 0 \
+    '' '' '' '' '' '' "$scope_tree"
+  HERDR_HARNESS_WATCH_INSTALL_DIR="$test_root/no-install" \
+  HERDR_HARNESS_WATCH_ENTRYPOINT="$test_root/no-entry" \
+  HERDR_HARNESS_SOURCE_REPO="$test_root/no-source" \
+    _runtime_capture_outside_watch "$test_project" task-no-watch worker 1
+  HERDR_HARNESS_WATCH_INSTALL_DIR="$test_root/no-install" \
+  HERDR_HARNESS_WATCH_ENTRYPOINT="$test_root/no-entry" \
+  HERDR_HARNESS_SOURCE_REPO="$test_root/no-source" \
+    bash "$SELF_PATH" transition "$test_project" task-no-watch submitted >/dev/null
+  grep -q "result: 'not_applied'" \
+    "$test_project/.harness/evidence/task-no-watch-attempt-1-scope.yaml" ||
+    die "감시 대상이 없을 때 scope Evidence가 미적용을 명시하지 않았습니다."
+
   # --- AC 동일 명령 캐시 및 재실행 방지 --------------------------------------
   local task_ac_cache="$test_project/.harness/tasks/task-ac-cache.yaml"
   sed -e 's/^task_id: .*/task_id: task-ac-cache/' \
@@ -3938,6 +4054,11 @@ EOF
     'PASS: Agent 상태 정규화'
     'PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)'
     'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)'
+    'PASS: write_scope 실제 변경 대조 (범위 밖 경로 전부 보고·기본 submitted 거부)'
+    'PASS: write_scope 대조 대상 트리 (--cwd Worker Git 트리와 정본 Evidence changes 사용)'
+    'PASS: 작업 트리 밖 변경 감시 (dispatch 지문과 submitted 재대조)'
+    'PASS: 트리 밖 감시 미적용 보고 (대상·해시 불가를 Evidence에 명시하고 전이 유지)'
+    'PASS: 범위 이탈 Evidence 기록 (사유 필수 우회·Event Log·기계 판독 YAML)'
     'PASS: AC 동일 명령 캐시 및 재실행 방지 (명령문자열 단위 캐시/AC행별 기록 보존/중복 성공 시 제출)'
     'PASS: 명시 승인 approve (정상/멱등/무확인/상태/Review/Task ID/충돌 거부)'
     'PASS: 이벤트 로그 기록 (전이·sync-templates·quota-retry·auto-step·lock-reclaim·adopt 9곳 + dispatch·observe·quota-check 직접 호출 event, 쿼터 수치 미노출)'
