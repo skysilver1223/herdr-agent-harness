@@ -263,7 +263,8 @@ Acceptance Criteria (submitted):
   직접 실행하고, 하나라도 실패하면 전이를 거부한다. type: command는 종료
   코드로 판정하고(제한 시간은 project-policy.yaml의
   acceptance_check_timeout_seconds, 기본 600초), type: manual-review는 기록만
-  하고 막지 않는다(Reviewer 몫). 결과는
+  하고 막지 않는다(Reviewer 몫). 선언한 모든 criterion_id가 checks 결과에
+  기록됐는지도 대조하며, 하나라도 빠지면 누락 ID를 알리고 전이를 거부한다. 결과는
   .harness/evidence/TASK-attempt-N-checks.yaml에 남는다.
 
 write_scope 대조와 트리 밖 감시 (submitted):

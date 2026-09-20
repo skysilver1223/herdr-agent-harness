@@ -205,14 +205,21 @@ _remote_ssh() {
     -o ServerAliveInterval=15
     -o ServerAliveCountMax=3
   )
-  local -a tty_option=()
-  if [[ "${1:-}" == --tty ]]; then tty_option=(-t); shift; fi
+  # AC 검증처럼 pipe/process substitution 안에서 호출돼도 ssh가 호출자의
+  # stdin(다음 AC 항목 등)을 읽어 버리지 않게 한다. 대화형 shell은 stdin이
+  # 필요하므로 --tty 경로만 기존처럼 그대로 둔다.
+  local -a tty_option=() stdin_option=(-n)
+  if [[ "${1:-}" == --tty ]]; then
+    tty_option=(-t)
+    stdin_option=()
+    shift
+  fi
 
   if [[ "$(_remote_auth_mode)" == key ]]; then
-    ssh "${tty_option[@]}" "${options[@]}" -i "$REMOTE_SSH_KEY" "$REMOTE_TARGET" "$@"
+    ssh "${stdin_option[@]}" "${tty_option[@]}" "${options[@]}" -i "$REMOTE_SSH_KEY" "$REMOTE_TARGET" "$@"
   else
     _remote_require_password_tool
-    SSHPASS="$HH_REMOTE_PASSWORD" sshpass -e ssh "${tty_option[@]}" "${options[@]}" "$REMOTE_TARGET" "$@"
+    SSHPASS="$HH_REMOTE_PASSWORD" sshpass -e ssh "${stdin_option[@]}" "${tty_option[@]}" "${options[@]}" "$REMOTE_TARGET" "$@"
   fi
 }
 

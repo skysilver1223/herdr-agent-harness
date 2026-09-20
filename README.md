@@ -334,6 +334,10 @@ PASS: Review 경로 이탈 보고 (규정 경로 누락을 결과·Evidence에 �
 PASS: Agent 상태 정규화
 PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)
 PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)
+PASS: AC 전수 실행 대조 (선언·기록 개수 불일치 거부, 누락 criterion_id 보고)
+PASS: AC summary 개수 일치 (선언 total·recorded 계측, Secret withhold 보존)
+PASS: 원격 stdin 비소비 (key·sshpass -n, --tty remote shell 유지)
+PASS: AC 목록 조기 종료 차단 (stdin 소비 원격 fixture의 선언 AC 전부 기록)
 PASS: write_scope 실제 변경 대조 (범위 밖 경로 전부 보고·기본 submitted 거부)
 PASS: write_scope 대조 대상 트리 (--cwd Worker Git 트리와 정본 Evidence changes 사용)
 PASS: 작업 트리 밖 변경 감시 (dispatch 지문과 submitted 재대조)
@@ -949,12 +953,12 @@ acceptance_criteria:
 ```
 
 - `type: command` — 프로젝트 루트에서 실행하고 종료 코드로 판정합니다. 명령 하나당 제한 시간은 `.harness/policies/project-policy.yaml`의 `acceptance_check_timeout_seconds`(기본 600초)이며, 시간을 넘기면 강제 종료됩니다.
-- `type: manual-review` — 자동 검증이 불가능한 기준입니다. `manual`로 기록만 하고 전이를 막지 않습니다. 판단은 Reviewer가 합니다.
+- `type: manual-review` — 자동 검증이 불가능한 기준입니다. `manual`로 기록만 하고 전이를 막지 않습니다. 판단은 Reviewer가 합니다. 다만 선언 개수와 checks 기록 개수의 대조에는 포함됩니다.
 - `verified_by`의 `type`은 `command` 또는 `manual-review`입니다. 값 뒤에 인라인 주석(`type: command  # ...`)을 붙이면 주석까지 값으로 읽혀 전이가 거부되므로, 설명은 항목 위 줄 주석으로 답니다.
 - 항목 키는 `criterion_id`입니다(`.harness/tasks/TEMPLATE.yaml`과 같음). 파서는 `- criterion_id:`로 시작하는 항목만 인식하므로 다른 키를 쓰면 기준이 0개로 읽혀 전이가 거부됩니다.
 - `acceptance_criteria`가 비어 있으면 `submitted`로 전이할 수 없습니다.
-- 원격 실행 모드(`remote.yaml`의 `enabled: true`)에서는 같은 명령을 원격에서 실행합니다.
-- 결과는 `.harness/evidence/TASK-attempt-N-checks.yaml`에 남고, Reviewer의 Context Packet에 그대로 주입됩니다.
+- 원격 실행 모드(`remote.yaml`의 `enabled: true`)에서는 같은 명령을 원격에서 실행합니다. 비대화형 원격 명령은 SSH stdin을 `/dev/null`로 닫아 AC 목록 등의 호출자 stdin을 소비할 수 없습니다. `remote shell`처럼 `--tty`를 쓰는 대화형 경로는 그대로 stdin을 사용합니다.
+- 결과는 `.harness/evidence/TASK-attempt-N-checks.yaml`에 남고, `summary.total`(선언 AC 수)와 `summary.recorded`(실제로 기록한 AC 수)를 대조합니다. 불일치하면 누락된 `criterion_id`를 알리고 submitted 전이를 거부하며, Reviewer의 Context Packet에는 결과가 그대로 주입됩니다.
 
 ### submitted의 실제 변경 범위 대조와 트리 밖 감시
 

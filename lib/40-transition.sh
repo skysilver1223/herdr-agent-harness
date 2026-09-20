@@ -332,11 +332,25 @@ _transition_require_evidence() {
 
 _transition_require_acceptance_criteria() {
   local root="$1" task_id="$2" task_file="$3"
-  local line id type command output status attempt checks_file temporary
-  local total=0 passed=0 failed=0 manual=0 timeout_s
+  local line id type command output status attempt checks_file temporary declared_id record_id
+  local declared_total=0 recorded=0 passed=0 failed=0 manual=0 timeout_s
   local -a cached_commands=()
   local -a cached_statuses=()
   local -a cached_outputs=()
+  local -a declared_ids=()
+  local -a recorded_ids=()
+  local -a missing_ids=()
+  local -a matched_records=()
+
+  # 실행 루프가 읽을 수 있는 항목 수와 Task가 선언한 항목 수는 별개로 센다.
+  # 특히 원격 자식 프로세스가 stdin을 소비하면 while이 조기에 끝날 수 있으므로,
+  # 선언 목록을 먼저 고정해 두고 마지막에 기록된 항목과 대조한다. manual-review도
+  # 실행 대신 기록되는 선언 AC이므로 같은 목록에 포함한다.
+  while IFS=$'\t' read -r declared_id _ _; do
+    [[ -n "$declared_id" ]] || continue
+    declared_ids+=("$(_ac_unquote "$declared_id")")
+  done < <(_ac_entries "$task_file")
+  declared_total=${#declared_ids[@]}
 
   timeout_s="$(awk '/^  acceptance_check_timeout_seconds:/{print $2; exit}' \
     "$root/.harness/policies/project-policy.yaml" 2>/dev/null || true)"
@@ -361,7 +375,6 @@ _transition_require_acceptance_criteria() {
     id="$(_ac_unquote "$id")"
     type="$(_ac_unquote "$type")"
     command="$(_ac_unquote "$command")"
-    total=$((total + 1))
     case "$type" in
       command)
         [[ -n "$command" ]] || {
@@ -427,28 +440,51 @@ _transition_require_acceptance_criteria() {
         die "$id 의 verified_by.type을 알 수 없습니다: ${type:-없음} (command | manual-review): $task_file"
         ;;
     esac
+    # 이 시점에는 checks: 아래에 해당 criterion_id 행이 완전히 기록됐다.
+    recorded=$((recorded + 1))
+    recorded_ids+=("$id")
   done < <(_ac_entries "$task_file")
+
+  # criterion_id가 중복돼도 선언/기록 행 수를 정확히 대조한다. 이름도 같이
+  # 비교해, 단순히 개수만 같은 잘못된 기록을 통과시키지 않는다.
+  local declared_index record_index found
+  for ((declared_index=0; declared_index<declared_total; declared_index++)); do
+    found=0
+    for ((record_index=0; record_index<${#recorded_ids[@]}; record_index++)); do
+      if [[ "${recorded_ids[record_index]}" == "${declared_ids[declared_index]}" &&
+            "${matched_records[record_index]:-0}" != 1 ]]; then
+        matched_records[record_index]=1
+        found=1
+        break
+      fi
+    done
+    (( found == 1 )) || missing_ids+=("${declared_ids[declared_index]}")
+  done
 
   {
     printf 'summary:\n'
-    printf '  total: %s\n  passed: %s\n  failed: %s\n  manual: %s\n' "$total" "$passed" "$failed" "$manual"
+    printf '  total: %s\n  recorded: %s\n  passed: %s\n  failed: %s\n  manual: %s\n' \
+      "$declared_total" "$recorded" "$passed" "$failed" "$manual"
   } >>"$temporary"
 
   if _runtime_has_secret "$temporary"; then
     : >"$temporary"
     printf '# checks withheld\n' >"$temporary"
     printf "note: 'Secret 의심 패턴이 발견되어 원문을 저장하지 않았습니다'\n" >>"$temporary"
-    printf 'summary:\n  total: %s\n  passed: %s\n  failed: %s\n  manual: %s\n' \
-      "$total" "$passed" "$failed" "$manual" >>"$temporary"
+    printf 'summary:\n  total: %s\n  recorded: %s\n  passed: %s\n  failed: %s\n  manual: %s\n' \
+      "$declared_total" "$recorded" "$passed" "$failed" "$manual" >>"$temporary"
   fi
   chmod 0644 "$temporary"
   mv -f -- "$temporary" "$checks_file"
 
-  (( total > 0 )) ||
+  (( declared_total > 0 )) ||
     die "acceptance_criteria가 비어 있어 submitted로 전이할 수 없습니다: $task_file"
+  if (( recorded != declared_total || ${#missing_ids[@]} > 0 )); then
+    die "Acceptance Criteria 검증이 선언된 항목을 모두 기록하지 못했습니다 (선언 $declared_total, 기록 $recorded). 누락 criterion_id: ${missing_ids[*]:-없음}. 결과: ${checks_file#"$root/"}"
+  fi
   (( failed == 0 )) ||
-    die "Acceptance Criteria 검증에 실패했습니다 ($failed/$total). 결과: ${checks_file#"$root/"}"
-  info "AC 검증 통과: pass $passed / manual $manual / 전체 $total → ${checks_file#"$root/"}"
+    die "Acceptance Criteria 검증에 실패했습니다 ($failed/$declared_total). 결과: ${checks_file#"$root/"}"
+  info "AC 검증 통과: pass $passed / manual $manual / 전체 $declared_total → ${checks_file#"$root/"}"
 }
 
 # ---------------------------------------------------------------------------

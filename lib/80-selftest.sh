@@ -265,9 +265,85 @@ AC_PY
   expect_pass "active->submitted" \
     bash "$SELF_PATH" transition "$test_project" task-001 submitted
   local checks_file="$test_project/.harness/evidence/task-001-attempt-1-checks.yaml"
+  grep -q "  total: 2$" "$checks_file" || die "summary.total이 선언 AC 수와 일치하지 않습니다."
+  grep -q "  recorded: 2$" "$checks_file" || die "summary.recorded가 실제 AC 기록 수와 일치하지 않습니다."
   grep -q "  passed: 1$" "$checks_file" || die "AC 통과 수가 기록되지 않았습니다."
   grep -q "  manual: 1$" "$checks_file" || die "manual-review가 기록되지 않았습니다."
   grep -q "  failed: 0$" "$checks_file" || die "AC 실패 수가 0으로 기록되지 않았습니다."
+
+  # 명령이 while의 process-substitution stdin을 먹으면 나머지 AC가 조용히
+  # 사라질 수 있다. 선언 목록과 기록 목록을 별도로 대조해 submitted를 거부하고
+  # 누락 criterion_id와 summary 계측을 남기는지 확인한다.
+  local task_ac_truncated="$test_project/.harness/tasks/task-ac-truncated.yaml"
+  sed -e 's/^task_id: .*/task_id: task-ac-truncated/' \
+      -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+      -e 's/^status: .*/status: active/' \
+      "$test_project/.harness/tasks/TEMPLATE.yaml" >"$task_ac_truncated"
+  _ac_set_criteria "$task_ac_truncated" "acceptance_criteria:
+  - criterion_id: AC-001
+    statement: stdin을 소비하는 fixture 명령
+    verified_by:
+      type: command
+      command: 'cat >/dev/null'
+  - criterion_id: AC-002
+    statement: 반드시 기록돼야 하는 다음 항목
+    verified_by:
+      type: command
+      command: 'true'
+"
+  printf '# truncated AC attempt\n' >"$test_project/.harness/attempts/task-ac-truncated-attempt-1.md"
+  printf "task: 'task-ac-truncated'\nrole: 'worker'\nattempt: 1\nresult:\n  summary: 'x'\nstatus: 'settled'\n" \
+    >"$test_project/.harness/evidence/task-ac-truncated-worker-attempt-1.yaml"
+  local truncated_output truncated_status truncated_checks
+  set +e
+  truncated_output="$(bash "$SELF_PATH" transition "$test_project" task-ac-truncated submitted 2>&1)"
+  truncated_status=$?
+  set -e
+  [[ "$truncated_status" -ne 0 ]] || die "stdin을 소비해 AC가 누락된 제출이 통과했습니다."
+  printf '%s' "$truncated_output" | grep -q 'AC-002' ||
+    die "AC 누락 거부 출력에 criterion_id가 없습니다: $truncated_output"
+  truncated_checks="$test_project/.harness/evidence/task-ac-truncated-attempt-1-checks.yaml"
+  grep -q "  total: 2$" "$truncated_checks" || die "누락 fixture summary.total이 선언 수가 아닙니다."
+  grep -q "  recorded: 1$" "$truncated_checks" || die "누락 fixture summary.recorded가 실제 기록 수가 아닙니다."
+
+  # Secret 의심 패턴으로 원문을 withhold해도 선언 수와 기록 수 계측은 남아야 한다.
+  local task_ac_withheld="$test_project/.harness/tasks/task-ac-withheld.yaml"
+  sed -e 's/^task_id: .*/task_id: task-ac-withheld/' \
+      -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+      -e 's/^status: .*/status: active/' \
+      "$test_project/.harness/tasks/TEMPLATE.yaml" >"$task_ac_withheld"
+  _ac_set_criteria "$task_ac_withheld" "acceptance_criteria:
+  - criterion_id: AC-001
+    statement: withhold summary fixture
+    verified_by:
+      type: command
+      command: \"printf 'Authorization: Bearer fixture\\\\n'\"
+  - criterion_id: AC-002
+    statement: manual count fixture
+    verified_by:
+      type: manual-review
+      instruction: Reviewer 확인
+"
+  printf '# withheld AC attempt\n' >"$test_project/.harness/attempts/task-ac-withheld-attempt-1.md"
+  printf "task: 'task-ac-withheld'\nrole: 'worker'\nattempt: 1\nresult:\n  summary: 'x'\nstatus: 'settled'\n" \
+    >"$test_project/.harness/evidence/task-ac-withheld-worker-attempt-1.yaml"
+  bash "$SELF_PATH" transition "$test_project" task-ac-withheld submitted >/dev/null ||
+    die "Secret withhold fixture submitted 전이가 실패했습니다."
+  local withheld_checks="$test_project/.harness/evidence/task-ac-withheld-attempt-1-checks.yaml"
+  grep -q '^# checks withheld$' "$withheld_checks" || die "Secret checks 원문이 withhold되지 않았습니다."
+  grep -q "  total: 2$" "$withheld_checks" || die "withhold summary.total이 선언 수가 아닙니다."
+  grep -q "  recorded: 2$" "$withheld_checks" || die "withhold summary.recorded가 실제 기록 수가 아닙니다."
+  # 아래 slot/queue fixture의 활성 Task 수에 영향을 주지 않게 이 독립 fixture는
+  # 검증 직후 제거한다. 결과는 이미 위 assertion으로 고정됐다.
+  rm -f -- "$task_ac_truncated" "$task_ac_withheld" \
+    "$test_project/.harness/attempts/task-ac-truncated-attempt-1.md" \
+    "$test_project/.harness/attempts/task-ac-withheld-attempt-1.md" \
+    "$test_project/.harness/evidence/task-ac-truncated-worker-attempt-1.yaml" \
+    "$test_project/.harness/evidence/task-ac-truncated-attempt-1-checks.yaml" \
+    "$test_project/.harness/evidence/task-ac-truncated-attempt-1-scope.yaml" \
+    "$test_project/.harness/evidence/task-ac-withheld-worker-attempt-1.yaml" \
+    "$test_project/.harness/evidence/task-ac-withheld-attempt-1-checks.yaml" \
+    "$test_project/.harness/evidence/task-ac-withheld-attempt-1-scope.yaml"
 
   # --- submitted 실제 변경/write_scope 대조와 트리 밖 감시 -----------------
   # 실제 dispatch 없이도 Worker가 쓴 별도 --cwd Git 트리를 meta에 고정해,
@@ -3104,6 +3180,95 @@ EOF
     die "값에 붙은 #를 주석으로 오파싱했습니다: $enabled_message"
   cp "$remote_config_backup" "$remote_config"
 
+  # 실제 SSH 없이 _remote_ssh의 stdin 계약을 검증한다. 스텁은 -n이 없을 때만
+  # stdin을 끝까지 소비하므로, AC while 루프 안의 원격 실행이 목록을 삼키는
+  # 결합 회귀(R1+R2)를 그대로 재현한다. --tty는 기존처럼 stdin을 유지해야 한다.
+  local remote_stdin_stub_dir="$test_root/remote-stdin-stubs"
+  local remote_stdin_log="$test_root/remote-stdin.log"
+  local remote_test_key="$test_root/remote-stdin-key"
+  mkdir -p "$remote_stdin_stub_dir"
+  : >"$remote_test_key"
+  cat >"$remote_stdin_stub_dir/ssh" <<'STUB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+stdin_mode=consumed
+tty=0
+for argument in "$@"; do
+  [[ "$argument" != -n ]] || stdin_mode=protected
+  [[ "$argument" != -t ]] || tty=1
+done
+printf 'auth=%s stdin=%s tty=%s\n' "${HH_REMOTE_STUB_AUTH:-key}" "$stdin_mode" "$tty" >>"${HH_REMOTE_STDIN_LOG:?}"
+# 실제 ssh의 -n 동작을 흉내 낸다. 보호되지 않은 비대화형 호출은 부모의
+# process-substitution에서 남은 AC 행을 먹는다.
+if [[ "$stdin_mode" == consumed && "$tty" == 0 ]]; then cat >/dev/null; fi
+STUB
+  cat >"$remote_stdin_stub_dir/sshpass" <<'STUB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "${1:-}" == -e ]] || exit 64
+shift
+[[ -n "${SSHPASS:-}" ]] || exit 65
+export HH_REMOTE_STUB_AUTH=sshpass
+exec "$@"
+STUB
+  chmod +x "$remote_stdin_stub_dir/ssh" "$remote_stdin_stub_dir/sshpass"
+
+  local task_ac_remote="$remote_project/.harness/tasks/task-ac-remote.yaml"
+  sed -e 's/^task_id: .*/task_id: task-ac-remote/' \
+      -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
+      -e 's/^status: .*/status: active/' \
+      "$remote_project/.harness/tasks/TEMPLATE.yaml" >"$task_ac_remote"
+  _ac_set_criteria "$task_ac_remote" "acceptance_criteria:
+  - criterion_id: AC-001
+    statement: stdin을 소비하는 원격 fixture 명령
+    verified_by:
+      type: command
+      command: 'cat >/dev/null'
+  - criterion_id: AC-002
+    statement: 목록 끝까지 도달해야 하는 원격 명령
+    verified_by:
+      type: command
+      command: 'true'
+  - criterion_id: AC-003
+    statement: 선언 개수에 포함되는 원격 수동 검토
+    verified_by:
+      type: manual-review
+      instruction: Reviewer 확인
+"
+  printf '# remote AC attempt\n' >"$remote_project/.harness/attempts/task-ac-remote-attempt-1.md"
+  printf "task: 'task-ac-remote'\nrole: 'worker'\nattempt: 1\nresult:\n  summary: 'x'\nstatus: 'settled'\n" \
+    >"$remote_project/.harness/evidence/task-ac-remote-worker-attempt-1.yaml"
+  PATH="$remote_stdin_stub_dir:$PATH" \
+  HH_REMOTE_STDIN_LOG="$remote_stdin_log" \
+  HH_REMOTE_SSH_KEY="$remote_test_key" \
+    bash "$SELF_PATH" transition "$remote_project" task-ac-remote submitted >/dev/null ||
+      die "원격 stdin fixture가 declared AC 전부를 실행하지 못했습니다."
+  local remote_checks="$remote_project/.harness/evidence/task-ac-remote-attempt-1-checks.yaml"
+  grep -q "  total: 3$" "$remote_checks" || die "원격 AC summary.total이 선언 수가 아닙니다."
+  grep -q "  recorded: 3$" "$remote_checks" || die "원격 AC summary.recorded가 실제 기록 수가 아닙니다."
+  [[ "$(grep -c '^  - criterion_id:' "$remote_checks")" -eq 3 ]] ||
+    die "원격 stdin fixture가 AC 목록을 조기 종료했습니다."
+  grep -q '^auth=key stdin=protected tty=0$' "$remote_stdin_log" ||
+    die "키 인증 _remote_ssh가 stdin을 보호하지 않았습니다."
+
+  # 비밀번호 분기도 같은 -n을 전달해야 하며 SSHPASS 환경 전달 계약은 유지한다.
+  PATH="$remote_stdin_stub_dir:$PATH" \
+  HH_REMOTE_STDIN_LOG="$remote_stdin_log" \
+  HH_REMOTE_SSH_KEY="$test_root/no-such-remote-key" \
+  HH_REMOTE_PASSWORD='fixture-only' \
+    bash "$SELF_PATH" remote "$remote_project" run 'true' >/dev/null ||
+      die "sshpass stdin fixture가 실패했습니다."
+  grep -q '^auth=sshpass stdin=protected tty=0$' "$remote_stdin_log" ||
+    die "sshpass _remote_ssh가 stdin을 보호하거나 SSHPASS를 전달하지 않았습니다."
+
+  PATH="$remote_stdin_stub_dir:$PATH" \
+  HH_REMOTE_STDIN_LOG="$remote_stdin_log" \
+  HH_REMOTE_SSH_KEY="$remote_test_key" \
+    bash "$SELF_PATH" remote "$remote_project" shell </dev/null >/dev/null ||
+      die "대화형 remote shell fixture가 실패했습니다."
+  grep -q '^auth=key stdin=consumed tty=1$' "$remote_stdin_log" ||
+    die "--tty remote shell의 stdin 계약이 바뀌었습니다."
+
   # 포트가 붙은 호스트, 개행이 든 값은 init 단계에서 거부한다.
   # ---------------------------------------------------------------------------
   # remote setup: 설정이 없는 기존 프로젝트를 옵션만으로 구성한다. --no-key라
@@ -4054,6 +4219,10 @@ EOF
     'PASS: Agent 상태 정규화'
     'PASS: Secret 스캐너 경계 (task-* 식별자 오탐 없음, 실제 키 접두사·Authorization 탐지)'
     'PASS: Acceptance Criteria 게이트 (명령 직접 실행/실패 거부/알 수 없는 type·빈 목록 거부/manual-review 기록)'
+    'PASS: AC 전수 실행 대조 (선언·기록 개수 불일치 거부, 누락 criterion_id 보고)'
+    'PASS: AC summary 개수 일치 (선언 total·recorded 계측, Secret withhold 보존)'
+    'PASS: 원격 stdin 비소비 (key·sshpass -n, --tty remote shell 유지)'
+    'PASS: AC 목록 조기 종료 차단 (stdin 소비 원격 fixture의 선언 AC 전부 기록)'
     'PASS: write_scope 실제 변경 대조 (범위 밖 경로 전부 보고·기본 submitted 거부)'
     'PASS: write_scope 대조 대상 트리 (--cwd Worker Git 트리와 정본 Evidence changes 사용)'
     'PASS: 작업 트리 밖 변경 감시 (dispatch 지문과 submitted 재대조)'
