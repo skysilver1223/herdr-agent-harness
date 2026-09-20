@@ -6,7 +6,7 @@ compatibility: Herdr pane, Git repository, project-local .harness directory
 
 # harness-review
 
-Worker와 독립된 제3의 Provider 관점에서 코드 변경(Diff), 자체 검증 보고(Attempt), 증적(Evidence)을 정밀 검토하고 `.harness/reviews/`에 객관적 판정을 남긴다. 소스는 한 글자도 고치지 않는다.
+Worker와 독립된 제3의 Provider 관점에서 코드 변경(Diff), 자체 검증 보고(Attempt), 증적(Evidence)을 정밀 검토하고 Context Packet이 준 절대 산출물 경로에 객관적 판정을 남긴다. 소스는 한 글자도 고치지 않는다.
 
 ## 1. 적용조건과 입력
 - Task 상태가 `submitted` 또는 `reviewing`, 자신이 그 Task의 `primary_worker`와 다른 Provider(`provider_must_differ_from_worker: true`), Attempt·Evidence가 제출돼 있음.
@@ -25,7 +25,7 @@ Worker와 독립된 제3의 Provider 관점에서 코드 변경(Diff), 자체 �
    - `verification_quality`: 자체 검증(Evidence)이 실질적이고 신뢰할 수 있는가?
    - `documentation_and_handover`: 변경 설명·주석이 명확한가?
    - `intent_alignment`: 구현이 intent의 `Not`을 침범하지 않았는가? `Invariants`가 유지됐는가?
-4. `.harness/reviews/TEMPLATE.md` 규격으로 `.harness/reviews/task-XXX-review-N.md`를 작성한다. 최종 `판정:`은 오직 `APPROVED` 또는 `CHANGES_REQUESTED` 중 하나, 잔여 리스크와 구체적 수정 요구를 명시한다.
+4. `.harness/reviews/TEMPLATE.md` 규격으로 Context Packet의 `## 산출물 경로` 절에 적힌 **절대 경로**에 Review를 작성한다. 그 경로가 정본이며, 상대 경로를 추측하거나 현재 작업 디렉터리를 기준으로 다시 조합하지 않는다. 최종 `판정:`은 오직 `APPROVED` 또는 `CHANGES_REQUESTED` 중 하나, 잔여 리스크와 구체적 수정 요구를 명시한다.
 5. 검토 결과를 Orchestrator에게 알린다.
 6. `결과: SUCCESS, 판정: APPROVED|CHANGES_REQUESTED` 또는 `결과: BLOCKED, 사유: <독립성 위반 등>` 한 줄로 끝낸다.
 
@@ -34,5 +34,5 @@ Worker와 독립된 제3의 Provider 관점에서 코드 변경(Diff), 자체 �
 - `review-policy.yaml`의 `immediate_rejection`(`intent_not_violation`, `security_and_secrets_finding`)이 1건이라도 발견되면 다른 항목 판정과 무관하게 즉시 `CHANGES_REQUESTED`로 판정하고 구체적 수정 지침을 기술한다.
 
 ## 4. 산출물·불변식
-- `.harness/reviews/task-XXX-review-N.md`(8대 항목 평가 + `intent_alignment` 포함, 판정 명시).
+- Context Packet의 `## 산출물 경로`가 지정한 절대 Review 파일(8대 항목 평가 + `intent_alignment` 포함, 판정 명시).
 - 불변: 소스가 한 글자도 수정되지 않음(`git status` 깨끗), Worker와 Reviewer Provider가 실제로 다름, intent의 `Not` 위반 여부를 명시적으로 확인함. 재검토 시 기존 Review를 덮어쓰지 않고 번호를 증가시킨다.

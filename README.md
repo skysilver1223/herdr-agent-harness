@@ -325,6 +325,10 @@ PASS: 신규 프로젝트 보호
 PASS: 비대화형 명시적 실패
 PASS: 상태 전이표 강제 (17개 케이스, handover_required 인계문서 게이트 포함)
 PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)
+PASS: 산출물 절대 경로 명시
+PASS: cwd 무관 산출물 경로
+PASS: 역할별 산출물 경로
+PASS: 산출물 경로 지시 정합
 PASS: 발췌 문자 경계 절단 (gawk substr·max_columns 문자 상한·비영 종료 차단)
 PASS: Packet UTF-8 무결성 (긴 한글 Review·Evidence fixture iconv 검증)
 PASS: gawk 의존성 명시 (부재 시 발췌 표식·doctor·README 진단)
@@ -593,7 +597,7 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 
 `dispatch`는 프롬프트 미전달로 확인된 경우의 1회 재전송 외에는 Task 재시도, 상태 전이, blocked 응답 또는 Provider failover를 수행하지 않습니다. Orchestrator는 반환된 `dispatch_result`를 확인한 뒤 사용자 승인 경계를 지키며 다음 스텝을 호출합니다.
 
-### Context Packet UTF-8과 Reviewer 산출물 경로
+### Context Packet UTF-8과 산출물 경로
 
 직전 Evidence·AC 결과·Review를 Context Packet에 넣을 때는 `gawk`의 `substr`로
 각 줄을 기본 `max_columns=500` **문자** 경계에서 자릅니다. 긴 한글 줄을 바이트
@@ -602,7 +606,13 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 않고 Packet에 발췌 생략 표식과 stderr 경고를 남깁니다. `herdr-harness doctor`에서
 먼저 설치 상태를 확인하세요.
 
-Reviewer dispatch가 끝난 즉시 `.harness/reviews/TASK_ID-*.md`를 확인합니다. 파일이
+Context Packet은 역할마다 `## 산출물 경로` 절에 하나의 **절대 경로**만 제공합니다.
+Worker에는 다음 Attempt 파일을, Reviewer에는 다음 `-review-N` Review 파일을 제공합니다.
+`dispatch --cwd`로 Agent의 작업 디렉터리를 바꿔도 이 경로는 프로젝트 루트 기준으로
+유지됩니다. Agent는 Packet의 값을 정본으로 사용해야 하며, 상대 경로를 현재 작업
+디렉터리에 다시 해석해서는 안 됩니다.
+
+Reviewer dispatch가 끝난 즉시 Packet에 준 바로 그 절대 Review 경로를 확인합니다. 파일이
 없으면 `review_artifact=missing_required_path`와 경고를 출력하고 raw/정본 Evidence에
 기록합니다. 이미 끝난 Agent 턴을 실패로 바꾸거나, Provider의 다른 작업 경로에서
 파일을 자동으로 옮기지는 않습니다. 사람이 Agent 출력·작업 경로를 확인해 조치한

@@ -211,6 +211,36 @@ _runtime_next_attempt() {
   printf '%s\n' "$((maximum + 1))"
 }
 
+# Review 번호는 Attempt 번호와 별개다. Worker의 재작업 한 번 뒤에도 Review는
+# 첫 번째일 수 있으므로, Reviewer가 써야 할 다음 규정 파일은 reviews/만 보고
+# 정한다. Context Packet과 dispatch의 존재 확인이 반드시 이 한 규칙을 공유한다.
+_runtime_next_review() {
+  local root="$1" task_id="$2" path base number maximum=0
+  shopt -s nullglob
+  for path in "$root/.harness/reviews/$task_id-review-"*.md; do
+    base="${path##*/}"
+    number="${base#"$task_id-review-"}"
+    number="${number%.md}"
+    [[ "$number" =~ ^[0-9]+$ ]] || continue
+    (( number > maximum )) && maximum="$number"
+  done
+  shopt -u nullglob
+  printf '%s\n' "$((maximum + 1))"
+}
+
+# Agent가 기록할 산출물의 규정 절대 경로 정본. 역할별 Packet과 Reviewer
+# dispatch의 artifact 검사가 이 함수를 함께 써서, 한쪽만 다른 규칙을 갖지 않게
+# 한다. number는 호출 시점에 확정된 다음 Attempt 또는 Review 번호다.
+_runtime_artifact_path() {
+  local root="$1" task_id="$2" role="$3" number="$4"
+  [[ "$number" =~ ^[1-9][0-9]*$ ]] || return 1
+  case "$role" in
+    worker) printf '%s\n' "$root/.harness/attempts/$task_id-attempt-$number.md" ;;
+    reviewer) printf '%s\n' "$root/.harness/reviews/$task_id-review-$number.md" ;;
+    *) return 1 ;;
+  esac
+}
+
 _runtime_write_result() {
   local root="$1" task_id="$2" role="$3" result="$4"
   _runtime_atomic_text "$root/.harness/runtime/$task_id-$role.result" "$result"
@@ -743,7 +773,16 @@ _runtime_previous_round() {
 _runtime_context_packet() {
   local root="$1" task_id="$2" role="$3" task_file="$4" destination="$5"
   local extra_prompt="${6:-}"
-  local temporary spec_file
+  local artifact_path="${7:-}" artifact_number temporary spec_file
+  if [[ -z "$artifact_path" ]]; then
+    case "$role" in
+      worker) artifact_number="$(_runtime_next_attempt "$root" "$task_id")" ;;
+      reviewer) artifact_number="$(_runtime_next_review "$root" "$task_id")" ;;
+      *) return 1 ;;
+    esac
+    artifact_path="$(_runtime_artifact_path "$root" "$task_id" "$role" "$artifact_number")" || return 1
+  fi
+  [[ "$artifact_path" == /* ]] || return 1
   temporary="$(mktemp "$root/.harness/runtime/.context.XXXXXX")"
   trap "rm -f -- '$temporary'" RETURN
   spec_file="$root/.harness/SPEC.md"
@@ -762,6 +801,9 @@ _runtime_context_packet() {
     printf '\n## Task Contract\n\n'
     cat "$task_file"
     printf '\n`write_scope`, `resources`, `inputs`, `acceptance_criteria`는 위 Task Contract YAML 안에 있다. 착수 게이트·제외 범위·불변식은 `%s`를 읽는다.\n' "$(_runtime_yaml_scalar "$task_file" intent)"
+    printf '\n## 산출물 경로\n\n'
+    printf '이 Task에서 %s 역할이 기록할 산출물의 규정 절대 경로: `%s`\n\n' "$role" "$artifact_path"
+    printf '이 경로를 그대로 사용해 산출물을 작성한다. 상대 경로로 바꾸거나 다른 산출물 경로를 사용하지 않는다.\n'
     # 직전 시도 결과를 넣지 않으면 changes_requested로 돌아온 재시도에서 Worker가
     # Reviewer 지적을 못 본 채 같은 접근을 반복한다(Rework의 주된 원인).
     # 전체 이력이 아니라 "최신 한 번"만 넣어 Packet이 부풀지 않게 한다.

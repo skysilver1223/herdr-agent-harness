@@ -1052,6 +1052,66 @@ AC_PY
   grep -q '직전 시도' "$test_project/.harness/runtime/packet-fresh.md" &&
     die "이력이 없는데 직전 시도 절이 붙었습니다."
   rm -f "$fresh_task"
+
+  # --- 역할별 절대 산출물 경로: --cwd와 분리된 Packet 정본 -----------------
+  # Agent의 --cwd는 Sandbox·수정 대상에는 필요하지만, Harness 산출물은 항상
+  # 프로젝트 root 아래에 남아야 한다. 경로를 상대 문자열로만 주면 Agent가
+  # --cwd 기준으로 정확히 해석해도 엉뚱한 트리에 파일을 만든다.
+  local artifact_project artifact_cwd worker_artifact reviewer_artifact
+  local worker_artifact_packet reviewer_artifact_packet cwd_artifact_output
+  artifact_project="$test_root/산출물 경로 project"
+  cp -a "$test_project" "$artifact_project"
+  artifact_cwd="$test_root/별도 작업 cwd"
+  mkdir -p "$artifact_cwd"
+  worker_artifact="$(_runtime_artifact_path "$artifact_project" task-001 worker \
+    "$(_runtime_next_attempt "$artifact_project" task-001)")"
+  reviewer_artifact="$(_runtime_artifact_path "$artifact_project" task-001 reviewer \
+    "$(_runtime_next_review "$artifact_project" task-001)")"
+  worker_artifact_packet="$artifact_project/.harness/runtime/task-001-artifact-worker.md"
+  reviewer_artifact_packet="$artifact_project/.harness/runtime/task-001-artifact-reviewer.md"
+  _runtime_context_packet "$artifact_project" task-001 worker \
+    "$artifact_project/.harness/tasks/task-001.yaml" "$worker_artifact_packet" ||
+    die "Worker 산출물 경로 Packet 생성에 실패했습니다."
+  _runtime_context_packet "$artifact_project" task-001 reviewer \
+    "$artifact_project/.harness/tasks/task-001.yaml" "$reviewer_artifact_packet" ||
+    die "Reviewer 산출물 경로 Packet 생성에 실패했습니다."
+  grep -Fq "## 산출물 경로" "$worker_artifact_packet" &&
+    grep -Fq "$worker_artifact" "$worker_artifact_packet" ||
+    die "Worker Packet에 규정 절대 Attempt 경로가 없습니다."
+  grep -Fq "## 산출물 경로" "$reviewer_artifact_packet" &&
+    grep -Fq "$reviewer_artifact" "$reviewer_artifact_packet" ||
+    die "Reviewer Packet에 규정 절대 Review 경로가 없습니다."
+  [[ "$worker_artifact" == /* && "$reviewer_artifact" == /* ]] ||
+    die "Packet 산출물 경로가 절대 경로가 아닙니다."
+  ! grep -Fq "$reviewer_artifact" "$worker_artifact_packet" ||
+    die "Worker Packet에 Reviewer 산출물 경로가 섞였습니다."
+  ! grep -Fq "$worker_artifact" "$reviewer_artifact_packet" ||
+    die "Reviewer Packet에 Worker 산출물 경로가 섞였습니다."
+
+  # print-only도 실제 dispatch와 같은 Packet 생성 경로를 타므로 --cwd가 달라도
+  # 프로젝트 root 절대 경로가 유지되는지를 고정한다. Agent·네트워크는 호출하지 않는다.
+  cwd_artifact_output="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$artifact_project" task-001 worker \
+    --print-only --cwd "$artifact_cwd")"
+  grep -Fq "$worker_artifact" "$artifact_project/.harness/runtime/task-001-context-worker.md" ||
+    die "--cwd dispatch Packet이 프로젝트 root의 Attempt 경로를 주지 않았습니다."
+  [[ "$worker_artifact" != "$artifact_cwd"/* ]] ||
+    die "--cwd dispatch Packet의 Attempt 경로가 Agent cwd 아래입니다."
+  printf '%s' "$cwd_artifact_output" | grep -q '^dispatch_result=print_only$' ||
+    die "산출물 경로 --cwd fixture가 print-only로 끝나지 않았습니다."
+
+  grep -Fq 'Context Packet의 `## 산출물 경로` 절에 적힌 **절대 경로**' \
+    "$HARNESS_TEMPLATE_DIR/.agents/skills/harness-review/SKILL.md" ||
+    die "Reviewer Skill이 Packet 절대 산출물 경로를 정본으로 삼지 않습니다."
+  grep -Fq 'Context Packet의 `## 산출물 경로` 절에 명시된 절대 Review 파일 하나' \
+    "$HARNESS_TEMPLATE_DIR/.agents/roles/reviewer.agent.md" ||
+    die "Reviewer 역할 문서가 Packet 절대 산출물 경로를 정본으로 삼지 않습니다."
+  grep -Fq '`.harness/reviews/task-XXX-review-N.md`' \
+    "$HARNESS_TEMPLATE_DIR/.agents/skills/harness-review/SKILL.md" &&
+    die "Reviewer Skill에 상대 Review 산출물 경로 단독 지시가 남았습니다."
+  grep -Fq '`.harness/reviews/task-XXX-review-N.md`' \
+    "$HARNESS_TEMPLATE_DIR/.agents/roles/reviewer.agent.md" &&
+    die "Reviewer 역할 문서에 상대 Review 산출물 경로 단독 지시가 남았습니다."
+
   # --- 역할별 읽기 지침 정합 및 Context Packet 필수 정보 보존 ---
   # dispatch Packet에 SPEC/Task가 있으면 Worker/Reviewer가 원본을 중복 통독하지 않도록 지침(AGENTS.md)을 갱신했다.
   grep -q 'Worker와 Reviewer는 전달된 Context Packet에 SPEC 발췌와 Task 정보가 포함되어 있다면 원본을 중복해서 통독하지 않는다' "$test_project/AGENTS.md" ||
@@ -3957,7 +4017,7 @@ REPORT_JSON_CHECK
   # Provider를 실제로 띄우지 않는 Herdr 함수 스텁이다. 완료 상태인데도 Review가
   # .harness/reviews/TASK-*.md에 없을 때만 경고하고 dispatch_result 자체는
   # 실패로 바꾸지 않아야 한다.
-  local review_report_project review_report_task review_report_output review_report_raw review_report_yaml
+  local review_report_project review_report_task review_report_output review_report_raw review_report_yaml review_report_expected
   review_report_project="$test_root/review-path-report-project"
   cp -a "$test_project" "$review_report_project"
   review_report_task="$review_report_project/.harness/tasks/task-review-report.yaml"
@@ -3965,6 +4025,12 @@ REPORT_JSON_CHECK
       -e 's/^milestone_id: .*/milestone_id: milestone-001/' \
       -e 's/^status: .*/status: reviewing/' \
       "$test_project/.harness/tasks/TEMPLATE.yaml" >"$review_report_task"
+  # 이전 Review가 있어도 이번 dispatch의 Packet이 지정한 다음 -review-N 파일이
+  # 없으면 missing이어야 한다. 최신 파일 하나만 보는 옛 검사는 이를 present로
+  # 오판해 Packet과 dispatch의 규정 경로가 갈라졌다.
+  printf '판정: APPROVED\n' >"$review_report_project/.harness/reviews/task-review-report-review-1.md"
+  review_report_expected="$(_runtime_artifact_path "$review_report_project" task-review-report reviewer \
+    "$(_runtime_next_review "$review_report_project" task-review-report)")"
   review_report_output="$(
     herdr() {
       case "${1:-}:${2:-}" in
@@ -3993,9 +4059,11 @@ REPORT_JSON_CHECK
     die "Reviewer Review 경로 이탈이 dispatch를 실패로 바꿨습니다."
   review_report_raw="$review_report_project/.harness/evidence/raw/task-review-report-reviewer-attempt-1.md"
   review_report_yaml="$review_report_project/.harness/evidence/task-review-report-reviewer-attempt-1.yaml"
+  grep -Fq "$review_report_expected" "$review_report_project/.harness/runtime/task-review-report-context-reviewer.md" ||
+    die "Reviewer Packet 경로와 dispatch Review artifact 규정 경로가 다릅니다."
   grep -q 'Review artifact: missing_required_path' "$review_report_raw" ||
     die "Reviewer Review 경로 이탈이 raw Evidence에 기록되지 않았습니다."
-  grep -q '규정 경로 .*task-review-report' "$review_report_yaml" ||
+  grep -q '규정 절대 경로 .*task-review-report' "$review_report_yaml" ||
     die "Reviewer Review 경로 이탈이 정본 Evidence 요약에 기록되지 않았습니다."
 
   # --- 프롬프트 전달 양성 신호 ----------------------------------------------
@@ -4278,6 +4346,10 @@ EOF
     'PASS: 비대화형 명시적 실패'
     'PASS: 상태 전이표 강제 (17개 케이스, handover_required 인계문서 게이트 포함)'
     'PASS: Context Packet 직전 라운드 주입 (Evidence·AC 결과·Review 판정, 첫 시도엔 미주입)'
+    'PASS: 산출물 절대 경로 명시'
+    'PASS: cwd 무관 산출물 경로'
+    'PASS: 역할별 산출물 경로'
+    'PASS: 산출물 경로 지시 정합'
     'PASS: 발췌 문자 경계 절단 (gawk substr·max_columns 문자 상한·비영 종료 차단)'
     'PASS: Packet UTF-8 무결성 (긴 한글 Review·Evidence fixture iconv 검증)'
     'PASS: gawk 의존성 명시 (부재 시 발췌 표식·doctor·README 진단)'

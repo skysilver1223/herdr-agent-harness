@@ -39,7 +39,7 @@ cmd_dispatch() {
   [[ "$role" == worker || "$role" == reviewer ]] || die "ROLE은 worker 또는 reviewer여야 합니다."
   _runtime_require_id "$task_id"
 
-  local root task_file runtime_dir context provider attempt started_at baseline
+  local root task_file runtime_dir context provider attempt artifact_number artifact_path started_at baseline
   local pane_output pane_status pane_id agent_name start_output start_status
   local prompt_output prompt_status get_output get_status read_output read_status result
   local prompt_resent=0 prompt_confirmation="" prompt_confirmation_wait_ms=0
@@ -102,8 +102,17 @@ cmd_dispatch() {
     fi
   fi
 
+  attempt="$(_runtime_next_attempt "$root" "$task_id")"
+  if [[ "$role" == worker ]]; then
+    artifact_number="$attempt"
+  else
+    artifact_number="$(_runtime_next_review "$root" "$task_id")"
+  fi
+  artifact_path="$(_runtime_artifact_path "$root" "$task_id" "$role" "$artifact_number")" ||
+    die "산출물 경로를 계산하지 못했습니다: task=$task_id role=$role"
+
   context="$runtime_dir/$task_id-context-$role.md"
-  if ! _runtime_context_packet "$root" "$task_id" "$role" "$task_file" "$context" "$extra_prompt"; then
+  if ! _runtime_context_packet "$root" "$task_id" "$role" "$task_file" "$context" "$extra_prompt" "$artifact_path"; then
     _runtime_write_result "$root" "$task_id" "$role" error
     append_event "$root" dispatch "$task_id" "$role" error "stage=context_packet"
     printf '경고: Context Packet에서 Secret 의심 패턴이 발견되어 저장하거나 전송하지 않았습니다.\n' >&2
@@ -169,7 +178,6 @@ cmd_dispatch() {
     esac
   fi
 
-  attempt="$(_runtime_next_attempt "$root" "$task_id")"
   # agent start 실패 시 Pane 생성 직후 이 경로를 stderr에 바로 알려야 하므로,
   # 원문이 담기는 raw Evidence 파일 경로를 실제로 쓰기 전에 미리 계산해 둔다
   # (경로 계산 자체는 부수효과가 없다).
@@ -351,11 +359,11 @@ cmd_dispatch() {
   quota_signal="$(_runtime_scan_quota_signal "$prompt_output"$'\n'"$read_output" || true)"
 
   if [[ "$role" == reviewer ]]; then
-    if [[ -n "$(latest_task_review "$root" "$task_id")" ]]; then
+    if [[ -f "$artifact_path" ]]; then
       review_artifact_status="present_required_path"
     else
       review_artifact_status="missing_required_path"
-      review_artifact_note="Reviewer가 규정 경로 .harness/reviews/${task_id}-*.md 에 Review를 남기지 않았습니다. Agent 출력 또는 Provider 작업 경로를 확인하고 사람이 조치하세요."
+      review_artifact_note="Reviewer가 규정 절대 경로 $artifact_path 에 Review를 남기지 않았습니다. Agent 출력 또는 Provider 작업 경로를 확인하고 사람이 조치하세요."
     fi
   fi
 

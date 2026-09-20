@@ -16,7 +16,7 @@ Task가 `reviewer: user|human`이거나 같은 Provider에 유효한 `policy_ove
 - `reviewing -> awaiting_approval` (8대 기준을 모두 충족하여 합격한 경우)
 
 ## 3. 쓰기 가능 경로 (Write Scope)
-- `.harness/reviews/task-XXX-review-N.md`
+- Context Packet의 `## 산출물 경로` 절에 명시된 절대 Review 파일 하나. 이 값이 정본이므로 상대 경로를 현재 작업 디렉터리 기준으로 해석하거나 다른 경로를 만들지 않는다.
 
 ## 4. 엄격한 금지 사항 및 위반 시 지침
 - 프로젝트 소스코드나 테스트 코드에 대한 직접 쓰기/수정은 절대 금지된다.
