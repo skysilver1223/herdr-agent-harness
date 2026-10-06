@@ -11,6 +11,7 @@ main() {
     start) cmd_start "$@" ;;
     status) cmd_status "$@" ;;
     validate) cmd_validate "$@" ;;
+    preflight) cmd_preflight "$@" ;;
     transition) cmd_transition "$@" ;;
     approve) cmd_approve "$@" ;;
     dispatch) cmd_dispatch "$@" ;;

@@ -252,8 +252,9 @@ init             : 새 프로젝트에 Harness 문서·정책·역할 파일 생
 sync-templates   : Skill·역할·정책 템플릿을 지금 버전으로 재동기화
 models           : 적용 가능 모델과 허용·프리미엄 정책 조회·갱신
 start            : 프로젝트 디렉터리에서 Herdr Session 열기
-status           : STATE.md 출력 (--live로 문서·Herdr·Git 대조)
+status           : 현재 상태 요약 (--full 원문, --live로 문서·Herdr·Git 대조)
 validate         : 상태를 바꾸지 않고 정합성만 검사
+preflight        : 첫 dispatch 전 Provider·모델·승인 인수·write_scope 점검
 transition       : Task 상태를 전이표에 따라 전이
 ...
 remote           : 원격 서버에서 빌드·테스트·VCS 실행 (opt-in)
@@ -344,6 +345,12 @@ PASS: Task Lock (동시 획득 거부/release/stale 회수)
 PASS: quota-retry/auto-step opt-in 게이트
 PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)
 PASS: sync-templates (dry-run/apply·멱등, agent-policy 모델·프리미엄 키 전파·사용자 값 보존, AGENTS.md/STATE.md 비침범, .gitignore 보충)
+PASS: init 운영 프리셋 (agy-primary: project·정책·AGENTS·Task 템플릿·Planner·Review 배정, 모델 ID 미고정, 명시 옵션 우선, 기본 init 하위 호환)
+PASS: preflight (등급 매핑 누락·수정 위치/bypass 인수·사용자 Gate 유지/등급·프리미엄 충돌/오래된 agy 모델/외부 저장소·쓰기 불가 write_scope/Worker≠Reviewer/파일 무변경)
+PASS: 프리셋 dispatch --print-only (agy Worker·codex Reviewer 별도 Agent, bypass 인수·등급 모델·속도·Packet 크기 표시)
+PASS: Context Packet 축약 (유효 UTF-8, 긴 한글 AC 원문·제약·산출물 절대 경로 보존, 재시도엔 미해결 지적·실패 AC만, APPROVED 본문·템플릿 주석 제외)
+PASS: write_scope 대조 (bypass에서도 SPEC Gate 유지, 범위 밖·glob 밖·--cwd 저장소 변경 거부, 디렉터리 범위·병렬 Task 제외)
+PASS: status 요약 (오래된 꼬리 메모 비노출·tail -30에 승인 대기 Task, STATE 불일치 표시, --full 원문, --json·--live --json 호환, STATE.md 무변경)
 PASS: README 기대 출력 ↔ 실제 test 출력 정합
 PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)
 ```
@@ -381,6 +388,29 @@ herdr-harness init ~/Projects/snmp-normalizer \
   --reviewer agy
 ```
 
+### agy 중심 운영 (`--preset agy-primary`)
+
+Orchestrator는 claude, 주 작업자는 agy, 독립 Reviewer는 codex, 도구 승인은 `bypass`로 운영하는 구성을 한 번에 만듭니다.
+
+```bash
+herdr-harness init ~/Projects/example --name example --goal '테스트 목표' --preset agy-primary
+herdr-harness preflight ~/Projects/example
+```
+
+| 항목 | `agy-primary` 값 |
+|---|---|
+| Orchestrator / Worker / Reviewer | `claude` / `agy` / `codex` |
+| Fallback 후보 | `claude,codex` (자동 교체 없음 — 교체는 Handover + 사용자 승인) |
+| 도구 승인 모드 | `bypass` (`agy_bypass: '--dangerously-skip-permissions'`, `codex_bypass: '--dangerously-bypass-approvals-and-sandbox'`) |
+| Worker 기본 등급/속도 | `standard` / `medium` |
+| Reviewer 기본 등급/속도 | `light` / `medium` |
+
+- `project.yaml`, `agent-policy.yaml`, `AGENTS.md`, Task·Wave 템플릿, Planner 역할 문서, `review-policy.yaml`이 모두 같은 배정으로 생성됩니다. 개별 Task가 다른 Provider를 명시하면 그 Task 계약이 우선합니다.
+- `--worker`·`--approval-mode` 같은 개별 옵션을 함께 주면 그 값이 프리셋보다 우선합니다.
+- **모델 ID는 고정하지 않습니다.** 모델 이름은 자주 바뀌므로 `<provider>_models`와 `<provider>_tier_*`는 비어 있는 채로 생성되고, `preflight`가 `[FAIL]`과 수정 위치로 무엇을 채울지 알려 줍니다(agy는 `herdr-harness models PATH --refresh --apply`, codex·claude는 `agent-policy.yaml` 직접 편집).
+- `bypass`는 Provider의 **도구 실행 승인**에만 적용됩니다. SPEC/Wave 승인, Provider 교체, 위험 명령, 외부 쓰기·배포, `completed` 최종 승인은 그대로 사용자 Gate를 통과하고, `submitted` 전이가 `write_scope` 밖 변경을 거부합니다.
+- 기존 `init` 호출(프리셋 없음)의 결과는 바뀌지 않습니다 — 아래 기본값 표 그대로이며 `project.yaml`에 `preset: 'none'`만 추가됩니다.
+
 ### Python 시계열 분석
 
 ```bash
@@ -400,6 +430,7 @@ herdr-harness init ~/Projects/timeseries-inference \
 | Reviewer | `agy` |
 | Fallback | `claude,agy` |
 | Agent 승인 모드 | `auto` (`--approval-mode ask\|auto\|bypass`) |
+| 운영 프리셋 | `none` (`--preset none\|agy-primary`) |
 | 활성 Task | 최대 5개 |
 | 병렬 Worker | 최대 2개 |
 
@@ -407,10 +438,17 @@ herdr-harness init ~/Projects/timeseries-inference \
 
 ## 운영 시작
 
+먼저 읽기 전용 사전 점검을 통과시킵니다. 생성된 `HARNESS_START.md`에도 같은 순서가 적혀 있습니다.
+
 ```bash
 cd ~/Projects/snmp-normalizer
+herdr-harness preflight .
 herdr-harness start .
 ```
+
+`preflight`는 Provider CLI, PATH의 설치본과 실행 중인 사본의 일치(lib·templates 지문), Git 기준선, 승인 모드가 Worker/Reviewer에 실제로 붙일 인수, `project.yaml`의 사용자 Gate, Worker≠Reviewer, 역할별 모델·등급·속도 해석(dispatch와 같은 함수), 등급과 프리미엄 선언의 충돌, 설치된 agy 목록에 없는 모델 ID, `write_scope`의 쓰기 가능 여부·외부 저장소 Git 기준선을 봅니다. `[FAIL]`이 있으면 종료 코드 1이며 각 줄 아래 `수정:`에 고칠 위치가 나옵니다. 파일은 바꾸지 않습니다.
+
+기존 코드·문서·Dump·외부 저장소 경로는 `.harness/references/inventory.md`에 기록하고, 다른 저장소를 수정하는 Task는 `write_scope`에 그 절대경로를 적은 뒤 `dispatch --cwd`로 그 저장소에서 기동합니다. `PROGRESS.md` 같은 도메인 뷰는 선택 사항입니다 — 상태 정본은 Task YAML, 요약은 `STATE.md` 상태표이며 도메인 뷰는 같은 회차에 그 뒤에 맞춥니다.
 
 Herdr 첫 Pane에서 설정된 Orchestrator를 실행합니다.
 
@@ -429,12 +467,18 @@ SPEC 승인 전에는 구현하지 마. 이후 harness-plan, harness-orchestrate
 ## 상태 확인
 
 ```bash
-herdr-harness status ~/Projects/snmp-normalizer
+herdr-harness status ~/Projects/snmp-normalizer           # 현재 상태 요약
+herdr-harness status ~/Projects/snmp-normalizer --full    # STATE.md 원문
+herdr-harness status ~/Projects/snmp-normalizer --json
 herdr-harness status ~/Projects/snmp-normalizer --live
 herdr-harness status ~/Projects/snmp-normalizer --live --json
 ```
 
-기본 상태 명령은 `STATE.md`를 출력합니다. `--live`는 문서 상태와 Herdr Agent, Git 상태를 함께 대조하여 `DRIFT`와 `ORPHAN`을 표시합니다. 상태를 자동 수정하지는 않습니다.
+기본 상태 명령은 **현재 상태 요약**입니다. 정본인 Task YAML의 `status:`로 사용자 승인·판단 대기(`awaiting_approval`·`blocked`·`handover_required`, SPEC·draft Wave), completed가 아닌 Task(사람 판단이 필요한 순), `STATE.md` 상태표와의 불일치를 보여 줍니다. `STATE.md`에서는 머리 bullet과 상태표만 읽습니다 — 그 아래에 Wave마다 쌓인 서술 섹션(`다음 작업`, `이관 메모` 등)은 작성 시점의 기록이라 출력하지 않습니다. 예전처럼 원문 전체를 보려면 `--full`을 씁니다.
+
+`--live`는 같은 요약에 Herdr Agent·Git 상태 대조를 더해 `DRIFT`와 `ORPHAN`을 표시합니다(`--live --full`은 요약 대신 원문). `--live --json`은 기존 필드(`state` 원문·`herdr_available`·`agents`·`git_status`·`pending_decisions`)를 그대로 두고 `tasks`·`attention`·`completed_count`·`spec_status`를 덧붙입니다. 어떤 형태도 상태를 자동 수정하지 않으며 `STATE.md`를 바꾸지 않습니다.
+
+`STATE.md`가 길어지는 것은 Orchestrator 운영 규칙으로 다룹니다: Wave를 닫을 때 그 Wave의 서술 섹션을 `.harness/archive/STATE-<wave-id>.md`로 옮기고 본문에는 헤더·상태표·현재 Wave만 남깁니다(`orchestrator.agent.md` §1.1).
 
 ## 명령 사용법 찾기
 
@@ -493,12 +537,14 @@ Harness는 상주 Controller나 자율 반복 루프를 실행하지 않습니�
 | 명령 | 책임 |
 |---|---|
 | `herdr-harness validate [PATH] [--wave ID] [--no-git]` | Git 기준선, Task/Wave, Provider, 의존성, 실행 상한과 write scope를 읽기 전용 검증 |
-| `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제. `submitted`로 갈 때는 Acceptance Criteria의 `verified_by` 명령을 직접 실행하고 하나라도 실패하면 거부 |
+| `herdr-harness preflight [PATH]` | 첫 dispatch 전 Provider CLI·설치본·승인 인수·모델 매핑·write_scope 쓰기 가능 여부를 읽기 전용 점검 |
+| `herdr-harness transition PATH TASK_ID TO_STATE [--note TEXT]` | 허용된 상태 전이와 필수 Attempt/Evidence/Review/승인 기록 강제. `submitted`로 갈 때는 `write_scope` 밖 변경(마지막 Worker Attempt의 기준 commit 이후)을 거부하고, Acceptance Criteria의 `verified_by` 명령을 직접 실행해 하나라도 실패하면 거부 |
 | `herdr-harness approve PATH TASK_ID --confirm-user-approval` | 사용자 명시 승인 확인 후 승인 증거를 원자적으로 기록하고 기존 `transition` 게이트로 `completed` 전이 |
 | `herdr-harness dispatch PATH TASK_ID worker\|reviewer [--timeout MS] [--print-only] [--extra-prompt FILE] [--cwd DIR]` | 역할별 모델을 선택하고 프리미엄 승인·Provider 기본값 누출 차단을 적용한 뒤 Pane 생성, Agent 시작, Context Packet 1회 전송, 대기와 증적 기록. `--print-only`는 아무것도 띄우지 않고 실행할 `herdr` 명령만 출력 |
 | `herdr-harness observe PATH TASK_ID [worker\|reviewer]` | 기존 Agent를 재조회하고 Evidence에 추가 |
 | `herdr-harness adopt PATH TASK_ID worker\|reviewer --pane PANE --agent NAME [--provider P]` | 사람이 직접 띄운 Agent를 Harness 추적에 등록(`--print-only` 폴백의 마지막 단계) |
 | `herdr-harness close-agent PATH TASK_ID [worker\|reviewer] [--force]` | Harness runtime에 등록된 Pane만 정리 |
+| `herdr-harness status [PATH] [--full] [--json]` | Task YAML 기준 현재 상태 요약(`--full`은 STATE.md 원문) |
 | `herdr-harness status [PATH] --live [--json]` | 문서·Herdr·Git 실시간 상태 대조 |
 | `herdr-harness quota-check PATH TASK_ID worker\|reviewer` | 실행 중인 Agent의 쿼터 확인(claude·codex는 `/status` 전송, agy는 `--print "/usage"`) |
 | `herdr-harness quota-check PATH --provider agy` | Task 없이 agy 쿼터만 바로 확인 |
@@ -631,7 +677,7 @@ Agent를 띄울 때마다 "이 명령을 실행할까요? (y/n)"을 반복해서
 
 > **이것은 가드레일이지 보안 경계가 아닙니다.** Agent는 사용자와 같은 권한으로 돌기 때문에 `.meta`, 승인 파일이나 Harness 스크립트 자체를 고칠 수 있습니다. 완료 승인과 프리미엄 모델 승인을 지시를 따라 스스로 통과시키는 기본 동작을 막을 뿐, 적대적 Agent를 막지는 못합니다. 진짜 경계를 원하면 OS 수준 분리(별도 계정·컨테이너)가 필요하고 그건 아직 Deferred 항목입니다.
 
-- 프로젝트를 만들 때 `herdr-harness init PATH --approval-mode ask|auto|bypass`로 정하고, 이후에는 `agent-policy.yaml`을 직접 고칩니다.
+- 프로젝트를 만들 때 `herdr-harness init PATH --approval-mode ask|auto|bypass`(또는 `--preset agy-primary` → `bypass`)로 정하고, 이후에는 `agent-policy.yaml`을 직접 고칩니다. 역할별로 실제 붙는 인수는 `herdr-harness preflight .`로 확인합니다.
 - 표의 값은 공백으로 나뉘어 `herdr agent start ... -- <인수>`로 전달됩니다. **임의의 Provider 옵션을 넣는 통로가 아닙니다** — Provider별로, 그리고 **모드별로** 허용 플래그와 허용 값이 갈립니다. `--add-dir /`, `--model opus` 같은 승인과 무관한 인수는 거부되고, `auto` 칸에 `--permission-mode bypassPermissions`나 `--dangerously-*`를 넣는 것도 거부됩니다(같은 값이 `bypass` 칸에서는 통과). 그러지 않으면 정책 파일 한 줄로 `auto`가 사실상 full-access가 되면서 기록에는 계속 `auto`로 남습니다.
 - claude의 `bypassPermissions`는 디렉터리마다 처음 한 번 확인 화면을 띄울 수 있고, 그러면 `herdr agent start`가 그 화면에서 멈춥니다. 기본값 `auto`(`acceptEdits`)는 그 화면이 없습니다.
 - 실제로 쓰인 모드와 인수는 Attempt·Evidence 문서에 기록됩니다.
@@ -816,15 +862,17 @@ Evidence는 "Worker가 말한 것과 실제 저장소 상태가 일치하는가"
 
 `submitted` 게이트는 글롭이 아니라 파일 이름과 필수 필드를 함께 확인합니다. 빈 YAML을 하나 놓아 두는 것으로는 통과하지 못하며, 정본은 `dispatch`/`observe`만 만듭니다. Secret 의심 패턴이 발견되면 원문 대신 요약만 남깁니다.
 
-### Context Packet에 직전 라운드가 들어간다
+### Context Packet — 필수 계약은 원문, 나머지는 경로
 
-`dispatch`가 만드는 `.harness/runtime/TASK-context-ROLE.md`에는 SPEC 발췌·Task 계약·intent 안내에 더해 **직전 라운드**가 함께 들어갑니다.
+`dispatch`가 만드는 `.harness/runtime/TASK-context-ROLE.md`는 다음만 담습니다(`--print-only`로 저장된 Packet과 크기를 확인할 수 있습니다).
 
-- 최신 Worker·Reviewer Evidence 정본
-- 최신 AC 검증 결과(`checks.yaml`)
-- 최신 Review 판정과 본문 발췌
+- 짧은 실행 규칙 — 상태 전이·completed 금지, `write_scope` 안에서만 쓰기, 위험 명령·배포·외부 쓰기·Provider 교체는 사용자 승인. 역할·Skill·`AGENTS.md`는 절대 경로와 열람 조건으로 안내
+- 절대 경로 — 이번 Attempt/Review 기록 파일, Task 계약 정본, Intent, SPEC
+- SPEC §1 목표·§3 제약·§6 제외 범위 원문(§4 요구사항·§5 프로젝트 AC는 "Task AC가 모호하거나 SPEC과 어긋나 보일 때만 읽는다"는 조건과 경로)
+- Task Contract — 주석과 Harness가 이미 적용한 키만 뺀 YAML. AC·`write_scope`·`inputs`는 원문 그대로
+- **직전 라운드**(재시도일 때만) — Evidence의 결과·요약·변경 파일, AC 검증 요약과 실패한 기준만, 최신 Review 판정(본문은 `APPROVED`가 아닐 때만)
 
-`changes_requested` 후 재시도에서 Worker가 Reviewer의 지적을 못 본 채 같은 접근을 반복하는 것을 막기 위한 것입니다. "가장 큰 attempt 번호"가 아니라 파일이 실제로 존재하는 최근 attempt를 찾고, 길이가 예측 불가능한 Review·checks는 줄 수와 줄 길이를 함께 잘라 넣습니다.
+`changes_requested` 후 재시도에서 Worker가 Reviewer의 지적을 못 본 채 같은 접근을 반복하는 것을 막기 위한 것입니다. "가장 큰 attempt 번호"가 아니라 파일이 실제로 존재하는 최근 attempt를 찾습니다. 축약 전후 실측(대표 Task에서 21~36% 감소)은 [docs/context-packet-measurement-2026-10.md](docs/context-packet-measurement-2026-10.md)에 있고, `docs/tools/measure-context-packet.sh`로 재현합니다.
 
 ### `quota-retry`, `auto-step` — opt-in 제약된 자동화
 
@@ -933,7 +981,7 @@ project/
     ├── reviews/
     ├── handovers/
     ├── decisions/
-    └── archive/
+    └── archive/           # Wave 종료 시 옮긴 STATE.md 서술 섹션(STATE-<wave-id>.md)
 ```
 
 `dispatch` 실행 시 Git 제외 영역인 `.harness/runtime/`이 추가로 생성됩니다.

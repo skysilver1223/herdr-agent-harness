@@ -317,6 +317,99 @@ _transition_require_evidence() {
    (task·role·attempt·result·status 필드를 모두 갖춰야 하며, dispatch/observe가 만듭니다)"
 }
 
+# write_scope 대조 — submitted 전이에서 실제 변경 파일이 Task의 write_scope 안에
+# 있는지 본다. bypass 모드에서는 Provider Sandbox가 없어 write_scope가 유일한
+# 쓰기 경계인데, 지금까지는 문서상 지침일 뿐 아무도 대조하지 않았다.
+#
+# 기준은 마지막 Worker Attempt가 기록한 Baseline commit이다. 그 이후의 커밋된
+# 변경 + 작업 트리 변경 + untracked 파일을 모으고, .harness/(Harness 기록)와
+# 지금 동시에 진행 중인 다른 Task의 write_scope(병렬 Worker의 변경)는 뺀다.
+# write_scope가 비어 있거나 기준 commit 기록이 없으면 대조하지 않는다 —
+# 이전 버전에서 만든 Task를 깨뜨리지 않기 위해서다(preflight가 경고한다).
+_transition_worker_attempt() {
+  local root="$1" task_id="$2" path number best="" best_number=0 base
+  shopt -s nullglob
+  for path in "$root/.harness/attempts/$task_id-attempt-"*.md; do
+    base="${path##*/}"; number="${base#"$task_id-attempt-"}"; number="${number%.md}"
+    [[ "$number" =~ ^[0-9]+$ ]] || continue
+    grep -q '^- Role: worker$' "$path" || continue
+    (( number > best_number )) || continue
+    best_number="$number"; best="$path"
+  done
+  shopt -u nullglob
+  printf '%s' "$best"
+}
+
+# 저장소 하나의 기준 commit 이후 변경 파일을 절대경로로 출력한다.
+_transition_changed_files() {
+  local repo="$1" baseline="$2" top
+  top="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  git -C "$top" rev-parse --verify --quiet "$baseline^{commit}" >/dev/null || return 1
+  {
+    git -C "$top" diff --name-only "$baseline" -- 2>/dev/null
+    git -C "$top" ls-files --others --exclude-standard 2>/dev/null
+  } | LC_ALL=C sort -u | while IFS= read -r line; do
+    [[ -n "$line" ]] && printf '%s/%s\n' "$top" "$line"
+  done
+}
+
+_transition_require_write_scope() {
+  local root="$1" task_id="$2" task_file="$3"
+  local attempt baseline agent_cwd cwd_baseline entry other other_status file
+  local -a own=() others=() changed=() violations=()
+
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] && own+=("$(_preflight_abs_scope "$root" "$entry")")
+  done < <(yaml_flow_list "$task_file" write_scope)
+  if (( ${#own[@]} == 0 )); then
+    info "write_scope가 비어 있어 변경 파일 대조를 건너뜁니다 ($task_id)."
+    return 0
+  fi
+
+  attempt="$(_transition_worker_attempt "$root" "$task_id")"
+  baseline=""
+  [[ -z "$attempt" ]] || baseline="$(sed -n 's/^- Baseline commit: //p' "$attempt" | head -n 1)"
+  if [[ -z "$baseline" || "$baseline" == unborn ]]; then
+    info "Worker Attempt에 기준 commit 기록이 없어 write_scope 대조를 건너뜁니다 ($task_id)."
+    return 0
+  fi
+
+  # 동시에 진행 중인 다른 Task의 범위 — 그 변경은 이 Task의 위반이 아니다.
+  while IFS= read -r other; do
+    [[ -n "$other" && "$other" != "$task_id" ]] || continue
+    other_status="$(_runtime_yaml_scalar "$root/.harness/tasks/$other.yaml" status)"
+    case "$other_status" in
+      active|submitted|reviewing|changes_requested|blocked|handover_required) ;;
+      *) continue ;;
+    esac
+    while IFS= read -r entry; do
+      [[ -n "$entry" ]] && others+=("$(_preflight_abs_scope "$root" "$entry")")
+    done < <(yaml_flow_list "$root/.harness/tasks/$other.yaml" write_scope)
+  done < <(task_ids "$root")
+
+  mapfile -t changed < <(_transition_changed_files "$root" "$baseline" || true)
+  agent_cwd="$(sed -n 's/^- Agent cwd: //p' "$attempt" | head -n 1)"
+  cwd_baseline="$(sed -n 's/^- Agent cwd baseline commit: //p' "$attempt" | head -n 1)"
+  if [[ -n "$agent_cwd" && "$agent_cwd" != "$root" && -n "$cwd_baseline" && "$cwd_baseline" != unborn ]]; then
+    mapfile -t -O "${#changed[@]}" changed < <(_transition_changed_files "$agent_cwd" "$cwd_baseline" || true)
+  fi
+
+  for file in "${changed[@]}"; do
+    [[ -n "$file" ]] || continue
+    case "$file" in "$root"/.harness/*) continue ;; esac
+    _scope_matches "$file" "${own[@]}" && continue
+    (( ${#others[@]} > 0 )) && _scope_matches "$file" "${others[@]}" && continue
+    violations+=("${file#"$root/"}")
+  done
+
+  if (( ${#violations[@]} > 0 )); then
+    die "write_scope 밖의 변경이 있어 submitted로 전이할 수 없습니다 ($task_id, 기준 ${baseline:0:12}):
+$(printf '   - %s\n' "${violations[@]:0:20}")$( (( ${#violations[@]} > 20 )) && printf '\n   … 외 %d개' $(( ${#violations[@]} - 20 )) )
+   수정: 범위 밖 변경을 되돌리거나, 필요한 변경이면 사용자 승인 하에 Task의 write_scope를 고친 뒤 다시 전이한다."
+  fi
+  info "write_scope 대조 통과: 기준 ${baseline:0:12} 이후 변경 ${#changed[@]}개 ($task_id)"
+}
+
 _transition_require_acceptance_criteria() {
   local root="$1" task_id="$2" task_file="$3"
   local line id type command output status attempt checks_file temporary
@@ -467,6 +560,7 @@ cmd_transition() {
       compgen -G "$root/.harness/attempts/${task_id}-attempt-*.md" >/dev/null ||
         die "Attempt 기록이 없어 submitted로 전이할 수 없습니다: .harness/attempts/${task_id}-attempt-*.md"
       _transition_require_evidence "$root" "$task_id"
+      _transition_require_write_scope "$root" "$task_id" "$path"
       _transition_require_acceptance_criteria "$root" "$task_id" "$path"
       ;;
     reviewing)
