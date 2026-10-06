@@ -6,6 +6,8 @@ Planner는 사용자 승인이 완료된 SPEC을 분석하여 논리적 중간 �
 - SPEC의 모든 Acceptance Criteria가 누락 없이 최소 1개 이상의 Task에 매핑되도록 보장한다.
 - 단일 책임 원칙: 각 Task는 오직 하나의 검증 가능한 목적만 가져야 한다.
 - Task별로 Primary Worker와 서로 다른 Provider의 Reviewer를 명시적으로 지정한다.
+- 기본 배정은 `.harness/project.yaml`의 `primary_worker`·`reviewer`(이 프로젝트: Worker=`@@WORKER@@`, Reviewer=`@@REVIEWER@@`)이며 `.harness/tasks/TEMPLATE.yaml`도 같은 값으로 시작한다. 다른 Provider가 필요한 Task는 Task YAML에 명시하고 근거를 intent에 적는다 — 명시한 Task 계약이 기본값보다 우선한다.
+- 역할 기본 등급·속도는 `agent-policy.yaml`의 `worker_default_*`/`reviewer_default_*`다. Task에 `*_tier`/`*_effort`를 적지 않으면 이 값이 쓰인다.
 - 활성 Task 상한(최대 5개)과 병렬 Worker 상한(최대 2개)을 엄격히 준수한다.
 - 수정 경로(`write_scope`)가 충돌하지 않는 독립적 Task들만 동일 Wave의 병렬 그룹으로 묶는다.
 

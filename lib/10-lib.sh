@@ -10,8 +10,10 @@ Herdr Agent/Skills Harness
   $SCRIPT_NAME sync-templates PATH [--apply]  기존 프로젝트의 skill·role·정책 템플릿을 재동기화(기본은 diff 미리보기)
   $SCRIPT_NAME models PATH [--refresh] [--premium PROVIDER=MODEL]... [--apply]  모델 정책 조회·미리보기·적용
   $SCRIPT_NAME start [PATH]       Herdr Session 시작
-  $SCRIPT_NAME status [PATH]      현재 STATE.md 출력
+  $SCRIPT_NAME status [PATH]      현재 상태 요약(Task YAML 기준 — 승인 대기·진행 중 Task)
+  $SCRIPT_NAME status [PATH] --full  STATE.md 원문 전체 출력
   $SCRIPT_NAME status --live      문서·Herdr·Git 상태 대조 (DRIFT 표시)
+  $SCRIPT_NAME preflight [PATH]   첫 dispatch 전 읽기 전용 점검(Provider·모델·승인 인수·write_scope)
   $SCRIPT_NAME doctor             설치 상태 확인
   $SCRIPT_NAME test               Agent 쿼터 없는 자체 테스트
   $SCRIPT_NAME uninstall [--yes]  설치된 Harness 명령 제거
@@ -43,6 +45,9 @@ init 옵션:
   --name NAME                     프로젝트명
   --goal TEXT                     프로젝트 목표
   --profile PROFILE               generic | python-timeseries | network-device
+  --preset PRESET                 운영 프리셋: none(기본) | agy-primary
+                                  (agy-primary = claude→agy→codex, fallback claude,codex, bypass,
+                                   Worker standard/medium, Reviewer light/medium. 명시한 옵션이 우선)
   --orchestrator PROVIDER         claude | codex | agy
   --worker PROVIDER               claude | codex | agy
   --reviewer PROVIDER             claude | codex | agy
@@ -59,6 +64,8 @@ init 옵션:
     --name snmp-normalizer \
     --goal "멀티벤더 SNMP 데이터를 공통 스키마로 정규화" \
     --profile network-device
+
+  $SCRIPT_NAME init ~/Projects/example --name example --goal '테스트 목표' --preset agy-primary
 EOF
 }
 

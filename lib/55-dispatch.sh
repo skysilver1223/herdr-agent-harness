@@ -64,6 +64,9 @@ cmd_dispatch() {
     printf 'dispatch_result=error\n'
     return 1
   fi
+  # 축약 효과를 실측할 수 있게 크기를 Attempt·--print-only에 남긴다.
+  local context_size
+  context_size="$(wc -c <"$context" | tr -d ' ') bytes, $(wc -l <"$context" | tr -d ' ')줄"
 
   if [[ "$role" == worker ]]; then
     provider="$(_runtime_yaml_scalar "$task_file" primary_worker)"
@@ -140,7 +143,7 @@ cmd_dispatch() {
     printf -v quoted_context '%q' "$context"
     printf -v quoted_path '%q' "$path"
     printf -v quoted_cwd '%q' "$agent_cwd"
-    printf 'Context Packet: %s\n\n' "$context"
+    printf 'Context Packet: %s (%s)\n\n' "$context" "$context_size"
     printf '아래를 Herdr Pane 안에서 차례로 실행한 뒤, 마지막 adopt로 Harness에 등록한다.\n'
     printf '(PANE_ID는 첫 명령이 출력하는 pane_id로 바꾼다.)\n\n'
     printf '  herdr pane split --current --direction right --cwd %s --no-focus\n' "$quoted_cwd"
@@ -154,6 +157,7 @@ cmd_dispatch() {
     printf '  herdr agent prompt %s "$(cat %s)" --wait --timeout %s\n' "$agent_name" "$quoted_context" "$timeout"
     printf '  %s adopt %s %s %s --pane PANE_ID --agent %s\n\n' \
       "$SCRIPT_NAME" "$quoted_path" "$task_id" "$role" "$agent_name"
+    printf '역할: %s / Provider: %s / Agent 이름: %s (Worker·Reviewer는 역할·Attempt별 별도 Pane·세션)\n' "$role" "$provider" "$agent_name"
     printf '승인 모드: %s / Provider 인수: %s\n' "$approval_mode" "${agent_args_raw:-(없음)}"
     printf '모델: %s / 출처: %s\n' "$model_record" "$model_source"
     printf '속도: %s / 출처: %s\n' "$effort_record" "$effort_source"
@@ -183,7 +187,7 @@ cmd_dispatch() {
   temporary="$(mktemp "$root/.harness/attempts/.attempt.XXXXXX")"
   {
     printf '# Attempt %s: %s\n\n' "$attempt" "$task_id"
-    printf -- '- Started: %s\n- Role: %s\n- Provider: %s\n- Model: %s\n- Model source: %s\n- Model approval: %s\n- Model degradation: %s\n- Effort: %s\n- Effort source: %s\n- Pane ID: %s\n- Agent name: %s\n- Baseline commit: %s\n- Approval mode: %s\n- Provider args: %s\n- Agent cwd: %s\n' "$started_at" "$role" "$provider" "$model_record" "$model_source" "$model_approval" "${model_degradation:-(없음)}" "$effort_record" "$effort_source" "$pane_id" "$agent_name" "$baseline" "$approval_mode" "${agent_args_raw:-(없음)}" "$agent_cwd"
+    printf -- '- Started: %s\n- Role: %s\n- Provider: %s\n- Model: %s\n- Model source: %s\n- Model approval: %s\n- Model degradation: %s\n- Effort: %s\n- Effort source: %s\n- Pane ID: %s\n- Agent name: %s\n- Baseline commit: %s\n- Approval mode: %s\n- Provider args: %s\n- Agent cwd: %s\n- Context Packet: %s (%s)\n' "$started_at" "$role" "$provider" "$model_record" "$model_source" "$model_approval" "${model_degradation:-(없음)}" "$effort_record" "$effort_source" "$pane_id" "$agent_name" "$baseline" "$approval_mode" "${agent_args_raw:-(없음)}" "$agent_cwd" "${context#"$root/"}" "$context_size"
     if [[ "$agent_cwd" != "$root" ]] && git -C "$agent_cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       printf -- '- Agent cwd baseline commit: %s\n' \
         "$(git -C "$agent_cwd" rev-parse HEAD 2>/dev/null || printf 'unborn')"

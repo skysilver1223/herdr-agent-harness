@@ -216,8 +216,9 @@ _herdr_harness_subcommand_help() {
     "sync-templates::Skill·역할·정책 템플릿을 지금 버전으로 재동기화" \
     "models::모델 허용 목록·등급 해석·프리미엄 정책 조회·갱신" \
     "start::프로젝트 디렉터리에서 Herdr Session 열기" \
-    "status::STATE.md 출력 (--live로 문서·Herdr·Git 대조)" \
+    "status::현재 상태 요약 (--full 원문, --live로 문서·Herdr·Git 대조)" \
     "validate::상태를 바꾸지 않고 정합성만 검사" \
+    "preflight::첫 dispatch 전 Provider·모델·승인 인수·write_scope 점검" \
     "transition::Task 상태를 전이표에 따라 전이" \
     "approve::사용자 승인 기록 후 completed로 전이" \
     "dispatch::Task 역할+모델 등급·속도 정책으로 Agent를 한 턴 실행" \
@@ -265,7 +266,7 @@ _herdr_harness_completions() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local subcommands="init sync-templates models start status doctor test uninstall validate transition approve dispatch observe adopt close-agent quota-check quota-retry auto-step remote completion help"
+  local subcommands="init sync-templates models start status doctor test uninstall validate preflight transition approve dispatch observe adopt close-agent quota-check quota-retry auto-step remote completion help"
 
   if (( COMP_CWORD == 1 )); then
     local described=()
@@ -281,6 +282,7 @@ _herdr_harness_completions() {
         "--name::프로젝트명 (기본: 디렉터리 이름)"
         "--goal::한 줄 목표 — SPEC.md와 STATE.md에 들어간다"
         "--profile::generic | python-timeseries | network-device"
+        "--preset::운영 프리셋 (none|agy-primary — 명시 옵션이 우선)"
         "--orchestrator::오케스트레이터 Provider (claude|codex|agy)"
         "--worker::Worker 기본 Provider (claude|codex|agy)"
         "--reviewer::Reviewer 기본 Provider (claude|codex|agy)"
@@ -298,6 +300,11 @@ _herdr_harness_completions() {
             "generic::범용 — 언어·도메인 가정 없음" \
             "python-timeseries::Python 시계열 데이터 처리" \
             "network-device::네트워크 장비 수집·정규화"
+          ;;
+        --preset)
+          _herdr_harness_describe "$cur" \
+            "none::개별 옵션 그대로 (기본값, 이전 버전과 같음)" \
+            "agy-primary::claude→agy→codex, bypass, Worker standard/medium, Reviewer light/medium"
           ;;
         --orchestrator|--worker|--reviewer)
           _herdr_harness_describe "$cur" "${_HERDR_HARNESS_PROVIDERS[@]}"
@@ -342,13 +349,23 @@ _herdr_harness_completions() {
       if (( COMP_CWORD == 2 )); then
         COMPREPLY=($(compgen -d -- "$cur"))
         _herdr_harness_note "$cur" \
-          "구문::herdr-harness status [PATH] [--live] [--json]" \
+          "구문::herdr-harness status [PATH] [--full] [--json] [--live]" \
           "PATH::Harness 프로젝트 디렉터리 (생략하면 현재 디렉터리)" \
           "help::herdr-harness help status"
       else
         _herdr_harness_describe "$cur" \
+          "--full::STATE.md 원문 전체 (기본은 Task YAML 기준 요약)" \
           "--live::문서 상태를 실제 Herdr Pane·Git과 대조해 DRIFT 표시" \
           "--json::결과를 JSON으로 출력 (jq로 파이프)"
+      fi
+      ;;
+    preflight)
+      if (( COMP_CWORD == 2 )); then
+        COMPREPLY=($(compgen -d -- "$cur"))
+        _herdr_harness_note "$cur" \
+          "구문::herdr-harness preflight [PATH]" \
+          "PATH::Harness 프로젝트 디렉터리 (생략하면 현재 디렉터리)" \
+          "help::herdr-harness help preflight"
       fi
       ;;
     validate)

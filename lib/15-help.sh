@@ -17,8 +17,9 @@ HARNESS_COMMAND_SUMMARIES=(
   "sync-templates:기존 프로젝트의 Skill·역할·정책 템플릿을 지금 버전으로 재동기화한다"
   "models:Provider별 모델 허용 목록·등급 해석·프리미엄 정책을 조회하고 갱신한다"
   "start:프로젝트 디렉터리에서 Herdr Session을 연다"
-  "status:STATE.md를 출력한다 (--live로 문서·Herdr·Git 대조)"
+  "status:현재 상태를 Task YAML 기준으로 요약한다 (--full 원문, --live 문서·Herdr·Git 대조)"
   "validate:상태를 바꾸지 않고 문서·정책·Git 정합성만 검사한다"
+  "preflight:첫 dispatch 전 Provider·모델·승인 인수·write_scope를 읽기 전용으로 점검한다"
   "transition:Task 상태를 전이표와 게이트에 따라 강제 전이한다"
   "approve:사용자 승인을 기록하고 awaiting_approval을 completed로 만든다"
   "dispatch:Task의 역할·모델 정책에 맞는 Agent를 Pane에서 한 턴 실행한다"
@@ -73,6 +74,7 @@ cmd_help_topic() {
     init) cat <<EOF
 구문:
   $SCRIPT_NAME init PATH [--name NAME] [--goal TEXT] [--profile PROFILE]
+                    [--preset none|agy-primary]
                     [--orchestrator P] [--worker P] [--reviewer P] [--fallback P,P]
                     [--approval-mode ask|auto|bypass]
                     [--remote-host H] [--remote-user U] [--remote-path /경로]
@@ -89,7 +91,24 @@ cmd_help_topic() {
     auto   파일 편집·작업 트리 안의 명령은 자동 승인 (기본값)
     bypass 도구 실행 승인을 전부 건너뛴다
 
+  --preset은 자주 쓰는 운영 구성을 한 번에 적용한다. 명시한 --worker 등
+  개별 옵션이 프리셋보다 우선한다. 기본(none)은 이전 버전과 같은 결과다
+  (claude / codex / agy, fallback claude,agy, auto, 역할 등급 미설정).
+    agy-primary  Orchestrator=claude, Worker=agy, Reviewer=codex,
+                 Fallback 후보=claude,codex(자동 교체 없음), approval_mode=bypass,
+                 worker_default_tier/effort=standard/medium,
+                 reviewer_default_tier/effort=light/medium
+  프리셋은 모델 ID를 고정하지 않는다. 등급→모델 매핑(<provider>_models,
+  <provider>_tier_*)은 생성 직후 비어 있으며, preflight가 무엇을 채워야 하는지
+  알려 준다. bypass여도 SPEC/Wave/Provider 교체/외부 쓰기/completed 승인은
+  사용자 Gate로 남고, submitted 전이가 write_scope 밖 변경을 거부한다.
+
 예시:
+  # agy 중심 운영 — 생성 후 preflight가 안내하는 모델 매핑을 채운다
+  $SCRIPT_NAME init ~/Projects/example --name example --goal '테스트 목표' \\
+    --preset agy-primary
+  $SCRIPT_NAME preflight ~/Projects/example
+
   $SCRIPT_NAME init ~/Projects/snmp-normalizer \\
     --name snmp-normalizer --goal "멀티벤더 SNMP 데이터를 공통 스키마로 정규화" \\
     --profile network-device
@@ -101,7 +120,7 @@ cmd_help_topic() {
     --remote-path /home/nsotdb/Normalize_Telemetry --remote-vcs svn
 
 다음 단계:
-  cd PATH && $SCRIPT_NAME start .
+  cd PATH && $SCRIPT_NAME preflight . && $SCRIPT_NAME start .
 EOF
       ;;
     sync-templates) cat <<EOF
@@ -171,16 +190,49 @@ EOF
       ;;
     status) cat <<EOF
 구문:
-  $SCRIPT_NAME status [PATH] [--live] [--json]
+  $SCRIPT_NAME status [PATH] [--full] [--json] [--live]
 
 무엇을 하나:
-  기본은 STATE.md를 그대로 출력한다. --live는 문서 상태와 실제 Herdr Pane·Git
-  상태를 대조해 어긋난 항목을 DRIFT로 표시한다.
+  기본은 현재 상태 요약이다. 정본인 Task YAML의 status:로 사용자 승인·판단
+  대기(awaiting_approval·blocked·handover_required, SPEC·draft Wave 승인),
+  completed가 아닌 Task(사람 판단이 필요한 순), STATE.md 상태표와의 불일치를
+  보여 준다. STATE.md에서는 머리 bullet과 상태표만 읽는다 — 그 아래 서술
+  섹션(다음 작업, 이관 메모 등)은 작성 시점의 기록이라 출력하지 않는다.
+  --full     STATE.md 원문 전체 (이전 버전의 기본 출력)
+  --json     요약을 JSON으로 (tasks·attention·pending_decisions·spec_status)
+  --live     Herdr Pane·Git과 대조해 DRIFT/ORPHAN 표시. --live --full은 요약
+             대신 원문을 앞에 붙이고, --live --json은 기존 state(원문)·agents·
+             git_status·pending_decisions에 요약 필드를 더한다.
+  STATE.md는 읽기만 하고 바꾸지 않는다.
 
 예시:
   $SCRIPT_NAME status .
+  $SCRIPT_NAME status . --full | less
   $SCRIPT_NAME status . --live
   $SCRIPT_NAME status . --live --json | jq .
+EOF
+      ;;
+    preflight) cat <<EOF
+구문:
+  $SCRIPT_NAME preflight [PATH]
+
+무엇을 하나:
+  첫 dispatch 전(또는 Provider·모델 정책을 바꾼 뒤) 아무것도 바꾸지 않고
+  이 환경에서 Agent가 실제로 기동될 수 있는지 본다.
+    1 설치본    PATH의 herdr-harness와 실행 중인 사본의 lib·templates 지문 비교
+    2 Provider  herdr와 Orchestrator·Worker·Reviewer CLI 존재와 버전
+    3 Git       기준 commit, 커밋되지 않은 변경
+    4 승인 모드 approval_mode 해석과 Worker/Reviewer별 실제 Provider 인수,
+                project.yaml approval Gate가 모두 user_required인지
+    5 배정      Worker≠Reviewer (프로젝트 기본값·열린 Task)
+    6 모델      dispatch와 같은 선택 함수로 역할별 모델·등급·속도를 계산하고,
+                빈 목록·미정의 매핑·프리미엄과 겹친 light/standard 매핑, 설치된
+                agy 목록에 없는 모델 ID를 수정 위치와 함께 보고
+    7 write_scope 쓰기 가능 여부, 프로젝트 밖 경로의 Git 기준선, 빈 범위
+  [FAIL]이 하나라도 있으면 종료 코드 1. 모델 ID를 추측하거나 채우지 않는다.
+
+예시:
+  $SCRIPT_NAME preflight .
 EOF
       ;;
     validate) cat <<EOF
@@ -204,6 +256,13 @@ EOF
   전이표에 있는 경로만 허용하고, 상태마다 요구하는 증거를 확인한 뒤 Task
   YAML과 STATE.md를 갱신한다. 예를 들어 submitted는 Attempt·Evidence가,
   awaiting_approval은 최신 Review의 APPROVED 판정이 있어야 한다.
+
+write_scope (submitted):
+  Task의 write_scope가 비어 있지 않으면, 마지막 Worker Attempt의 Baseline
+  commit 이후 변경 파일(커밋·작업 트리·untracked, --cwd 저장소 포함)을
+  write_scope와 대조해 범위 밖 변경이 있으면 거부한다. .harness/ 기록과
+  동시에 진행 중인 다른 Task의 write_scope는 제외한다. write_scope가 비었거나
+  기준 commit 기록이 없으면 대조를 건너뛴다(이전 버전 Task 호환).
 
 Acceptance Criteria (submitted):
   submitted 전이에서는 Task의 acceptance_criteria[].verified_by를 Harness가

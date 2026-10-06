@@ -506,11 +506,21 @@ _runtime_spec_section() {
 # 들어가서 크기를 예측할 수 없다 — 통째로 cat하면 Context Packet이 무한히
 # 커져, 전체 문서를 던지지 않는다는 Packet의 존재 이유가 무너진다.
 # 줄 수와 줄 길이를 함께 자른다(거대한 한 줄도 막아야 하므로).
+# GNU cut -c는 바이트 단위라 한글 줄을 자르면 문자 중간이 잘려 Packet이 유효한
+# UTF-8이 아니게 된다. 잘린 뒤 깨진 바이트만 버린다(iconv가 없으면 그대로 둔다).
+_runtime_utf8_clean() {
+  if command -v iconv >/dev/null 2>&1; then
+    iconv -c -f UTF-8 -t UTF-8 2>/dev/null || true
+  else
+    cat
+  fi
+}
+
 _runtime_excerpt() {
   local file="$1" max_lines="${2:-80}" max_columns="${3:-500}" total
   [[ -f "$file" ]] || return 0
   total="$(wc -l <"$file" 2>/dev/null || printf 0)"
-  head -n "$max_lines" "$file" | cut -c "1-$max_columns"
+  head -n "$max_lines" "$file" | cut -c "1-$max_columns" | _runtime_utf8_clean
   if (( total > max_lines )); then
     printf '... (%s줄 중 %s줄만 표시 — 전문은 원본 파일 참조)\n' "$total" "$max_lines"
   fi
@@ -535,68 +545,175 @@ _runtime_latest_existing() {
 _runtime_previous_round() {
   local root="$1" task_id="$2"
   local attempt evidence checks checks_attempt review verdict printed=0
-  local role
+  local role summary status raw failed
 
+  # Evidence 정본 중 판단에 쓰는 값만 싣는다 — 결과·요약·변경 파일. 관측 횟수·
+  # checks 안내 주석 같은 고정 문구는 매 재시도마다 반복할 이유가 없다.
   for role in worker reviewer; do
     attempt="$(_runtime_latest_existing "$root" "$task_id-$role-attempt-" ".yaml")"
     [[ -n "$attempt" ]] || continue
     evidence="$(_runtime_evidence_yaml_path "$root" "$task_id" "$role" "$attempt")"
     [[ -f "$evidence" ]] || continue
     (( printed == 1 )) || { printf '\n## 직전 시도\n\n'; printed=1; }
-    printf '### Evidence (%s, Attempt %s)\n\n```yaml\n' "$role" "$attempt"
-    _runtime_excerpt "$evidence"
-    printf '```\n\n'
+    summary="$(awk '/^  summary:/ { sub(/^  summary:[[:space:]]*/, ""); print; exit }' "$evidence")"
+    status="$(_runtime_yaml_scalar "$evidence" status)"
+    raw="$(_runtime_yaml_scalar "$evidence" raw)"
+    printf '### Evidence (%s, Attempt %s)\n\n' "$role" "$attempt"
+    printf -- '- 결과: %s\n' "${status:-불명}"
+    [[ -z "$summary" ]] || printf -- '- 요약: %s\n' "$(yaml_unquote "$summary" | cut -c 1-500 | _runtime_utf8_clean)"
+    awk '
+      /^changes:/ { inside = 1; next }
+      inside && /^  - / { if (n < 30) { sub(/^  - /, ""); lines = lines "  - " $0 "\n" } n++; next }
+      inside { exit }
+      END {
+        if (n > 0) { printf "- 변경 파일 (git status):\n%s", lines }
+        if (n > 30) printf "  ... (%d개 중 30개만 표시)\n", n
+      }
+    ' "$evidence"
+    [[ -z "$raw" ]] || printf -- '- 원문: %s (필요할 때만 연다)\n' "$raw"
+    printf '\n'
   done
 
+  # AC 결과는 요약 한 줄 + 실패한 기준만. 통과한 기준은 다시 볼 필요가 없다.
   checks_attempt="$(_runtime_latest_existing "$root" "$task_id-attempt-" "-checks.yaml")"
   if [[ -n "$checks_attempt" ]]; then
     checks="$root/.harness/evidence/$task_id-attempt-$checks_attempt-checks.yaml"
     if [[ -f "$checks" ]]; then
       (( printed == 1 )) || { printf '\n## 직전 시도\n\n'; printed=1; }
-      printf '### Acceptance Criteria 검증 결과 (Attempt %s)\n\n```yaml\n' "$checks_attempt"
-      _runtime_excerpt "$checks"
-      printf '```\n\n'
+      printf '### Acceptance Criteria 검증 결과 (Attempt %s): %s\n\n' "$checks_attempt" "$(awk '
+        /^summary:/ { inside = 1; next }
+        inside && /^  [a-z]+:/ { gsub(/^  |:/, ""); printf "%s%s %s", sep, $1, $2; sep = " · " }
+      ' "$checks")"
+      failed="$(awk '
+        /^  - criterion_id:/ { if (block != "" && fail) out = out block; block = ""; fail = 0; inside = 1 }
+        /^summary:/ { if (block != "" && fail) out = out block; block = ""; inside = 0 }
+        inside { block = block $0 "\n"; if ($0 ~ /result: \047fail\047/) fail = 1 }
+        END { if (inside && block != "" && fail) out = out block; printf "%s", out }
+      ' "$checks")"
+      if [[ -n "$failed" ]]; then
+        printf '실패한 기준:\n\n```yaml\n%s\n```\n\n' "$(printf '%s' "$failed" | head -n 60 | cut -c 1-500 | _runtime_utf8_clean)"
+      fi
     fi
   fi
 
+  # Review는 판정을 항상 싣고, 본문(지적 사항)은 미해결일 때만 싣는다. APPROVED
+  # 본문은 해소할 지적이 없으므로 Packet을 키우기만 한다.
   review="$(latest_task_review "$root" "$task_id")"
   if [[ -n "$review" && -f "$review" ]]; then
     verdict="$(review_verdict "$review")"
     (( printed == 1 )) || { printf '\n## 직전 시도\n\n'; printed=1; }
     printf '### 최신 Review 판정: %s\n\n' "${verdict:-불명}"
-    printf '출처: %s\n\n' "${review#"$root/"}"
-    _runtime_excerpt "$review"
-    printf '\n'
+    printf '출처: %s\n\n' "$review"
+    if [[ "$verdict" != APPROVED ]]; then
+      _runtime_excerpt "$review"
+      printf '\n'
+    fi
   fi
 
   (( printed == 0 )) || printf '위 지적을 먼저 해소한다. 같은 접근을 그대로 반복하지 않는다.\n'
 }
 
+# 다음 Review 기록 번호 — reviews/<task>-review-N.md 중 가장 큰 N + 1.
+_runtime_next_review() {
+  local root="$1" task_id="$2" path base number maximum=0
+  shopt -s nullglob
+  for path in "$root/.harness/reviews/$task_id-review-"*.md; do
+    base="${path##*/}"; number="${base#"$task_id-review-"}"; number="${number%.md}"
+    [[ "$number" =~ ^[0-9]+$ ]] || continue
+    (( number > maximum )) && maximum="$number"
+  done
+  shopt -u nullglob
+  printf '%s' "$((maximum + 1))"
+}
+
+# Task YAML에서 Agent가 판단에 쓰지 않는 줄을 뺀다: 주석·빈 줄, 그리고 Harness가
+# 이미 적용했거나(모델·등급·속도), 매 전이마다 바뀌어 오해를 부르거나(status),
+# Worker와 무관한(schema_version, fallback_chain) 최상위 키. 나머지 — 목적, 경로,
+# write_scope, inputs, acceptance_criteria — 는 한 글자도 바꾸지 않는다.
+# 블록 스칼라(| 또는 >) 본문은 빈 줄·#로 시작하는 줄까지 원문 그대로 둔다 —
+# 긴 AC statement가 여러 줄 블록으로 적혀도 의미가 바뀌지 않게 한다.
+_runtime_task_contract() {
+  awk '
+    function indent_of(s) { match(s, /^ */); return RLENGTH }
+    block {
+      if ($0 ~ /^[[:space:]]*$/ || indent_of($0) > block_indent) { print; next }
+      block = 0
+    }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    /^(schema_version|status|fallback_chain|worker_model|reviewer_model|worker_tier|reviewer_tier|worker_effort|reviewer_effort):/ { next }
+    {
+      print
+      if ($0 ~ /:[[:space:]]*[|>][-+0-9]*[[:space:]]*$/) { block = 1; block_indent = indent_of($0) }
+    }
+  ' "$1"
+}
+
 _runtime_context_packet() {
   local root="$1" task_id="$2" role="$3" task_file="$4" destination="$5"
   local extra_prompt="${6:-}"
-  local temporary spec_file
+  local temporary spec_file intent attempt output_label output_path
   temporary="$(mktemp "$root/.harness/runtime/.context.XXXXXX")"
   trap "rm -f -- '$temporary'" RETURN
   spec_file="$root/.harness/SPEC.md"
+  intent="$(_runtime_yaml_scalar "$task_file" intent)"
+  [[ -z "$intent" || "$intent" == /* ]] || intent="$root/$intent"
+  # dispatch가 이 다음에 만들 Attempt 번호와 같다(같은 함수로 계산한다).
+  attempt="$(_runtime_next_attempt "$root" "$task_id")"
+  if [[ "$role" == worker ]]; then
+    output_label="Attempt 기록 (dispatch가 머리말을 만든다 — 수정 내역·검증 결과를 이 파일에 덧붙인다)"
+    output_path="$root/.harness/attempts/$task_id-attempt-$attempt.md"
+  else
+    output_label="Review 기록 (새로 만든다 — 첫 줄 근처에 \`판정: APPROVED\` 또는 \`판정: CHANGES_REQUESTED\`)"
+    output_path="$root/.harness/reviews/$task_id-review-$(_runtime_next_review "$root" "$task_id").md"
+  fi
   {
-    printf '# Context Packet: %s / %s\n\n' "$task_id" "$role"
-    printf '## Specification excerpt\n\n'
+    printf '# Context Packet: %s / %s (Attempt %s)\n\n' "$task_id" "$role" "$attempt"
+
+    # 역할·정책 장문 대신 짧은 실행 규칙과 정본 경로. 안전 Gate는 여기서 빠지면
+    # 안 되는 계약이라 문장으로 싣는다.
+    printf '## 실행 규칙\n\n'
+    if [[ "$role" == worker ]]; then
+      printf -- '- 이 Task 하나만 수행한다. 상태 전이나 completed 선언은 하지 않는다 — 끝나면 submitted를 제안만 한다.\n'
+      printf -- '- 쓰기는 Task Contract의 `write_scope` 안에서만 한다. submitted 전이 때 Harness가 Attempt 기준 commit 이후의 변경 파일을 대조해 범위 밖 변경을 거부한다. 범위 밖 수정이 불가피하면 멈추고 보고한다.\n'
+      printf -- '- `acceptance_criteria`의 `verified_by` 명령을 직접 실행해 결과를 Attempt 기록에 남긴다. Harness도 submitted 전이 때 다시 실행한다.\n'
+    else
+      printf -- '- 읽기 전용 Review다. 소스·설정·Task YAML·상태를 수정하지 않고, Review 기록 파일 하나만 쓴다.\n'
+      printf -- '- 변경이 Task Contract의 `write_scope` 안에 있는지, acceptance_criteria를 실제로 충족하는지, intent의 Not 범위를 침범하지 않았는지 본다.\n'
+    fi
+    printf -- '- 위험 명령, 배포, 외부 쓰기, Provider 교체는 사용자 승인 없이 하지 않는다. Secret을 출력·기록하지 않는다. 도구 승인 모드와 무관하게 이 Gate는 유지된다.\n'
+    printf -- '- 역할 정본 `%s`, 절차 `%s` — 이 Packet만으로 절차가 불확실할 때만 읽는다. 프로젝트 고유 규칙은 `%s`를 따른다.\n\n' \
+      "$root/.agents/roles/$role.agent.md" \
+      "$root/.agents/skills/$([[ "$role" == worker ]] && printf harness-work || printf harness-review)/SKILL.md" \
+      "$root/AGENTS.md"
+
+    printf '## 경로 (절대 경로)\n\n'
+    printf -- '- 프로젝트 루트: %s\n' "$root"
+    printf -- '- 산출물 — %s: %s\n' "$output_label" "$output_path"
+    printf -- '- Task 계약 정본: %s\n' "$task_file"
+    if [[ -n "$intent" ]]; then
+      printf -- '- Intent (Why/Not/Constraints/Invariants/착수 게이트 정본): %s — 착수 전에 한 번 읽는다. 이 Packet에는 없다.\n' "$intent"
+    fi
+    printf -- '- SPEC 정본: %s — 아래 발췌에 없는 §2 기존 자료·§4 요구사항·§5 프로젝트 AC는 Task 목적·AC의 해석이 모호하거나 SPEC과 어긋나 보일 때만 읽는다.\n\n' "$spec_file"
+
+    printf '## Specification excerpt (§1 목표 · §3 제약 · §6 제외 범위)\n\n'
     if [[ -f "$spec_file" ]]; then
-      # 줄 수로 자르지 않는다(200줄을 넘으면 Acceptance Criteria·제약이 통째로
-      # 빠지던 결함 — BACKLOG.md #5). 실행에 필요한 절만 번호로 골라 전부 담는다.
+      # 줄 수로 자르지 않는다(200줄을 넘으면 제약이 통째로 빠지던 결함 — BACKLOG #5).
+      # 제약과 제외 범위는 안전 경계라 원문 그대로 싣는다. 이 Task의 AC는 아래
+      # Task Contract에 원문으로 있으므로 SPEC §5를 반복하지 않는다.
       local section_number
-      for section_number in 1 3 4 5 6; do
+      for section_number in 1 3 6; do
         _runtime_spec_section "$spec_file" "$section_number"
         printf '\n'
       done
     fi
-    printf '\n## Task Contract\n\n'
-    cat "$task_file"
-    printf '\n`write_scope`, `resources`, `inputs`, `acceptance_criteria`는 위 Task Contract YAML 안에 있다. 착수 게이트·제외 범위·불변식은 `%s`를 읽는다.\n' "$(_runtime_yaml_scalar "$task_file" intent)"
+
+    printf '## Task Contract\n\n```yaml\n'
+    _runtime_task_contract "$task_file"
+    printf '```\n'
     # 직전 시도 결과를 넣지 않으면 changes_requested로 돌아온 재시도에서 Worker가
     # Reviewer 지적을 못 본 채 같은 접근을 반복한다(Rework의 주된 원인).
-    # 전체 이력이 아니라 "최신 한 번"만 넣어 Packet이 부풀지 않게 한다.
+    # 전체 이력이 아니라 "최신 한 번"의 미해결 항목만 넣어 Packet이 부풀지 않게 한다.
     _runtime_previous_round "$root" "$task_id"
     # 추가 지시는 Next step 앞에 둔다 — 마지막 줄이 "다음 한 단계"로 끝나야
     # Agent가 무엇을 할 차례인지 헷갈리지 않는다.
@@ -607,9 +724,9 @@ _runtime_context_packet() {
     fi
     printf '\n## Next step\n\n'
     if [[ "$role" == worker ]]; then
-      printf '이 Task만 수행하고 검증 결과와 Attempt 산출물을 남긴 뒤 submitted를 제안한다. 상태를 직접 전이하거나 completed로 만들지 않는다.\n'
+      printf 'Intent를 읽고 write_scope 안에서 이 Task만 수행한 뒤, AC 검증 결과와 수정 내역을 %s에 남기고 submitted를 제안한다.\n' "$output_path"
     else
-      printf 'Diff, Task Criteria와 Evidence를 읽기 전용으로 검토하고 Review 산출물에 판정과 근거를 기록한다. 소스와 Task 상태를 수정하지 않는다.\n'
+      printf 'Diff, Task Criteria와 Evidence를 읽기 전용으로 검토하고 %s에 판정과 근거를 기록한다.\n' "$output_path"
     fi
   } >"$temporary"
   if _runtime_has_secret "$temporary"; then

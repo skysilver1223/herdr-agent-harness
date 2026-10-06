@@ -13,7 +13,7 @@ Herdr Multiplexer 환경에서 승인된 Wave를 실행한다. 1스텝 CLI(`herd
 - 읽을 것: `AGENTS.md`, `.agents/roles/orchestrator.agent.md`, `.harness/project.yaml`, `.harness/policies/`, `.harness/STATE.md`, 현재 `.harness/waves/wave-*.yaml`, 실행 대상 `.harness/tasks/task-*.yaml`.
 
 ## 2. 절차
-1. **사전 검증·관측.** `herdr-harness validate .`(Git·스키마·권한·정책, 실패 시 즉시 중단) → `herdr-harness status --live .`(Herdr agent/pane과 STATE.md의 Drift·orphan 확인). ORPHAN 등록 Agent는 `herdr-harness close-agent . <task_id> worker|reviewer`로 정리한다. (진행 상황 요약이 필요할 때도 `status --live .` 결과를 사용자에게 정리해 보고한다.)
+1. **사전 검증·관측.** 첫 Wave이거나 Provider·모델 정책을 바꿨다면 `herdr-harness preflight .`(Provider CLI·모델 매핑·승인 인수·write_scope, `[FAIL]`이면 중단) → `herdr-harness validate .`(Git·스키마·권한·정책, 실패 시 즉시 중단) → `herdr-harness status --live .`(Herdr agent/pane과 STATE.md의 Drift·orphan 확인). ORPHAN 등록 Agent는 `herdr-harness close-agent . <task_id> worker|reviewer`로 정리한다. (진행 상황 요약이 필요할 때도 `status --live .` 결과를 사용자에게 정리해 보고한다.)
 2. **Task 선택·전이 (ready → active).** 승인된 Wave에서 의존성이 충족된 `ready` Task를 골라 `herdr-harness transition . <task_id> active`.
 3. **Worker 디스패치 (active).** `herdr-harness dispatch . <task_id> worker` — 내부적으로 pane split·agent start·Context Packet 주입·`agent prompt --wait`를 수행하고 결과를 정규화한다. 반환 코드별 분기:
    - `settled`: 4로 진행.
@@ -21,14 +21,15 @@ Herdr Multiplexer 환경에서 승인된 Wave를 실행한다. 1스텝 CLI(`herd
    - `timeout`/`stalled`: `observe`로 출력 확인 후 재대기할지 중단할지 판단.
    - `agent_lost`/`error`: `herdr-harness transition . <task_id> handover_required`(인계 문서 필요) 후 사용자에게 보고.
    - `agent read` 출력이 비었거나 잘리면(Alternate Screen 등) Worker에게 `.harness/attempts/<task_id>-attempt-N.md` 파일 산출을 요청하고 존재·내용을 확인한다.
-4. **제출 검증·전이 (active → submitted).** `.harness/attempts/<task_id>-attempt-*.md`와 Evidence 파일 생성 확인 → `git status --short`·`git diff --stat`으로 write_scope 준수 확인 → `herdr-harness transition . <task_id> submitted` → `herdr-harness close-agent . <task_id> worker`.
+4. **제출 검증·전이 (active → submitted).** `.harness/attempts/<task_id>-attempt-*.md`와 Evidence 파일 생성 확인 → `git status --short`·`git diff --stat`으로 write_scope 준수 확인 → `herdr-harness transition . <task_id> submitted`(Harness가 AC를 실행하고, `write_scope`가 비어 있지 않으면 Attempt 기준 commit 이후 변경 파일을 대조해 범위 밖 변경을 거부한다) → `herdr-harness close-agent . <task_id> worker`.
 5. **Reviewer 디스패치 (submitted → reviewing).** `herdr-harness transition . <task_id> reviewing`(Worker≠Reviewer 강제) → `herdr-harness dispatch . <task_id> reviewer`(읽기 전용, `review-policy.yaml`의 8대 `focus`로 `.harness/reviews/<task_id>-review-N.md` 작성). `timeout`/`stalled`이면 `herdr-harness observe . <task_id> reviewer`. 끝나면 `herdr-harness close-agent . <task_id> reviewer`.
    - Agent 기동은 **항상 `dispatch`가 한다.** Provider가 무엇이든 사람에게 "직접 띄워 달라"고 요청하지 않는다 — 수동 기동은 Attempt·Evidence·Pane 추적을 통째로 빠뜨린다.
    - 이 Task에만 필요한 지시(리뷰 중점, 오판 방지 경고 등)는 파일에 적어 `herdr-harness dispatch . <task_id> reviewer --extra-prompt <파일>`로 붙인다. 커스텀 프롬프트는 수동 기동의 사유가 되지 않는다.
    - Herdr 밖이라 `dispatch`가 불가능한 예외 상황에서만 `dispatch ... --print-only`로 명령을 받아 띄우고, 반드시 `herdr-harness adopt . <task_id> reviewer --pane <id> --agent <name>`으로 되돌려 등록한다.
 6. **판정 처리.** Review의 `판정:`을 읽는다. `CHANGES_REQUESTED`이면 `herdr-harness transition . <task_id> changes_requested` → `herdr-harness transition . <task_id> ready` 후 2로 복귀. `APPROVED`이면 `herdr-harness transition . <task_id> awaiting_approval`.
 7. **완료 승인 Gate (awaiting_approval → completed).** Wave의 모든 Task가 `awaiting_approval`에 도달하면 `herdr-harness status --live .`를 종합해 사용자에게 보고한다. 사용자가 채팅에서 현재 Task의 완료를 명시적으로 승인한 경우에만 `herdr-harness approve . <task_id> --confirm-user-approval`을 호출한다. 이 명령이 Task ID·상태·최신 APPROVED Review를 재검증하고 승인 파일을 원자적으로 기록한 뒤 기존 transition Gate를 호출한다. 승인 파일을 직접 편집하거나 사용자 발화에서 승인 권한을 추론하지 않는다.
-8. `결과: SUCCESS, <실행한 Task·전이·판정 요약>` 또는 `결과: BLOCKED, 사유: <승인 대기·Agent 블록·장애 등>` 한 줄로 끝낸다.
+8. **STATE.md 갱신.** 전이한 Task의 상태표 행을 같은 회차에 맞춘다. Wave를 닫을 때는 `orchestrator.agent.md` §1.1대로 그 Wave의 서술 섹션을 `.harness/archive/STATE-<wave-id>.md`로 옮긴다.
+9. `결과: SUCCESS, <실행한 Task·전이·판정 요약>` 또는 `결과: BLOCKED, 사유: <승인 대기·Agent 블록·장애 등>` 한 줄로 끝낸다.
 
 ## 3. 예외·중단 게이트
 - `HERDR_ENV != 1`, `herdr-harness validate .` 실패, Worker가 `blocked`이거나 시크릿 요구, Provider Failover가 필요한 장애, Wave 완료 후 `completed` 승인 대기 — 이 중 하나면 멈추고 사용자 판단을 받는다.

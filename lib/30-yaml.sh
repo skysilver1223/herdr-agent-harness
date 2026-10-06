@@ -92,3 +92,16 @@ valid_task_status() {
   esac
 }
 
+
+# project.yaml의 project.preset — init --preset 이전에 만든 프로젝트에는 키가
+# 없으므로 project_field(정확히 한 번 요구)와 달리 없으면 none을 돌려준다.
+project_preset() {
+  local root="$1" value
+  value="$(awk '
+    $0 == "project:" { inside = 1; next }
+    /^[^[:space:]#]/ { inside = 0 }
+    inside && index($0, "  preset:") == 1 { print substr($0, 10); exit }' \
+    "$root/.harness/project.yaml" 2>/dev/null || true)"
+  value="$(yaml_unquote "$value")"
+  printf '%s' "${value:-none}"
+}

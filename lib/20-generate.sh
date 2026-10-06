@@ -23,8 +23,10 @@ write_project_templates() {
   DOC_CLAUDE_MODELS='' DOC_CLAUDE_DEFAULT_MODEL=''
   DOC_CODEX_MODELS='' DOC_CODEX_DEFAULT_MODEL=''
   DOC_AGY_MODELS='' DOC_AGY_DEFAULT_MODEL=''
-  DOC_WORKER_DEFAULT_TIER='' DOC_REVIEWER_DEFAULT_TIER=''
-  DOC_WORKER_DEFAULT_EFFORT='' DOC_REVIEWER_DEFAULT_EFFORT=''
+  # init --preset이 넘기는 역할 기본 등급·속도(8~11번째 인수). sync-templates는
+  # 넘기지 않으므로 빈 값으로 시작하고, 아래에서 기존 정책 값을 다시 주입한다.
+  DOC_WORKER_DEFAULT_TIER="${8:-}" DOC_WORKER_DEFAULT_EFFORT="${9:-}"
+  DOC_REVIEWER_DEFAULT_TIER="${10:-}" DOC_REVIEWER_DEFAULT_EFFORT="${11:-}"
   DOC_CLAUDE_TIER_LIGHT='' DOC_CLAUDE_TIER_STANDARD='' DOC_CLAUDE_TIER_PREMIUM=''
   DOC_CODEX_TIER_LIGHT='' DOC_CODEX_TIER_STANDARD='' DOC_CODEX_TIER_PREMIUM=''
   DOC_AGY_TIER_LIGHT='' DOC_AGY_TIER_STANDARD='' DOC_AGY_TIER_PREMIUM=''
@@ -96,7 +98,7 @@ POLICY_FIELDS
 # ---------------------------------------------------------------------------
 
 _entry_doc_agents() {
-  local name="$1" orchestrator="$2" worker="$3" reviewer="$4" fallback="$5"
+  local name="$1" orchestrator="$2" worker="$3" reviewer="$4" fallback="$5" preset="${6:-none}"
   cat <<EOF
 # Agent Instructions: $name
 
@@ -111,9 +113,22 @@ _entry_doc_agents() {
 - Worker는 \`submitted\`까지만 제안하고 사용자가 \`completed\`를 승인한다.
 - 실패·쿼터 확인 후 Handover와 사용자 승인을 거쳐 Provider를 교체한다.
 - 위험한 명령, 배포, 외부 쓰기는 사용자 승인을 받는다.
+- 현재 상태는 \`herdr-harness status .\`(Task YAML 기준 요약)로 본다. STATE.md 하단의 서술 메모는 기록이지 현재 지시가 아니다.
 
 기본 배정: Orchestrator=$orchestrator, Worker=$worker, Reviewer=$reviewer, Fallback=$fallback
 EOF
+  if [[ -n "$preset" && "$preset" != none ]]; then
+    cat <<EOF
+
+운영 프리셋: $preset (정의: \`herdr-harness help init\`)
+
+- 새 Task는 위 기본 배정으로 시작한다. Task YAML이 다른 Provider를 명시하면 그 계약이 우선한다.
+- 도구 승인 모드 \`bypass\`는 Provider의 **도구 실행 승인**에만 적용된다. SPEC/Wave 승인, Provider 교체,
+  위험 명령, 외부 쓰기·배포, \`completed\` 최종 승인은 그대로 사용자 Gate를 통과한다.
+- Sandbox가 없으므로 \`write_scope\`가 쓰기 경계다. \`submitted\` 전이 때 Harness가 실제 변경 파일과 대조한다.
+- 첫 dispatch 전에 \`herdr-harness preflight .\`로 Provider·모델·승인 인수·write_scope를 점검한다.
+EOF
+  fi
 }
 
 _entry_doc_claude() {
@@ -137,21 +152,25 @@ cmd_init() {
   [[ -n "$target" && "$target" != -* ]] || die "init에는 새 프로젝트 경로가 필요합니다."
   shift
 
-  local name="" goal="" profile="generic"
+  local name="" goal="" profile="generic" preset="none"
   local orchestrator="claude" worker="codex" reviewer="agy" fallback="claude,agy"
   local remote_host="" remote_user="" remote_path="" remote_mount="" remote_vcs="git"
   local approval_mode="auto"
+  # 명시한 옵션은 --preset보다 우선한다. 프리셋은 "지정하지 않은 값"만 채운다.
+  local -A explicit=()
+  local worker_tier="" worker_effort="" reviewer_tier="" reviewer_effort=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name) [[ $# -ge 2 ]] || die "--name 값이 필요합니다."; name="$2"; shift 2 ;;
       --goal) [[ $# -ge 2 ]] || die "--goal 값이 필요합니다."; goal="$2"; shift 2 ;;
       --profile) [[ $# -ge 2 ]] || die "--profile 값이 필요합니다."; profile="$2"; shift 2 ;;
-      --orchestrator) [[ $# -ge 2 ]] || die "--orchestrator 값이 필요합니다."; orchestrator="$2"; shift 2 ;;
-      --worker) [[ $# -ge 2 ]] || die "--worker 값이 필요합니다."; worker="$2"; shift 2 ;;
-      --reviewer) [[ $# -ge 2 ]] || die "--reviewer 값이 필요합니다."; reviewer="$2"; shift 2 ;;
-      --fallback) [[ $# -ge 2 ]] || die "--fallback 값이 필요합니다."; fallback="$2"; shift 2 ;;
-      --approval-mode) [[ $# -ge 2 ]] || die "--approval-mode 값이 필요합니다."; approval_mode="$2"; shift 2 ;;
+      --preset) [[ $# -ge 2 ]] || die "--preset 값이 필요합니다."; preset="$2"; shift 2 ;;
+      --orchestrator) [[ $# -ge 2 ]] || die "--orchestrator 값이 필요합니다."; orchestrator="$2"; explicit[orchestrator]=1; shift 2 ;;
+      --worker) [[ $# -ge 2 ]] || die "--worker 값이 필요합니다."; worker="$2"; explicit[worker]=1; shift 2 ;;
+      --reviewer) [[ $# -ge 2 ]] || die "--reviewer 값이 필요합니다."; reviewer="$2"; explicit[reviewer]=1; shift 2 ;;
+      --fallback) [[ $# -ge 2 ]] || die "--fallback 값이 필요합니다."; fallback="$2"; explicit[fallback]=1; shift 2 ;;
+      --approval-mode) [[ $# -ge 2 ]] || die "--approval-mode 값이 필요합니다."; approval_mode="$2"; explicit[approval_mode]=1; shift 2 ;;
       --remote-host) [[ $# -ge 2 ]] || die "--remote-host 값이 필요합니다."; remote_host="$2"; shift 2 ;;
       --remote-user) [[ $# -ge 2 ]] || die "--remote-user 값이 필요합니다."; remote_user="$2"; shift 2 ;;
       --remote-path) [[ $# -ge 2 ]] || die "--remote-path 값이 필요합니다."; remote_path="$2"; shift 2 ;;
@@ -167,6 +186,23 @@ cmd_init() {
   if [[ -d "$target" ]] && find "$target" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
     die "신규 프로젝트 전용입니다. 대상 경로가 비어 있지 않습니다: $target"
   fi
+
+  # 운영 프리셋 — 매번 반복 지정하던 Provider·승인 모드·역할 등급 조합을 이름
+  # 하나로 묶는다. 모델 ID는 넣지 않는다(자주 바뀐다). 등급→모델 매핑은
+  # preflight가 점검하고 사람이 models 명령·agent-policy.yaml로 채운다.
+  case "$preset" in
+    none) ;;
+    agy-primary)
+      [[ -n "${explicit[orchestrator]:-}" ]] || orchestrator=claude
+      [[ -n "${explicit[worker]:-}" ]] || worker=agy
+      [[ -n "${explicit[reviewer]:-}" ]] || reviewer=codex
+      [[ -n "${explicit[fallback]:-}" ]] || fallback=claude,codex
+      [[ -n "${explicit[approval_mode]:-}" ]] || approval_mode=bypass
+      worker_tier=standard worker_effort=medium
+      reviewer_tier=light reviewer_effort=medium
+      ;;
+    *) die "지원하지 않는 --preset입니다: $preset (none | agy-primary)" ;;
+  esac
 
   [[ -n "$name" ]] || name="$(basename "$target")"
   if [[ -z "$goal" ]]; then prompt_required goal "프로젝트 목표"; fi
@@ -232,7 +268,7 @@ __pycache__/
 node_modules/
 EOF
 
-  write_file "$target" "AGENTS.md" <<<"$(_entry_doc_agents "$name" "$orchestrator" "$worker" "$reviewer" "$fallback")"
+  write_file "$target" "AGENTS.md" <<<"$(_entry_doc_agents "$name" "$orchestrator" "$worker" "$reviewer" "$fallback" "$preset")"
   write_file "$target" "CLAUDE.md" <<<"$(_entry_doc_claude)"
   write_file "$target" "GEMINI.md" <<<"$(_entry_doc_gemini)"
 
@@ -242,6 +278,8 @@ project:
   name: $name_yaml
   goal: $goal_yaml
   profile: '$profile'
+  # 운영 프리셋(init --preset). none이면 개별 옵션으로 구성한 프로젝트다.
+  preset: '$preset'
 
 mode:
   # 사용자가 Controller와 최종 Gate 역할을 한다.
@@ -464,7 +502,8 @@ EOF
   done
 
   write_project_docs "$target" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback"
-  write_project_templates "$target" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback" "$approval_mode"
+  write_project_templates "$target" "$name" "$orchestrator" "$worker" "$reviewer" "$fallback" "$approval_mode" \
+    "$worker_tier" "$worker_effort" "$reviewer_tier" "$reviewer_effort"
 
   mkdir -p "$target/.claude/skills"
   local skill_dir skill_name
@@ -476,8 +515,36 @@ EOF
   write_file "$target" "HARNESS_START.md" <<EOF
 # 시작 방법
 
+## 1. 사전 점검 (읽기 전용)
+
 \`\`\`bash
 cd "$target"
+herdr-harness preflight .
+\`\`\`
+
+Provider CLI, 설치본과 소스의 일치, Git 기준선, 승인 모드가 Worker/Reviewer에
+실제로 붙일 인수, Worker≠Reviewer, 역할 기본 등급→모델 매핑, \`write_scope\`
+쓰기 가능 여부를 한 번에 본다. \`[FAIL]\`이 있으면 출력의 "수정:" 안내대로
+고친 뒤 다시 실행한다. 등급(tier)을 쓰면 모델 목록이 필요하다.
+
+\`\`\`bash
+herdr-harness models . --refresh --apply      # agy: 설치된 CLI에서 목록 조회
+# codex·claude: 목록 조회 경로가 없다 — .harness/policies/agent-policy.yaml의
+#   <provider>_models 와 <provider>_tier_<light|standard|premium> 을 직접 채운다.
+herdr-harness preflight .                     # 다시 확인
+\`\`\`
+
+## 2. 기존 자산 기록
+
+기존 코드·문서·Dump·외부 저장소 경로는 \`.harness/references/inventory.md\`에
+한 줄씩 적는다. 다른 저장소를 수정하는 Task는 \`target_files\`/\`write_scope\`에
+그 경로를 절대경로로 적고, \`preflight\`로 쓰기 가능 여부와 Git 기준선을 확인한다.
+\`PROGRESS.md\` 같은 도메인 뷰는 선택 사항이다 — 만든다면 상태 정본은 Task YAML,
+요약은 STATE.md 상태표이며, 두 곳을 갱신한 **뒤에** 같은 회차에 맞춰 고친다.
+
+## 3. Orchestrator 시작
+
+\`\`\`bash
 herdr-harness start .
 \`\`\`
 
@@ -488,12 +555,15 @@ harness-spec Skill로 기존 코드·데이터·문서·Dump를 먼저 조사하
 요구사항을 인터뷰해서 SPEC 초안을 만들어줘.
 SPEC 승인 전에는 구현하지 마. 이후 harness-plan, harness-orchestrate로 진행해줘.
 \`\`\`
+
+진행 중 현재 상태는 \`herdr-harness status .\`(요약)로, STATE.md 원문은
+\`herdr-harness status . --full\`로 본다.
 EOF
 
   init_git_baseline "$target"
 
   info "생성 완료: $target"
-  info "다음 단계: cd '$target' && herdr-harness start ."
+  info "다음 단계: cd '$target' && herdr-harness preflight . && herdr-harness start ."
   if [[ "$remote_enabled" == true ]]; then
     info "원격 모드 설정됨. 키 등록(비밀번호 1회 입력): herdr-harness remote '$target' setup --force"
   fi
@@ -561,6 +631,8 @@ cmd_sync_templates() {
   worker="$(project_field "$root" providers primary_worker)"
   reviewer="$(project_field "$root" providers reviewer)"
   fallback="$(awk -F'[][]' '/^  fallback_chain:/{print $2; exit}' "$root/.harness/project.yaml")"
+  local preset
+  preset="$(project_preset "$root")"
 
   SYNC_CHANGED=()
   SYNC_UNCHANGED=()
@@ -634,7 +706,7 @@ cmd_sync_templates() {
   local entry_doc entry_generator
   for entry_doc in AGENTS.md CLAUDE.md GEMINI.md; do
     case "$entry_doc" in
-      AGENTS.md) entry_generator="_entry_doc_agents \"\$name\" \"\$orchestrator\" \"\$worker\" \"\$reviewer\" \"\$fallback\"" ;;
+      AGENTS.md) entry_generator="_entry_doc_agents \"\$name\" \"\$orchestrator\" \"\$worker\" \"\$reviewer\" \"\$fallback\" \"\$preset\"" ;;
       CLAUDE.md) entry_generator="_entry_doc_claude" ;;
       GEMINI.md) entry_generator="_entry_doc_gemini" ;;
     esac

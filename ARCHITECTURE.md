@@ -106,6 +106,20 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 
 정본은 `dispatch`/`observe`만 만들고, 게이트는 글롭이 아니라 이름과 필수 필드를 함께 봅니다 — 빈 YAML 하나로는 통과하지 못합니다. Secret 의심 패턴이 발견되면 원문 대신 요약만 남깁니다.
 
+### 5.3 write_scope 대조
+
+`approval_mode: bypass`에서는 Provider Sandbox가 없어 `write_scope`가 사실상 유일한 쓰기 경계인데, 지금까지는 아무도 대조하지 않는 문서상 지침이었습니다. `transition ... submitted`가 이를 확인합니다.
+
+- 기준: 마지막 Worker Attempt(`- Role: worker`)의 `Baseline commit`. 그 이후의 커밋된 변경 + 작업 트리 변경 + untracked 파일
+- `--cwd`로 다른 저장소에서 기동했다면 Attempt의 `Agent cwd baseline commit` 기준으로 그 저장소도 대조
+- 제외: `.harness/`(Harness 기록), 동시에 진행 중인(active·submitted·reviewing·changes_requested·blocked·handover_required) 다른 Task의 `write_scope`
+- 매칭: 파일, 디렉터리(하위 전체), glob(`docs/*.md`)
+- `write_scope`가 비었거나 Baseline 기록이 없으면 대조하지 않습니다(이전 버전 Task 호환). `preflight`가 빈 `write_scope`를 경고합니다.
+
+### 5.4 현재 상태 요약 (`status`)
+
+`STATE.md`는 상태표 아래에 Wave마다 서술 섹션이 쌓이는 문서라, 원문을 그대로 출력하면 파일 끝의 오래된 `다음 작업` 메모가 현재 할 일처럼 보입니다(2026-09-25 실사용 제보). 그래서 `status`의 기본 출력은 정본인 Task YAML의 `status:`에서 계산한 요약입니다 — 사용자 승인·판단 대기(awaiting_approval·blocked·handover_required, SPEC·draft Wave), completed가 아닌 Task(사람 판단이 필요한 순), `STATE.md` 상태표와의 불일치. `STATE.md`에서는 머리 bullet과 상태표만 읽고 서술 섹션은 출력하지 않습니다. 원문은 `--full`, 기계 처리는 `--json`입니다. `--live --json`의 기존 필드(`state` 원문·`agents`·`git_status`·`pending_decisions`)는 그대로 두고 요약 필드를 덧붙였습니다. `STATE.md`는 읽기만 합니다 — 서술 섹션의 정리는 Orchestrator가 Wave 종료 때 `.harness/archive/STATE-<wave-id>.md`로 옮기는 운영 규칙으로 다룹니다.
+
 ## 6. Skills
 
 | Skill | 역할 |
@@ -123,7 +137,8 @@ Reviewer와 `transition`이 읽어야 하는 것은 "Worker가 말한 것과 실
 
 ## 7. 실행 흐름
 
-1. `init`이 프로젝트 파일과 Git 저장소를 만들고 가능한 경우 기준 commit을 생성합니다.
+1. `init`이 프로젝트 파일과 Git 저장소를 만들고 가능한 경우 기준 commit을 생성합니다. `--preset agy-primary`는 Orchestrator=claude·Worker=agy·Reviewer=codex·Fallback 후보 claude,codex·`bypass`·역할 기본 등급(Worker standard/medium, Reviewer light/medium)을 한 번에 적용합니다. 모델 ID는 고정하지 않습니다.
+1. `preflight`가 Provider CLI·설치본 지문·Git 기준선·역할별 실제 승인 인수·Worker≠Reviewer·등급→모델 매핑(설치된 agy 목록과 대조)·`write_scope` 쓰기 가능 여부를 읽기 전용으로 점검합니다. `[FAIL]`은 수정 위치와 함께 나옵니다.
 2. `harness-spec`(자산 조사 + 인터뷰)과 `harness-plan` 후 사용자가 SPEC과 Wave를 승인합니다.
 3. Orchestrator가 `validate [PATH] --wave ID`로 실행 전제를 검사합니다.
 4. `transition ... active` 후 `dispatch ... worker`로 Worker 한 턴만 실행합니다. Herdr나 Provider CLI 문제로 이 경로가 막히면 `dispatch ... --print-only`로 실행할 명령만 받아 사람이 직접 띄운 뒤 `adopt`로 등록합니다(§7.1).
@@ -330,17 +345,18 @@ Provider를 바꾸지 않습니다** — 아래 확인된 실패 조건과 별�
 
 ## 9. Context Packet
 
-`dispatch`는 Worker와 Reviewer에게 전체 대화 대신 `.harness/runtime/TASK-context-ROLE.md` Context Packet을 한 번 전달합니다.
+`dispatch`는 Worker와 Reviewer에게 전체 대화 대신 `.harness/runtime/TASK-context-ROLE.md` Context Packet을 한 번 전달합니다. 필수 계약은 원문으로 싣고, 반복되는 장문은 짧은 규칙 + 절대 경로(열람 조건 명시)로 바꿉니다. 축약 전후 실측은 [docs/context-packet-measurement-2026-10.md](docs/context-packet-measurement-2026-10.md)에 있습니다.
 
-- 승인된 SPEC 발췌 — 1 목표·3 기술 스택과 제약·4 요구사항·5 Acceptance Criteria·6 제외 범위 (줄 수가 아니라 절 단위로 통째 추출)
-- 현재 Task Contract 전문 — `write_scope`·`resources`·`inputs`·`acceptance_criteria`가 이 YAML 안에 있음
-- 착수 게이트·제외 범위·불변식은 Task의 `intent.md`를 읽으라는 안내 한 줄
-- 다음 한 단계 (Worker는 submitted 제안까지, Reviewer는 읽기 전용 판정 기록)
-- 직전 라운드 — 최신 Worker·Reviewer Evidence 정본, 최신 AC 검증 결과, 최신 Review 판정과 발췌. 없으면 통째로 생략합니다.
+- 실행 규칙 — Task 하나만, 상태 전이·completed 금지, `write_scope` 안에서만 쓰기(submitted 때 대조됨), 위험 명령·배포·외부 쓰기·Provider 교체는 사용자 승인. 역할·Skill·`AGENTS.md`는 절대 경로와 "절차가 불확실할 때만 읽는다"는 조건으로 안내
+- 절대 경로 — 프로젝트 루트, 이번 Attempt/Review 기록 파일, Task 계약 정본, Intent, SPEC
+- SPEC 발췌 — §1 목표·§3 제약·§6 제외 범위 원문(절 단위로 통째 추출). §4 요구사항·§5 프로젝트 AC는 정본 경로와 열람 조건만 — 이 Task의 AC는 Task Contract에 원문으로 있습니다
+- Task Contract — 주석과 Harness가 이미 적용했거나 매번 바뀌는 키(`schema_version`·`status`·`fallback_chain`·모델/등급/속도)만 뺀 YAML. 블록 스칼라 본문은 그대로 보존
+- 직전 라운드(있을 때만) — Evidence의 결과·요약·변경 파일, AC 검증 요약과 **실패한 기준만**, 최신 Review 판정(본문은 `APPROVED`가 아닐 때만)
+- 이 Task 추가 지시(`--extra-prompt`), 다음 한 단계
 
-직전 라운드를 넣지 않으면 `changes_requested` 재시도에서 Worker가 Reviewer의 지적을 못 본 채 같은 접근을 반복합니다. 대상은 "가장 큰 attempt 번호"가 아니라 파일이 실제로 존재하는 최근 attempt이며(Reviewer가 attempt를 하나 더 만드는 일반적인 재작업 흐름에서 Worker 증적이 통째로 빠지지 않도록), 길이를 예측할 수 없는 Review·checks는 줄 수와 줄 길이를 함께 잘라 넣습니다.
+직전 라운드를 넣지 않으면 `changes_requested` 재시도에서 Worker가 Reviewer의 지적을 못 본 채 같은 접근을 반복합니다. 대상은 "가장 큰 attempt 번호"가 아니라 파일이 실제로 존재하는 최근 attempt이며, 길이를 예측할 수 없는 Review는 줄 수와 줄 길이를 함께 잘라 넣습니다. 첫 시도에는 직전 라운드 절이 없습니다.
 
-같은 사실을 재추출해 덧붙이던 `## Write scope`·`## References and inputs`·`## Verification commands` 블록은 중복이라 제거됐습니다(모두 Task Contract YAML 안에 이미 있음).
+`dispatch`는 Packet 크기(bytes·줄)를 Attempt 머리말과 `--print-only` 출력에 남겨 운영 중 실측할 수 있게 합니다.
 
 Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않고 해당 dispatch를 실패시킵니다.
 
@@ -390,7 +406,7 @@ Secret 의심 패턴이 발견되면 Context 원문을 저장·전송하지 않�
 
 ## 12. 보안과 신뢰 경계
 
-- `write_scope`와 Skill은 운영 지침이지 Sandbox가 아닙니다.
+- `write_scope`와 Skill은 Sandbox가 아닙니다. 다만 `write_scope`가 비어 있지 않은 Task는 `submitted` 전이 때 Harness가 마지막 Worker Attempt의 Baseline commit 이후 변경 파일(커밋·작업 트리·untracked, `--cwd` 저장소 포함)을 대조해 범위 밖 변경을 거부합니다(§5.3). 쓰는 순간을 막지는 못하고 제출을 막습니다.
 - 승인 우회 모드에서는 Agent가 셸을 자유롭게 쓸 수 있으므로, 프롬프트 지시만으로는 Agent가 스스로 `approve`를 실행하거나 프리미엄 모델 승인 파일을 만드는 것을 막을 수 없습니다. 그래서 `transition`과 `approve`는 호출한 Pane이 Harness가 추적 중인 Agent Pane(`dispatch`가 띄운 것과 `adopt`로 등록한 것 모두)이면 거부하고, 같은 Pane에서 실행된 `dispatch`는 프리미엄 승인을 인정하지 않습니다. 현재 Pane은 환경변수가 아니라 `herdr pane current`(터미널을 직접 보고 답함)를 우선 사용해 `.harness/runtime/*.meta`의 `pane_id`와 대조하므로, `HERDR_PANE_ID`를 `env -u`로 지우는 것만으로는 우회되지 않습니다. `herdr` 조회 자체가 실패하면 그 환경변수로 떨어지고, 그것도 비어 있으면 Pane을 특정할 수 없어 통과시킵니다 — 아래 단서 그대로 가드레일이지 경계가 아닙니다. `.meta`에 기록이 없는 사람·Orchestrator Pane은 영향받지 않습니다. 이것은 비용 통제를 위한 운영 가드레일이지 보안 경계가 아닙니다(Agent는 사용자와 같은 권한이라 `.meta`, 승인 파일이나 스크립트 자체를 고칠 수 있습니다).
 - Secret을 Prompt, Evidence, Pane 기록에 넣지 않습니다.
 - 배포, 삭제, 외부 쓰기는 사용자 승인을 받습니다.

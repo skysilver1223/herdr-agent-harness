@@ -2162,6 +2162,443 @@ STUB
   [[ "$(grep -cxF '.harness/evidence/raw/' "$gi_project/.gitignore")" -eq 1 ]] ||
     die "sync-templates --apply가 .gitignore 줄을 중복 추가했습니다."
 
+  # ===========================================================================
+  # 2026-10 운영 프리셋·사전 점검·write_scope 대조·Packet 축약·status 요약
+  # ===========================================================================
+  _px_capture() {
+    local __var="$1" __out
+    shift
+    set +e
+    __out="$("$@" 2>&1)"
+    PX_STATUS=$?
+    set -e
+    printf -v "$__var" '%s' "$__out"
+  }
+  _px_commit() {
+    git -C "$1" add -A >/dev/null 2>&1
+    git -C "$1" -c user.name=harness-test -c user.email=test@example.invalid \
+      -c core.hooksPath=/dev/null commit -q -m "${2:-test}" >/dev/null 2>&1 || true
+  }
+  _px_mktask() {
+    # $1=root $2=task_id $3=status $4=title — TEMPLATE에서 만든다.
+    sed -e "s/^task_id: .*/task_id: $2/" -e "s/^status: .*/status: $3/" \
+        -e "s/^title: .*/title: $4/" -e "s|^intent: .*|intent: .harness/intents/$2-intent.md|" \
+        "$1/.harness/tasks/TEMPLATE.yaml" >"$1/.harness/tasks/$2.yaml"
+  }
+  _px_set_key() {
+    # agent-policy.yaml의 한 키를 바꾼다.
+    sed -i "s|^  $2: .*|  $2: '$3'|" "$1/.harness/policies/agent-policy.yaml"
+  }
+  local px_bin="$test_root/preflight-bin" px_tool
+  mkdir -p "$px_bin"
+  for px_tool in herdr claude codex; do
+    printf '#!/usr/bin/env bash\nprintf "%s stub\\n"\n' "$px_tool" >"$px_bin/$px_tool"
+    chmod +x "$px_bin/$px_tool"
+  done
+  cat >"$px_bin/herdr" <<'PX_HERDR_STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == agent && "${2:-}" == list ]]; then
+  printf '{"result":{"agents":[]}}\n'
+  exit 0
+fi
+printf 'herdr stub\n'
+PX_HERDR_STUB
+  chmod +x "$px_bin/herdr"
+
+  # --- init 운영 프리셋 ------------------------------------------------------
+  local px_root="$test_root/preset-project" px_policy px_project px_out px_file
+  bash "$SELF_PATH" init "$px_root" --name preset-project --goal '테스트 목표' --preset agy-primary >/dev/null
+  _px_commit "$px_root" "chore: harness 기준선"
+  px_project="$px_root/.harness/project.yaml"
+  px_policy="$px_root/.harness/policies/agent-policy.yaml"
+  for px_out in "  orchestrator: 'claude'" "  primary_worker: 'agy'" "  reviewer: 'codex'" \
+                "  fallback_chain: [claude,codex]" "  preset: 'agy-primary'"; do
+    grep -qxF "$px_out" "$px_project" || die "프리셋 project.yaml에 없는 값: $px_out"
+  done
+  for px_out in "  approval_mode: 'bypass'" "  worker_default_tier: 'standard'" \
+                "  worker_default_effort: 'medium'" "  reviewer_default_tier: 'light'" \
+                "  reviewer_default_effort: 'medium'" \
+                "  agy_bypass: '--dangerously-skip-permissions'" \
+                "  codex_bypass: '--dangerously-bypass-approvals-and-sandbox'"; do
+    grep -qxF "$px_out" "$px_policy" || die "프리셋 agent-policy.yaml에 없는 값: $px_out"
+  done
+  # 모델 ID는 프리셋에 고정하지 않는다 — 목록과 등급 매핑은 모두 비어 있어야 한다.
+  if grep -E "^  [a-z]+_(models|default_model|tier_light|tier_standard|tier_premium|premium_models): '[^']+'" "$px_policy" >/dev/null; then
+    die "프리셋이 모델 ID를 하드코딩했습니다."
+  fi
+  for px_out in "primary_worker: 'agy'" "reviewer: 'codex'" "fallback_chain: [claude,codex]"; do
+    grep -qxF "$px_out" "$px_root/.harness/tasks/TEMPLATE.yaml" ||
+      die "프리셋 Task 템플릿 배정이 다릅니다: $px_out"
+  done
+  grep -qF 'Worker=`agy`, Reviewer=`codex`' "$px_root/.agents/roles/planner.agent.md" ||
+    die "Planner 역할 문서의 기본 배정이 프리셋과 다릅니다."
+  grep -qF 'primary_worker: agy`, `reviewer: codex`' "$px_root/.agents/skills/harness-plan/SKILL.md" ||
+    die "harness-plan Skill의 기본 배정이 프리셋과 다릅니다."
+  grep -qxF "  default_provider: 'codex'" "$px_root/.harness/policies/review-policy.yaml" ||
+    die "review-policy의 기본 Reviewer가 프리셋과 다릅니다."
+  grep -qF '기본 배정: Orchestrator=claude, Worker=agy, Reviewer=codex, Fallback=claude,codex' "$px_root/AGENTS.md" ||
+    die "AGENTS.md 기본 배정이 프리셋과 다릅니다."
+  grep -qF '운영 프리셋: agy-primary' "$px_root/AGENTS.md" || die "AGENTS.md에 프리셋 절이 없습니다."
+  grep -qF '**도구 실행 승인**에만 적용' "$px_root/AGENTS.md" ||
+    die "AGENTS.md가 bypass의 적용 범위(도구 실행 승인만)를 밝히지 않습니다."
+  grep -qF 'herdr-harness preflight .' "$px_root/HARNESS_START.md" ||
+    die "HARNESS_START.md에 사전 점검 단계가 없습니다."
+  grep -qF 'references/inventory.md' "$px_root/HARNESS_START.md" ||
+    die "HARNESS_START.md에 기존 자산 인벤토리 안내가 없습니다."
+  for px_out in spec milestone_plan provider_failover integration destructive_action; do
+    grep -qxF "  $px_out: user_required" "$px_project" ||
+      die "bypass 프리셋에서 사용자 Gate가 꺼졌습니다: $px_out"
+  done
+
+  # 명시 옵션이 프리셋보다 우선한다.
+  bash "$SELF_PATH" init "$test_root/preset-override" --name preset-override --goal g \
+    --preset agy-primary --reviewer claude --approval-mode auto >/dev/null
+  grep -qxF "  reviewer: 'claude'" "$test_root/preset-override/.harness/project.yaml" ||
+    die "--reviewer가 프리셋보다 우선하지 않습니다."
+  grep -qxF "  primary_worker: 'agy'" "$test_root/preset-override/.harness/project.yaml" ||
+    die "명시하지 않은 값에 프리셋이 적용되지 않았습니다."
+  grep -qxF "  approval_mode: 'auto'" "$test_root/preset-override/.harness/policies/agent-policy.yaml" ||
+    die "--approval-mode가 프리셋보다 우선하지 않습니다."
+  # 기본 init은 이전 버전과 같은 값(하위 호환).
+  bash "$SELF_PATH" init "$test_root/default-project" --name default-project --goal g >/dev/null
+  for px_out in "  primary_worker: 'codex'" "  reviewer: 'agy'" "  fallback_chain: [claude,agy]" "  preset: 'none'"; do
+    grep -qxF "$px_out" "$test_root/default-project/.harness/project.yaml" ||
+      die "기본 init 값이 바뀌었습니다: $px_out"
+  done
+  grep -qxF "  approval_mode: 'auto'" "$test_root/default-project/.harness/policies/agent-policy.yaml" ||
+    die "기본 init 승인 모드가 auto가 아닙니다."
+  grep -qxF "  worker_default_tier: ''" "$test_root/default-project/.harness/policies/agent-policy.yaml" ||
+    die "기본 init이 역할 기본 등급을 채웠습니다."
+  grep -q '운영 프리셋' "$test_root/default-project/AGENTS.md" &&
+    die "기본 init AGENTS.md에 프리셋 절이 붙었습니다."
+  expect_fail "init 알 수 없는 --preset" \
+    bash "$SELF_PATH" init "$test_root/bad-preset" --name bad --goal g --preset turbo
+  [[ "$(project_preset "$test_project")" == none ]] ||
+    die "preset 키가 없는 프로젝트를 none으로 읽지 못했습니다."
+
+  # --- preflight ------------------------------------------------------------
+  local px_policy_before px_status_before
+  px_policy_before="$(sha256sum <"$px_policy")"
+  px_status_before="$(git -C "$px_root" status --porcelain)"
+  _px_capture px_out env PATH="$px_bin:$PATH" bash "$SELF_PATH" preflight "$px_root"
+  [[ "$PX_STATUS" -ne 0 ]] || die "빈 모델 매핑인데 preflight가 통과했습니다."
+  printf '%s' "$px_out" | grep -qF '[FAIL] worker(agy) 기본: 모델/속도를 해석할 수 없어' ||
+    die "preflight가 Worker 등급 매핑 누락을 FAIL로 보고하지 않았습니다."
+  printf '%s' "$px_out" | grep -qF "models $px_root --refresh --apply 로 agy_models를 채우고" ||
+    die "preflight가 agy 매핑 수정 방법을 안내하지 않았습니다."
+  printf '%s' "$px_out" | grep -qF 'codex_models(공백 구분 허용 목록)와 codex_tier_<등급>을 직접 채운다' ||
+    die "preflight가 codex 매핑 수정 위치를 안내하지 않았습니다."
+  printf '%s' "$px_out" | grep -qF '[OK]   worker(agy) 실제 Provider 인수: --dangerously-skip-permissions' ||
+    die "preflight가 Worker bypass 인수를 출력하지 않았습니다."
+  printf '%s' "$px_out" | grep -qF '[OK]   reviewer(codex) 실제 Provider 인수: --dangerously-bypass-approvals-and-sandbox' ||
+    die "preflight가 Reviewer bypass 인수를 출력하지 않았습니다."
+  printf '%s' "$px_out" | grep -qF 'bypass는 Provider의 도구 실행 승인에만 적용된다' ||
+    die "preflight가 bypass의 Gate 유지 범위를 밝히지 않았습니다."
+  printf '%s' "$px_out" | grep -qF '[OK]   기본 배정 Worker=agy, Reviewer=codex' ||
+    die "preflight가 Worker≠Reviewer를 확인하지 않았습니다."
+  [[ "$(sha256sum <"$px_policy")" == "$px_policy_before" ]] || die "preflight가 정책 파일을 바꿨습니다."
+  [[ "$(git -C "$px_root" status --porcelain)" == "$px_status_before" ]] || die "preflight가 프로젝트 파일을 남겼습니다."
+
+  _px_set_key "$px_root" agy_models 'agy-x agy-y'
+  _px_set_key "$px_root" agy_tier_standard agy-x
+  _px_set_key "$px_root" codex_models 'cx-1 cx-2'
+  _px_set_key "$px_root" codex_tier_light cx-1
+  _px_commit "$px_root" "모델 정책"
+  _px_capture px_out env PATH="$px_bin:$PATH" bash "$SELF_PATH" preflight "$px_root"
+  [[ "$PX_STATUS" -eq 0 ]] || die "모델 매핑을 채웠는데 preflight가 실패했습니다: $px_out"
+  printf '%s' "$px_out" | grep -qF 'worker(agy) 기본: 모델=agy-x [역할 기본값 (worker_default_tier) → agy_tier_standard] · 속도=medium' ||
+    die "preflight가 Worker 모델·등급·속도 해석 결과를 보여 주지 않았습니다."
+  printf '%s' "$px_out" | grep -qF 'reviewer(codex) 기본: 모델=cx-1 [역할 기본값 (reviewer_default_tier) → codex_tier_light] · 속도=medium' ||
+    die "preflight가 Reviewer 모델·등급·속도 해석 결과를 보여 주지 않았습니다."
+  printf '%s' "$px_out" | grep -qF '[WARN] agy 모델 목록을 조회하지 못했습니다' ||
+    die "agy 목록 조회 불가를 경고하지 않았습니다(명시적 설정 요청)."
+
+  _px_set_key "$px_root" codex_premium_models cx-1
+  _px_capture px_out env PATH="$px_bin:$PATH" bash "$SELF_PATH" preflight "$px_root"
+  [[ "$PX_STATUS" -ne 0 ]] || die "light 등급이 프리미엄 모델을 가리키는데 통과했습니다."
+  printf '%s' "$px_out" | grep -qF 'codex_tier_light가 프리미엄으로 선언된 모델(cx-1)을 가리킵니다' ||
+    die "preflight가 등급·프리미엄 충돌을 보고하지 않았습니다."
+  _px_set_key "$px_root" codex_premium_models ''
+
+  # 설치된 agy 목록에 없는 매핑(오래된 모델 ID) — 조회 함수만 스텁한다.
+  px_out="$(
+    PATH="$px_bin:$PATH"
+    _models_query_agy() { printf 'agy-y\nagy-z\n'; }
+    cmd_preflight "$px_root" 2>&1 || true
+  )"
+  printf '%s' "$px_out" | grep -qF 'agy: agy_tier_standard=agy-x 이(가) 설치된 agy 모델 목록에 없습니다' ||
+    die "preflight가 오래된 agy 모델 매핑을 잡지 못했습니다."
+
+  # write_scope: 외부 Git 저장소, 쓰기 불가 경로, Worker=Reviewer Task
+  local px_ext
+  px_ext="$(realpath -m "$test_root/ext-repo")"
+  mkdir -p "$px_ext/src"
+  git -C "$px_ext" init -q
+  printf 'x\n' >"$px_ext/src/a.txt"
+  _px_commit "$px_ext" ext
+  _px_mktask "$px_root" task-ext ready '외부 저장소 작업'
+  sed -i "s|^write_scope: .*|write_scope: ['$px_ext/src/']|" "$px_root/.harness/tasks/task-ext.yaml"
+  _px_mktask "$px_root" task-same ready '같은 Provider'
+  sed -i "s/^reviewer: .*/reviewer: 'agy'/" "$px_root/.harness/tasks/task-same.yaml"
+  _px_capture px_out env PATH="$px_bin:$PATH" bash "$SELF_PATH" preflight "$px_root"
+  printf '%s' "$px_out" | grep -qF "task-ext: write_scope '$px_ext/src/' — 외부 저장소 $px_ext" ||
+    die "preflight가 외부 저장소 write_scope와 Git 기준선을 확인하지 않았습니다."
+  printf '%s' "$px_out" | grep -qF "dispatch에 --cwd '$px_ext'" ||
+    die "preflight가 외부 저장소용 --cwd를 안내하지 않았습니다."
+  printf '%s' "$px_out" | grep -qF '[FAIL] task-same: Worker와 Reviewer가 같습니다 (agy)' ||
+    die "preflight가 Task의 Worker=Reviewer를 잡지 못했습니다."
+  printf '%s' "$px_out" | grep -qF '[WARN] task-same: write_scope가 비어 있습니다' ||
+    die "preflight가 빈 write_scope를 경고하지 않았습니다."
+  if [[ "$(id -u)" -ne 0 ]]; then
+    mkdir -p "$test_root/readonly-dir"
+    chmod 0555 "$test_root/readonly-dir"
+    sed -i "s|^write_scope: .*|write_scope: ['$test_root/readonly-dir/out/']|" "$px_root/.harness/tasks/task-same.yaml"
+    _px_capture px_out env PATH="$px_bin:$PATH" bash "$SELF_PATH" preflight "$px_root"
+    chmod 0755 "$test_root/readonly-dir"
+    printf '%s' "$px_out" | grep -qF "write_scope '$test_root/readonly-dir/out/' — 실행 환경에서 쓸 수 없습니다" ||
+      die "preflight가 쓰기 불가 write_scope를 잡지 못했습니다."
+  fi
+  rm -f "$px_root/.harness/tasks/task-same.yaml" "$px_root/.harness/tasks/task-ext.yaml"
+
+  # --- 프리셋 dispatch --print-only: agy Worker / codex Reviewer 별도 Agent ---
+  _px_mktask "$px_root" task-pk draft '패킷 검증'
+  local px_worker_out px_reviewer_out
+  px_worker_out="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$px_root" task-pk worker --print-only 2>/dev/null)"
+  px_reviewer_out="$(HERDR_ENV= bash "$SELF_PATH" dispatch "$px_root" task-pk reviewer --print-only 2>/dev/null)"
+  printf '%s' "$px_worker_out" | grep -qF 'herdr agent start hh-task-pk-w-1 --kind agy --pane PANE_ID --timeout 120000 -- --dangerously-skip-permissions --model agy-x' ||
+    die "프리셋 Worker print-only가 agy·bypass·등급 모델을 쓰지 않습니다: $px_worker_out"
+  printf '%s' "$px_reviewer_out" | grep -qF 'herdr agent start hh-task-pk-r-1 --kind codex --pane PANE_ID --timeout 120000 -- --dangerously-bypass-approvals-and-sandbox --model cx-1 -c model_reasoning_effort="medium"' ||
+    die "프리셋 Reviewer print-only가 codex·bypass·등급 모델·속도를 쓰지 않습니다: $px_reviewer_out"
+  printf '%s' "$px_worker_out" | grep -qF '역할: worker / Provider: agy / Agent 이름: hh-task-pk-w-1' ||
+    die "print-only가 Worker 역할·Provider를 표시하지 않았습니다."
+  printf '%s' "$px_reviewer_out" | grep -qF '역할: reviewer / Provider: codex / Agent 이름: hh-task-pk-r-1' ||
+    die "print-only가 Reviewer 역할·Provider를 표시하지 않았습니다."
+  printf '%s' "$px_worker_out" | grep -qF '속도: medium / 출처: 역할 기본값 (worker_default_effort)' ||
+    die "print-only가 Worker 속도 출처를 표시하지 않았습니다."
+  printf '%s' "$px_worker_out" | grep -qE '^Context Packet: .* \([0-9]+ bytes, [0-9]+줄\)$' ||
+    die "print-only가 Context Packet 크기를 표시하지 않았습니다."
+
+  # --- Context Packet 축약: 필수 정보 무손실 ---------------------------------
+  # 긴 한글 AC(블록 스칼라 안의 빈 줄·# 줄 포함)와 SPEC 제약을 넣는다.
+  python3 - "$px_root/.harness/tasks/task-pk.yaml" <<'PX_AC_PY'
+import sys, re
+path = sys.argv[1]
+text = open(path, encoding='utf-8').read()
+block = """acceptance_criteria:
+  - criterion_id: AC-101
+    statement: |
+      부동산 탭의 모든 표에서 금액 단위(만원·억원)가 원 단위로 정규화되고, 음수·빈 값·하이픈('-')은
+      각각 오류·결측·0으로 구분해 기록되어야 한다. 정규화 전후 행 수는 같아야 하며 중복 행을 만들지 않는다.
+
+      # 이 줄은 주석이 아니라 AC 본문이다 — 블록 스칼라 안에서는 그대로 보존되어야 한다.
+    verified_by:
+      type: command
+      command: 'true'
+  - criterion_id: AC-102
+    statement: 감사 보고서의 각 지적 항목에 원본 화면 경로와 재현 절차가 붙어 있어야 한다
+    verified_by:
+      type: manual-review
+      instruction: 보고서 항목별로 경로·재현 절차 존재 확인
+"""
+text = re.sub(r'(?ms)^acceptance_criteria:.*?(?=^[^\s#])', block, text)
+text = re.sub(r'(?m)^write_scope: .*$', "write_scope: [src/realestate/, 'docs/audit-*.md']", text)
+open(path, 'w', encoding='utf-8').write(text)
+PX_AC_PY
+  sed -i 's/^- 변경 금지 영역: TBD$/- 변경 금지 영역: legacy\/ 디렉터리와 운영 DB 스키마/' "$px_root/.harness/SPEC.md"
+  local px_packet="$px_root/.harness/runtime/px-packet.md" px_line
+  mkdir -p "$px_root/.harness/runtime"
+  _runtime_context_packet "$px_root" task-pk worker "$px_root/.harness/tasks/task-pk.yaml" "$px_packet" ||
+    die "축약 Packet 생성 실패(최초 시도)"
+  python3 -c 'import sys; open(sys.argv[1], encoding="utf-8", errors="strict").read()' "$px_packet" ||
+    die "축약 Packet이 유효한 UTF-8이 아닙니다."
+  while IFS= read -r px_line; do
+    grep -qxF -- "$px_line" "$px_packet" || die "축약 Packet이 AC 원문 줄을 잃었습니다: $px_line"
+  done < <(awk '/^acceptance_criteria:/{f=1} f && /^review_focus:/{exit} f' "$px_root/.harness/tasks/task-pk.yaml")
+  for px_out in "write_scope: [src/realestate/, 'docs/audit-*.md']" \
+                '- 변경 금지 영역: legacy/ 디렉터리와 운영 DB 스키마' '## 6. 제외 범위' '## 1. 핵심 목표' \
+                "산출물 — Attempt 기록 (dispatch가 머리말을 만든다 — 수정 내역·검증 결과를 이 파일에 덧붙인다): $px_root/.harness/attempts/task-pk-attempt-1.md" \
+                "$px_root/.harness/intents/task-pk-intent.md" \
+                '위험 명령, 배포, 외부 쓰기, Provider 교체는 사용자 승인 없이 하지 않는다' \
+                '상태 전이나 completed 선언은 하지 않는다' \
+                '범위 밖 변경을 거부한다' '## Next step'; do
+    grep -qF -- "$px_out" "$px_packet" || die "축약 Packet에 필수 정보가 없습니다: $px_out"
+  done
+  for px_out in '# intent: 필수' 'fallback_chain:' 'schema_version:' '# 선택: 역할별 모델' '## 직전 시도'; do
+    grep -qF -- "$px_out" "$px_packet" && die "최초 시도 Packet에 불필요한 내용이 있습니다: $px_out"
+  done
+
+  # 재시도: 직전 CHANGES_REQUESTED + 실패한 AC — 미해결 지적과 실패 기준만.
+  mkdir -p "$px_root/.harness/evidence" "$px_root/.harness/reviews" "$px_root/.harness/attempts"
+  printf -- '# Attempt 1\n- Role: worker\n' >"$px_root/.harness/attempts/task-pk-attempt-1.md"
+  _runtime_write_evidence_yaml "$px_root" task-pk worker 1 settled "1차 구현 — 단위 정규화" 0
+  cat >"$px_root/.harness/evidence/task-pk-attempt-1-checks.yaml" <<'PX_CHECKS'
+task: 'task-pk'
+attempt: 1
+ran_at: '2026-10-06T00:00:00Z'
+runner: 'local'
+checks:
+  - criterion_id: 'AC-101'
+    command: 'pytest tests/test_units.py'
+    exit_code: 1
+    result: 'fail'
+    output_tail: 'AssertionError: 억원 단위 미변환'
+  - criterion_id: 'AC-PASSED-ONLY'
+    command: 'true'
+    exit_code: 0
+    result: 'pass'
+    output_tail: ''
+summary:
+  total: 2
+  passed: 1
+  failed: 1
+  manual: 0
+PX_CHECKS
+  {
+    printf '판정: CHANGES_REQUESTED\n\n## 지적\n- 지적-미해결: 하이픈 값을 0으로 처리함 (AC-101 위반)\n'
+    # 500바이트를 넘는 한글 한 줄 — 잘라도 Packet이 유효한 UTF-8이어야 한다.
+    printf -- '- 긴 지적 : '; for px_line in $(seq 1 120); do printf '가나'; done; printf '\n'
+  } >"$px_root/.harness/reviews/task-pk-review-1.md"
+  _runtime_context_packet "$px_root" task-pk worker "$px_root/.harness/tasks/task-pk.yaml" "$px_packet" ||
+    die "축약 Packet 생성 실패(재시도)"
+  python3 -c 'import sys; open(sys.argv[1], encoding="utf-8", errors="strict").read()' "$px_packet" ||
+    die "재시도 Packet이 유효한 UTF-8이 아닙니다."
+  for px_out in '## 직전 시도' '최신 Review 판정: CHANGES_REQUESTED' '지적-미해결: 하이픈 값을 0으로 처리함' \
+                'Acceptance Criteria 검증 결과 (Attempt 1): total 2 · passed 1 · failed 1 · manual 0' \
+                "AssertionError: 억원 단위 미변환" '- 요약: 1차 구현 — 단위 정규화' \
+                "$px_root/.harness/attempts/task-pk-attempt-2.md" '같은 접근을 그대로 반복하지 않는다'; do
+    grep -qF -- "$px_out" "$px_packet" || die "재시도 Packet에 미해결 지적·Evidence가 없습니다: $px_out"
+  done
+  grep -qF 'AC-PASSED-ONLY' "$px_packet" && die "재시도 Packet에 통과한 AC 결과가 반복됐습니다."
+  grep -qF '관측 횟수' "$px_packet" && die "재시도 Packet에 Evidence 고정 문구가 반복됐습니다."
+  _runtime_context_packet "$px_root" task-pk reviewer "$px_root/.harness/tasks/task-pk.yaml" "$px_packet" ||
+    die "축약 Packet 생성 실패(Reviewer)"
+  grep -qF "$px_root/.harness/reviews/task-pk-review-2.md" "$px_packet" ||
+    die "Reviewer Packet에 Review 산출물 절대 경로가 없습니다."
+  grep -qF '읽기 전용 Review다' "$px_packet" || die "Reviewer Packet에 읽기 전용 규칙이 없습니다."
+  # APPROVED는 판정만 싣고 본문은 싣지 않는다(해소할 지적이 없다).
+  printf '판정: APPROVED\n\n승인-본문-메모\n' >"$px_root/.harness/reviews/task-pk-review-2.md"
+  _runtime_context_packet "$px_root" task-pk worker "$px_root/.harness/tasks/task-pk.yaml" "$px_packet" ||
+    die "축약 Packet 생성 실패(APPROVED 이후)"
+  grep -qF '최신 Review 판정: APPROVED' "$px_packet" || die "APPROVED 판정이 Packet에서 빠졌습니다."
+  grep -qF '승인-본문-메모' "$px_packet" && die "APPROVED Review 본문이 Packet에 반복됐습니다."
+  rm -f "$px_root/.harness/reviews/task-pk-review-"*.md "$px_root/.harness/attempts/task-pk-attempt-1.md" \
+    "$px_root/.harness/evidence/task-pk-"* "$px_root/.harness/tasks/task-pk.yaml" "$px_packet"
+  git -C "$px_root" checkout -q -- .harness/SPEC.md
+
+  # --- write_scope 대조 (bypass 프로젝트) ------------------------------------
+  _px_mktask "$px_root" task-ws draft '범위 대조'
+  _px_mktask "$px_root" task-par draft '병렬 작업'
+  sed -i "s|^write_scope: .*|write_scope: [src/, 'docs/*.md']|; s|command: pytest.*|command: 'true'|" \
+    "$px_root/.harness/tasks/task-ws.yaml"
+  sed -i "s|^write_scope: .*|write_scope: [lib/par/]|" "$px_root/.harness/tasks/task-par.yaml"
+  _px_commit "$px_root" "tasks"
+  # bypass여도 SPEC 승인 Gate는 그대로다.
+  expect_fail "bypass 프로젝트 draft->ready (SPEC 미승인)" \
+    bash "$SELF_PATH" transition "$px_root" task-ws ready
+  sed -i 's/^- 상태: draft$/- 상태: approved/' "$px_root/.harness/SPEC.md"
+  _px_commit "$px_root" "spec 승인"
+  local px_task
+  for px_task in task-ws task-par; do
+    bash "$SELF_PATH" transition "$px_root" "$px_task" ready >/dev/null
+    bash "$SELF_PATH" transition "$px_root" "$px_task" active >/dev/null
+  done
+  local px_base
+  px_base="$(git -C "$px_root" rev-parse HEAD)"
+  printf -- '# Attempt 1\n- Role: worker\n- Baseline commit: %s\n- Agent cwd: %s\n- Agent cwd baseline commit: %s\n' \
+    "$px_base" "$px_ext" "$(git -C "$px_ext" rev-parse HEAD)" >"$px_root/.harness/attempts/task-ws-attempt-1.md"
+  printf "task: 'task-ws'\nrole: 'worker'\nattempt: 1\nresult:\n  summary: 'x'\nstatus: 'settled'\n" \
+    >"$px_root/.harness/evidence/task-ws-worker-attempt-1.yaml"
+  mkdir -p "$px_root/src/deep" "$px_root/docs" "$px_root/lib/par"
+  printf 'a\n' >"$px_root/src/deep/a.py"
+  printf 'b\n' >"$px_root/docs/notes.md"
+  printf 'c\n' >"$px_root/lib/par/other-task.py"     # 동시에 active인 task-par의 범위
+  printf 'd\n' >"$px_root/stray.txt"                  # 범위 밖
+  _px_commit "$px_root" "작업 중 커밋도 대조 대상"
+  printf 'e\n' >"$px_root/docs/sub-not-glob.txt"       # glob 'docs/*.md' 밖
+  _px_capture px_out bash "$SELF_PATH" transition "$px_root" task-ws submitted
+  [[ "$PX_STATUS" -ne 0 ]] || die "write_scope 밖 변경이 있는데 submitted로 전이됐습니다."
+  printf '%s' "$px_out" | grep -qF -- '- stray.txt' || die "범위 밖 파일(커밋됨)이 보고되지 않았습니다."
+  printf '%s' "$px_out" | grep -qF -- '- docs/sub-not-glob.txt' || die "glob 밖 파일이 보고되지 않았습니다."
+  printf '%s' "$px_out" | grep -qF 'src/deep/a.py' && die "디렉터리 범위 안 파일을 위반으로 보고했습니다."
+  printf '%s' "$px_out" | grep -qF 'lib/par/other-task.py' && die "병렬 Task 범위의 변경을 위반으로 보고했습니다."
+  [[ "$(_runtime_yaml_scalar "$px_root/.harness/tasks/task-ws.yaml" status)" == active ]] ||
+    die "거부된 전이가 Task 상태를 바꿨습니다."
+  git -C "$px_root" rm -q stray.txt
+  rm -f "$px_root/docs/sub-not-glob.txt"
+  # --cwd 저장소의 범위 밖 변경도 잡는다.
+  printf 'z\n' >"$px_ext/outside.txt"
+  _px_capture px_out bash "$SELF_PATH" transition "$px_root" task-ws submitted
+  [[ "$PX_STATUS" -ne 0 ]] || die "--cwd 저장소의 범위 밖 변경이 통과했습니다."
+  printf '%s' "$px_out" | grep -qF "$px_ext/outside.txt" || die "--cwd 저장소의 위반 파일이 보고되지 않았습니다."
+  rm -f "$px_ext/outside.txt"
+  _px_capture px_out bash "$SELF_PATH" transition "$px_root" task-ws submitted
+  [[ "$PX_STATUS" -eq 0 ]] || die "범위 안 변경만 남았는데 submitted가 거부됐습니다: $px_out"
+  printf '%s' "$px_out" | grep -qF 'write_scope 대조 통과' || die "write_scope 대조 통과가 기록되지 않았습니다."
+
+  # --- status 요약: 오래된 꼬리 메모 ------------------------------------------
+  local st_root="$test_root/status-project" st_hash
+  bash "$SELF_PATH" init "$st_root" --name status-project --goal g >/dev/null
+  _px_mktask "$st_root" task-sa awaiting_approval '부동산 탭 감사'
+  _px_mktask "$st_root" task-sb active '진행 중 구현'
+  _px_mktask "$st_root" task-sc completed '끝난 작업'
+  _px_mktask "$st_root" task-sd draft '초안 작업'
+  {
+    printf '# Project State\n\n- Project: status-project\n- Status: execution\n- Current milestone: milestone-002\n- Active wave: wave-022\n\n'
+    printf '| Task | 목적 | Worker | Reviewer | 상태 | 검증 |\n|---|---|---|---|---|---|\n'
+    printf '| task-sa | 감사 | codex | agy | awaiting_approval | - |\n'
+    printf '| task-sb | 구현 | codex | agy | ready | - |\n'
+    printf '| task-sc | 완료 | codex | agy | completed | ok |\n'
+    printf '\n## Pending decisions\n\n- 없음\n'
+    for px_line in $(seq 1 40); do printf '\n## 진행 기록 %s\n\n- 지난 메모 %s\n' "$px_line" "$px_line"; done
+    printf '\n## 과거 이관 메모\n\n- 2026-09-20 wave-017 기준\n- 다음 작업: task-old-xyz 착수 후보 검토\n'
+  } >"$st_root/.harness/STATE.md"
+  st_hash="$(sha256sum <"$st_root/.harness/STATE.md")"
+  px_out="$(bash "$SELF_PATH" status "$st_root")"
+  printf '%s' "$px_out" | grep -qF 'task-sa: awaiting_approval — completed 사용자 승인 필요' ||
+    die "status 요약이 awaiting_approval Task를 승인 대기로 보여 주지 않았습니다."
+  printf '%s' "$px_out" | grep -qF '다음 작업' && die "status 요약이 오래된 '다음 작업' 메모를 출력했습니다."
+  printf '%s' "$px_out" | grep -qF 'task-old-xyz' && die "status 요약이 과거 이관 메모를 출력했습니다."
+  printf '%s' "$px_out" | tail -30 | grep -qF '| task-sa | awaiting_approval |' ||
+    die "status | tail -30에 현재 awaiting_approval Task가 보이지 않습니다."
+  [[ "$(printf '%s\n' "$px_out" | grep -n '| task-sa |' | cut -d: -f1)" -lt \
+     "$(printf '%s\n' "$px_out" | grep -n '| task-sb |' | cut -d: -f1)" ]] ||
+    die "status 요약이 승인 대기 Task를 먼저 보여 주지 않았습니다."
+  printf '%s' "$px_out" | grep -qF 'task-sb: STATE.md 상태표=ready, Task YAML=active' ||
+    die "status 요약이 STATE.md 상태표 불일치를 표시하지 않았습니다."
+  printf '%s' "$px_out" | grep -qF '| task-sc |' && die "status 요약에 completed Task가 나왔습니다."
+  px_out="$(bash "$SELF_PATH" status "$st_root" --full)"
+  printf '%s' "$px_out" | grep -qF -- '- 다음 작업: task-old-xyz 착수 후보 검토' || die "status --full이 원문 전체를 보여 주지 않았습니다."
+  python3 - "$(bash "$SELF_PATH" status "$st_root" --json)" <<'PX_JSON_PY' || die "status --json 계약이 깨졌습니다."
+import json, sys
+data = json.loads(sys.argv[1])
+assert data["tasks"][0]["task"] == "task-sa" and data["tasks"][0]["status"] == "awaiting_approval"
+assert data["pending_decisions"] == ["task-sa"]
+assert data["completed_count"] == 1
+assert all("다음 작업" not in item for item in data["attention"])
+PX_JSON_PY
+  python3 - "$(PATH="$px_bin:$PATH" bash "$SELF_PATH" status "$st_root" --live --json)" <<'PX_LIVE_PY' || die "status --live --json 기존 계약(state·agents·git_status·pending_decisions)이 깨졌습니다."
+import json, sys
+data = json.loads(sys.argv[1])
+for key in ("state", "herdr_available", "agents", "git_status", "pending_decisions", "tasks"):
+    assert key in data, key
+assert "다음 작업" in data["state"]          # 원문 필드는 그대로
+assert data["herdr_available"] is True
+assert data["pending_decisions"] == ["task-sa"]
+assert data["tasks"][0]["task"] == "task-sa"
+PX_LIVE_PY
+  px_out="$(PATH="$px_bin:$PATH" bash "$SELF_PATH" status "$st_root" --live)"
+  printf '%s' "$px_out" | grep -qF '## Live Herdr agents' || die "status --live 표가 사라졌습니다."
+  printf '%s' "$px_out" | grep -qF '| task-sb | - | active | - | - | missing | DRIFT |' ||
+    die "status --live가 active Task의 DRIFT를 표시하지 않았습니다."
+  printf '%s' "$px_out" | grep -qF '다음 작업' && die "status --live가 오래된 메모를 출력했습니다."
+  px_out="$(PATH="$px_bin:$PATH" bash "$SELF_PATH" status "$st_root" --live --full)"
+  printf '%s' "$px_out" | grep -qF '다음 작업' || die "status --live --full이 원문을 붙이지 않았습니다."
+  [[ "$(sha256sum <"$st_root/.harness/STATE.md")" == "$st_hash" ]] || die "status가 STATE.md를 바꿨습니다."
+  grep -qF '현재 지시로 인용하지 않는다' "$st_root/.agents/roles/orchestrator.agent.md" ||
+    die "Orchestrator 역할 문서에 STATE 서술 메모 인용 금지 규칙이 없습니다."
+  grep -qF '.harness/archive/STATE-<wave-id>.md' "$st_root/.agents/roles/orchestrator.agent.md" ||
+    die "Orchestrator 역할 문서에 STATE.md 아카이브 규칙이 없습니다."
+
   # 출력 목록 자체를 한 곳에서 정의하고 README의 기대 출력 블록과 비교한다.
   # cmd_test를 다시 실행하지 않으므로 Agent 호출·네트워크 접근·재귀 실행이 없다.
   local pass_lines=(
@@ -2199,6 +2636,12 @@ STUB
     'PASS: quota-retry/auto-step opt-in 게이트'
     'PASS: quota-retry/auto-step 안전 불변식(completed/reviewing/awaiting_approval/ready 미호출, handover stub 선행)'
     'PASS: sync-templates (dry-run/apply·멱등, agent-policy 모델·프리미엄 키 전파·사용자 값 보존, AGENTS.md/STATE.md 비침범, .gitignore 보충)'
+    'PASS: init 운영 프리셋 (agy-primary: project·정책·AGENTS·Task 템플릿·Planner·Review 배정, 모델 ID 미고정, 명시 옵션 우선, 기본 init 하위 호환)'
+    'PASS: preflight (등급 매핑 누락·수정 위치/bypass 인수·사용자 Gate 유지/등급·프리미엄 충돌/오래된 agy 모델/외부 저장소·쓰기 불가 write_scope/Worker≠Reviewer/파일 무변경)'
+    'PASS: 프리셋 dispatch --print-only (agy Worker·codex Reviewer 별도 Agent, bypass 인수·등급 모델·속도·Packet 크기 표시)'
+    'PASS: Context Packet 축약 (유효 UTF-8, 긴 한글 AC 원문·제약·산출물 절대 경로 보존, 재시도엔 미해결 지적·실패 AC만, APPROVED 본문·템플릿 주석 제외)'
+    'PASS: write_scope 대조 (bypass에서도 SPEC Gate 유지, 범위 밖·glob 밖·--cwd 저장소 변경 거부, 디렉터리 범위·병렬 Task 제외)'
+    'PASS: status 요약 (오래된 꼬리 메모 비노출·tail -30에 승인 대기 Task, STATE 불일치 표시, --full 원문, --json·--live --json 호환, STATE.md 무변경)'
     'PASS: README 기대 출력 ↔ 실제 test 출력 정합'
     'PASS: install.sh ~/.bashrc completion 등록(멱등·사용자 줄 보존·두 제거 경로·수동 줄 비침범)'
   )

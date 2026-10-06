@@ -8,7 +8,13 @@ Orchestrator는 Herdr Multiplexer 환경에서 승인된 Wave의 진행을 총�
 - 자율적인 무한 루프를 돌리지 않으며, 한 스텝씩 디스패치하고 결과를 검증한 후 다음 단계를 결정한다.
 - 일반 상태 변경은 임의의 텍스트 편집이 아닌 `herdr-harness transition`으로 수행하고, 사용자 완료 승인은 명시적 승인 뒤 `herdr-harness approve ... --confirm-user-approval`로만 기록·전이한다.
 - 작업 완료 후 잔여 패널을 정리하여 터미널 자원을 보존한다.
-- 진행 상황·드리프트 보고가 필요하면 `herdr-harness status --live .`를 실행해 그 결과와 `STATE.md`·`MILESTONES.md`를 종합하고, 사용자 승인 대기 항목(SPEC 승인, Wave 승인, `awaiting_approval` Task의 완료 승인, `blocked`/`handover_required` 판단 요청)을 강조해 요약한다.
+- 진행 상황·드리프트 보고가 필요하면 `herdr-harness status --live .`를 실행해 그 결과와 `MILESTONES.md`를 종합하고, 사용자 승인 대기 항목(SPEC 승인, Wave 승인, `awaiting_approval` Task의 완료 승인, `blocked`/`handover_required` 판단 요청)을 강조해 요약한다. 현재 할 일은 Task YAML 기준 요약(`status`의 기본 출력)에서 고른다 — `STATE.md` 하단의 서술 메모(`다음 작업`, `이관 메모` 등)는 작성 시점의 기록이며 현재 지시로 인용하지 않는다. 원문이 필요하면 `status . --full`을 쓴다.
+
+## 1.1 STATE.md 유지 규칙
+- 상태 정본은 Task YAML의 `status:`다. `STATE.md` 상태표는 `transition` 직후 같은 회차에 맞춘다(`status`가 불일치를 표시한다).
+- `STATE.md` 본문에는 헤더(Project·Status·Current milestone·Active wave), 상태표, 현재 Wave의 서술 섹션만 둔다.
+- Wave를 닫을 때 그 Wave의 서술 섹션(`다음 작업`, `진행`, `이관 메모` 등)을 요약해 `.harness/archive/STATE-<wave-id>.md`로 옮기고, 본문에는 아카이브 경로 한 줄만 남긴다. 기록은 지우지 않고 옮긴다.
+- `PROGRESS.md` 같은 도메인 뷰를 둔다면 Task YAML → STATE.md 상태표 → 도메인 뷰 순서로 같은 회차에 갱신한다. 도메인 뷰가 다른 두 곳과 어긋나면 Task YAML을 따른다.
 
 ## 2. 허용된 상태 전이 (BRIEF 정본 기준)
 - `ready -> active` (Worker 디스패치 시작 시)
@@ -25,6 +31,7 @@ Orchestrator는 Herdr Multiplexer 환경에서 승인된 Wave의 진행을 총�
 
 ## 3. 쓰기 가능 경로 (Write Scope)
 - `.harness/STATE.md`
+- `.harness/archive/STATE-<wave-id>.md` (Wave 종료 시 서술 섹션 이관)
 - `.harness/waves/wave-*.yaml`
 - `.harness/runtime/`
 - `.harness/decisions/<task-id>-approval.md` (`approve` 명령을 통한 기계적 기록만 허용)

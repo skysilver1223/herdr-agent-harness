@@ -37,6 +37,11 @@
    쓰기 범위가 Worker의 Sandbox 밖이어도 Agent를 먼저 띄워, 실제 쓰기 단계에서 실패한다.
    `bypass`에서는 Sandbox가 없어 발생하지 않지만, 동시에 `write_scope`가 강제력을 잃고
    문서상 지침이 된다 — 우회이지 해결이 아니다.
+   **2026-10-06 부분 해소**: `preflight`가 dispatch 전에 `write_scope`의 쓰기 가능 여부·외부
+   저장소 Git 기준선을 점검하고, auto 모드에서 프로젝트 밖 범위면 Sandbox 경고와 `--cwd`를
+   안내한다. `bypass`에서는 `transition ... submitted`가 기준 commit 이후 변경 파일을
+   `write_scope`와 대조해 범위 밖 변경을 거부한다. 남은 것: auto 모드 Sandbox가 실제로 막는
+   경로를 Provider별로 정확히 계산하는 것(현재는 경고만).
    ([wave-002 근거](../harness-dev/.harness/MILESTONES.md#wave-002-후보-활성-상한-5-때문에-미기안))
 
 6. **Event Log 미기록 경로와 Replay 도구 부재**
