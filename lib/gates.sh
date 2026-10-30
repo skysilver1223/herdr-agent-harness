@@ -61,11 +61,11 @@ plan_model() { plan_cell "$1" "$( [[ "$2" == worker ]] && echo 'Worker 모델' |
 # AC 실행 — Task 작업 공간에서(원격 모드면 원격에서) 직접 실행하고 표를 기록에 붙인다.
 # 같은 명령은 한 번만 실행한다. 결과는 AC_RESULT(PASS|FAIL).
 # --------------------------------------------------------------------------
-run_checks() {  # TASK RECORD TITLE
-  local task="$1" record="$2" title="$3" cwd limit i id cmd out rc tail cell
+run_checks() {  # TASK RECORD TITLE [CWD] — CWD가 없으면 Task 작업 공간 (재검증은 본 저장소를 준다)
+  local task="$1" record="$2" title="$3" cwd limit i id cmd out rc tail cell label
   local pass=0 fail=0 manual=0 rows="" where
   local -A seen_rc=() seen_out=()
-  cwd="$(task_cwd "$task")"
+  if [[ -n "${4:-}" ]]; then cwd="$4"; else cwd="$(task_cwd "$task")"; fi
   limit="$(pnum limits ac_timeout_seconds 600)"
   where="$cwd"
   if remote_enabled; then where="원격 ($(sed -n 's/^  path:[[:space:]]*//p' "$ROOT/.harness/remote.yaml" | head -n 1))"; fi
@@ -96,12 +96,11 @@ run_checks() {  # TASK RECORD TITLE
   done
   AC_RESULT=PASS
   (( fail == 0 )) || AC_RESULT=FAIL
+  case "$title" in "AC 검증") label='AC 요약' ;; "통합 AC 검증") label='통합 AC 요약' ;; *) label="$title 요약" ;; esac
   {
     printf '\n## %s %s\n\n실행 위치: %s · 명령당 제한 %s초\n\n' "$title" "$(now)" "$where" "$limit"
     printf '| Criterion | 유형 | 종료 코드 | 결과 | 명령 | 출력 끝부분 |\n|---|---|---|---|---|---|\n%s\n' "$rows"
-    printf -- '- %s: %s (pass %s / fail %s / manual %s / 전체 %s)\n' \
-      "$( [[ "$title" == "AC 검증" ]] && echo 'AC 요약' || echo '통합 AC 요약')" \
-      "$AC_RESULT" "$pass" "$fail" "$manual" "${#AC_ID[@]}"
+    printf -- '- %s: %s (pass %s / fail %s / manual %s / 전체 %s)\n' "$label" "$AC_RESULT" "$pass" "$fail" "$manual" "${#AC_ID[@]}"
   } >>"$record"
 }
 
@@ -584,23 +583,36 @@ EOF
   info "반려 기록: .harness/decisions/$task-rejection-$k.md — run으로 재작업을 이어 간다."
 }
 
+# 파일 이름이 ID로 시작해도, 더 긴 다른 Task ID로 시작하면 그 Task의 기록이다 (task-12-1의 기록은 task-12의 것이 아니다).
+task_owns() {  # TASK BASENAME
+  local f o
+  for f in "$ROOT"/.harness/tasks/*.yaml "$ROOT"/.harness/archive/*/tasks/*.yaml; do
+    o="${f##*/}"; o="${o%.yaml}"
+    [[ -f "$f" && "$o" != "$1" && "$o" == "$1"-* ]] || continue
+    [[ "$2" != "$o"-* && "$2" != "$o".* ]] || return 1
+  done
+  return 0
+}
+
 # 승인된 Milestone을 보관함으로 옮긴다. 진행 중인 것만 앞에 남겨 지시서·상태 확인이
 # 작업 기간과 무관하게 가볍게 유지된다. 원본은 git 태그로 언제든 되살릴 수 있다.
 archive_milestone() {
   local m="$1" dst id f tag code attempts=0 n rows=""
   shift
   dst="$ROOT/.harness/archive/$m"
-  mkdir -p "$dst/tasks" "$dst/intents" "$dst/attempts" "$dst/reviews" "$dst/handovers" "$dst/decisions"
+  mkdir -p "$dst/tasks" "$dst/intents" "$dst/attempts" "$dst/reviews" "$dst/handovers" "$dst/decisions" "$dst/verifications"
   for id in "$@"; do
     n="$(last_attempt "$id")"; attempts=$((attempts + n))
     rows+="| $id | $(yget "$ROOT/.harness/tasks/$id.yaml" title) | $(yget "$ROOT/.harness/tasks/$id.yaml" primary_worker) | $(yget "$ROOT/.harness/tasks/$id.yaml" reviewer) | $n | $(rec_last "$(att_record "$id" "$n")" 'AC 요약' | cut -d' ' -f1) | $(review_verdict "$(rev_file "$id" "$(last_review "$id")")") | $(review_level_of "$id") |"$'\n'
     f="$(yget "$ROOT/.harness/tasks/$id.yaml" intent)"
     [[ -z "$f" || ! -f "$ROOT/$f" ]] || mv -- "$ROOT/$f" "$dst/intents/"
     mv -- "$ROOT/.harness/tasks/$id.yaml" "$dst/tasks/"
+    # 결정 기록·Intent 폴더의 부속 파일은 Task ID로 시작하는 것 전부를 함께 옮긴다
+    # (반려·검토 수준 기록, v1에서 이전된 결정 메모·추가 지시 포함).
     for f in "$ROOT"/.harness/attempts/"$id"-attempt-* "$ROOT"/.harness/reviews/"$id"-review-* \
-             "$ROOT"/.harness/handovers/"$id"-handover-* "$ROOT"/.harness/decisions/"$id"-decision-* \
-             "$ROOT"/.harness/decisions/"$id"-rejection-* "$ROOT"/.harness/decisions/"$id"-review-level-*; do
-      [[ -e "$f" ]] || continue
+             "$ROOT"/.harness/handovers/"$id"-handover-* "$ROOT"/.harness/decisions/"$id"-* \
+             "$ROOT"/.harness/intents/"$id"-* "$ROOT"/.harness/verifications/"$id"-verify-*; do
+      [[ -e "$f" ]] && task_owns "$id" "${f##*/}" || continue
       mv -- "$f" "$dst/${f#"$ROOT/.harness/"}"
     done
     rm -f -- "$ROOT"/.harness/runtime/"$id"-worker.* "$ROOT"/.harness/runtime/"$id"-reviewer.* \

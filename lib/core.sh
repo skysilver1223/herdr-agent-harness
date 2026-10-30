@@ -1,7 +1,7 @@
 # herdr-harness: 공통 함수 — 출력·임시 파일·Secret 검사·설정 읽기·경로·Acceptance Criteria.
 # harness.sh가 source한다. 단독 실행하지 않는다.
 
-HARNESS_VERSION="2.1.0"
+HARNESS_VERSION="2.2.0"
 shopt -s inherit_errexit 2>/dev/null || true   # harness.sh를 거치지 않고 source해도 같은 규칙(테스트 등)
 ROOT=""
 TMP_FILES=()
@@ -95,17 +95,20 @@ ylist() {  # FILE KEY → 'KEY: [a, b]' 항목을 한 줄씩. 블록 목록(- a)
   done
 }
 
-pget() {  # SECTION KEY [DEFAULT] → project.yaml의 'SECTION:' 아래 '  KEY: 값'
-  local v
-  v="$(awk -v s="$1:" -v k="  $2:" '
-    { sub(/\r$/, ""); h = $0; sub(/[ \t]+#.*$/, "", h); sub(/[ \t]+$/, "", h) }
-    h == s { inside = 1; next }
-    /^[^[:space:]#]/ { inside = 0 }
-    inside && index($0, k) == 1 { print substr($0, length(k) + 1); exit }
-  ' "$ROOT/.harness/project.yaml")"
-  v="$(unquote "$v")"
-  printf '%s' "${v:-${3:-}}"
+sget() {  # FILE SECTION KEY [DEFAULT] → 'SECTION:' 아래 '  KEY: 값' (파일·키가 없으면 DEFAULT)
+  local v=""
+  if [[ -f "$1" ]]; then
+    v="$(awk -v s="$2:" -v k="  $3:" '
+      { sub(/\r$/, ""); h = $0; sub(/[ \t]+#.*$/, "", h); sub(/[ \t]+$/, "", h) }
+      h == s { inside = 1; next }
+      /^[^[:space:]#]/ { inside = 0 }
+      inside && index($0, k) == 1 { print substr($0, length(k) + 1); exit }
+    ' "$1")"
+    v="$(unquote "$v")"
+  fi
+  printf '%s' "${v:-${4:-}}"
 }
+pget() { sget "$ROOT/.harness/project.yaml" "$@"; }   # SECTION KEY [DEFAULT] → project.yaml
 
 pnum() {  # SECTION KEY DEFAULT → 양의 정수만 (설정 값을 산술식에 그대로 넣지 않는다)
   local v
@@ -303,6 +306,7 @@ is_provider() { [[ "$1" =~ ^[a-z][a-z0-9-]*$ ]] && providers | grep -qxF -- "$1"
 #   reviews/T-review-R.harness.md    Reviewer dispatch·통합 증빙
 #   decisions/M-plan-approval.md     계획 승인 (Task·등급·AC 지문 스냅숏)
 #   decisions/M-approval.md          Milestone 완료 승인
+#   verifications/T-verify-N.md      재검증 기록 (verify, 보관된 Task는 그 보관함 안)
 #   archive/M/                        승인된 Milestone의 위 파일 전부 + SUMMARY.md
 #   runtime/ · worktrees/             Pane 추적·로그·Task 작업 공간 (Git 제외)
 # --------------------------------------------------------------------------
@@ -434,6 +438,9 @@ ac_load() {  # TASK_FILE → AC_ID·AC_TYPE·AC_CMD, 형식 문제는 AC_ERR (di
 }
 
 ac_hash() { ac_entries "$1" | sha256sum | cut -c1-16; }   # 계획 승인 때의 AC와 같은지 대조한다
+
+# 아무것도 확인하지 않는 명령(true 등). 재검증·v1 증빙 등급에서 증빙으로 세지 않는다.
+formal_cmd() { [[ "$1" =~ ^(true|:|/bin/true|/usr/bin/true|exit[[:space:]]+0)$ ]]; }
 
 # --------------------------------------------------------------------------
 # JSON — herdr 출력에서 값 하나. jq가 있으면 쓰고, 없으면 문자열·숫자만 읽는다.

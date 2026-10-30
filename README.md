@@ -72,6 +72,7 @@ Herdr 첫 Pane에서 Orchestrator 에이전트(기본 claude)를 실행하고 `A
 | 완료 | Milestone 승인 기록이 그 Task와 최신 Review를 가리킴 |
 
 - 하네스가 띄운 에이전트 Pane에는 표식이 심깁니다. 그 Pane에서 상태 변경이나 승인을 시도하면 거부합니다.
+- 끝난 결과도 `verify`로 다시 확인할 수 있습니다. 통합을 마친 Task나 보관된 Task의 AC 명령을 지금 코드에서 모두 다시 실행해 `verifications/`에 기록하고, 상태는 바꾸지 않습니다. 원격에 닿지 못하면 거짓 실패를 남기지 않도록 기록 없이 멈춥니다. 오래 걸리거나 부수효과가 있을 수 있어 사용자가 지시할 때만 돕니다.
 - 지시서에 Secret 의심 패턴이 있으면 보내지 않습니다.
 - 이 장치들은 가드레일이지 보안 경계가 아닙니다. 에이전트는 사용자와 같은 권한으로 돕니다.
 
@@ -129,6 +130,7 @@ harness.sh init DIR --goal "..." --worker claude --reviewer claude --review-leve
 | `run <m> [--in-pane] [--max-minutes N]` | 사람 결정이 필요할 때까지 자동 진행. 한 Task가 막혀도 나머지는 계속 진행합니다 |
 | `approve-plan <m>` / `approve <m>` / `reject <task> --reason ...` | 사용자 결정 기록 (`--confirm-user-approval` 필수) |
 | `prune <m>` | 보관함을 요약만 남기고 정리 (원본은 git 태그 `<m>-approved`) |
+| `verify <task>` / `verify --milestone <m>` / `verify --legacy` | AC 명령을 지금 코드에서 다시 실행해 기록 (상태는 바꾸지 않음). 통과 0, 실패 1, 재검증할 수 없음(진행 중·command AC 없음) 2 |
 | `models [--refresh]` | 등급별 모델 매핑. `--refresh`는 agy·codex의 실제 모델 목록과 대조 |
 | `review-level [수준] [--task T] [--fallback 수준] --reason ...` | 검토 수준 예외·자동 하향 허용. 낮추기·허용은 `--confirm-user-approval` 필수 |
 | `provider list` / `provider off <p> --reason ...` / `provider on <p>` | 쿼터 소진·정책 등으로 못 쓰는 에이전트 표시 |
@@ -136,6 +138,7 @@ harness.sh init DIR --goal "..." --worker claude --reviewer claude --review-leve
 | `transition` `dispatch` `observe` `close` | 한 단계씩 진행 (run이 내부에서 사용) |
 | `remote <하위 명령>` | 원격 모드 (아래) |
 | `upgrade` | 최신 스크립트·Skill로 갱신 (아래) |
+| `migrate` | v1 프로젝트를 v2로 이전 (저장소의 harness.sh, 아래) |
 | `doctor` `start` `help` | 점검, Herdr 세션 시작, 도움말 |
 
 ## 모델 등급과 쿼터
@@ -227,6 +230,8 @@ lib/auto.sh         자동 진행(run), 교체 규칙
 lib/remote.sh       원격 모드
 lib/status.sh       status · metrics · validate · doctor
 lib/project.sh      init · upgrade · start
+lib/verify.sh       재검증 (verify)
+lib/migrate.sh      v1 프로젝트 이전 (migrate)
 templates/project/  프로젝트 골격: AGENTS.md, Skill 6개, project.yaml, SPEC·MILESTONES·BACKLOG, Task·Intent 템플릿
 test.sh             자체 테스트 (가짜 herdr·ssh, 임시 폴더에서 실행 후 삭제)
 ```
@@ -245,10 +250,59 @@ test.sh             자체 테스트 (가짜 herdr·ssh, 임시 폴더에서 실
 - 병렬 상한·범위 충돌·premium 승인·재작업 상한
 - 원격 모드
 - 업그레이드
+- 재검증, v1 이전 (아래 항목을 모두 확인):
+  - 사전 점검이 아무것도 바꾸지 않음
+  - 차단 조건
+  - 실패 시 자동 원상복구 (Git 밖 파일 포함, 다른 파일의 진행 중 수정은 남김)
+  - 강제 종료 뒤 `--rollback`, 병합 전 `--undo`
+  - 내용을 바꾸는 commit hook, `.gitignore` 규칙, 링크인 진입 문서, 사용자 git 설정
+  - 옮긴 파일의 해시 대조와 목록 독립 재대조
+  - 마운트·작업 공간 폴더에 들어가지 않음
 
 ## 이전 버전(v1)에서
 
-- v1(`~/.local/share/herdr-agent-harness`, `herdr-harness` 명령)으로 만든 프로젝트는 그 설치본으로 계속 운영할 수 있습니다. v2는 v1 프로젝트 구조(`policies/`, `evidence/`, `STATE.md`)를 읽지 않습니다.
+v1(`~/.local/share/herdr-agent-harness`, `herdr-harness` 명령)으로 만든 프로젝트는 `migrate`로 v2로 옮깁니다. Task와 Task 사이처럼 에이전트가 돌지 않을 때 실행합니다.
+
+```bash
+~/herdr-agent-harness/harness.sh migrate ~/workspace/AI_SW          # 사전 점검 보고서만 (아무것도 바꾸지 않음)
+~/herdr-agent-harness/harness.sh migrate ~/workspace/AI_SW --apply --confirm-user-approval \
+  --review-level cross_model --reason "회사 정책: claude만" \
+  --complete task-020,task-021 --complete-reason "D-9: 사용자 완료 인정"   # 사용자 결정은 인수로
+```
+
+| v1 | v2 |
+|---|---|
+| 완료 Task | `.harness/archive/v1-<milestone>/`로 보관합니다. 요약에 증빙 등급을 남깁니다: 마지막 AC 실행이 command AC를 모두 통과했는지, 일부만 실행됐는지 |
+| 제출·검토 중·승인 대기 Task | `--complete`로 사용자가 지정한 것만 완료로 보관합니다. 나머지는 draft로 돌아가 v2에서 다시 증빙합니다(v2 승인 대기로 옮기지 않음) |
+| 그 밖의 열린 Task | draft로 돌아갑니다. v1 시도 기록은 보관합니다. 계약을 보완하고 `approve-plan`부터 다시 밟습니다 |
+| `project.yaml` + `policies/` | v2 `project.yaml` 하나로 합칩니다. 다음 값은 그대로 옮깁니다:<br>· 동시 Worker 상한·AC 제한 시간·승인 모드<br>· 모델(기본 모델 → 등급 매핑)<br>· 바꾼 Provider 인수 |
+| `STATE.md`·`waves/`·`evidence/`·`.agents/roles/`·v1 Skill 등 | `.harness/archive/v1/` (원래 경로 그대로) |
+| `AGENTS.md`·`CLAUDE.md`·`GEMINI.md`·`HARNESS_START.md` | 덮어쓰지 않고 끝에 v2 운영 규칙(또는 안내) 절만 덧붙입니다. AGENTS.md가 다른 진입 문서를 가리키는 링크면 그 문서에 규칙 절을 넣습니다 |
+
+안전장치는 다음과 같습니다.
+- **차단 조건**: 다음 중 하나라도 있으면 적용하지 않습니다.
+  - 커밋되지 않은 변경
+  - Herdr에 남은 v1 에이전트
+  - 읽을 수 없는 폴더
+  - 같은 회사 Task가 있는데 검토 수준 결정이 없음
+- **되돌리기**: 시작 commit에 태그 `harness-v1-final`을 달고, 새 브랜치 `harness-v2-migration`에 commit 하나로 남깁니다.
+  - 도중에 실패하면 작업 기록을 거꾸로 되짚어 시작 상태로 되돌립니다. 이때 이전이 손댄 경로만 되돌리므로, 저장소의 다른 파일에서 진행 중이던 수정은 그대로 남습니다.
+  - 강제 종료 등으로 끊겼다면 `migrate DIR --rollback`으로 기록대로 되돌립니다.
+    - 여러 번 실행해도 안전합니다.
+    - 끊긴 뒤 이전 브랜치에 commit이 쌓였으면 그 작업을 지우지 않도록 거부합니다.
+    - 끊긴 기록이 남아 있으면 v2 `validate`가 알려 줍니다.
+  - 성공한 이전을 본 브랜치에 병합하기 전에 되돌리려면 `migrate DIR --undo --confirm-user-approval`을 씁니다. Git 밖으로 옮긴 파일과 지운 빈 폴더까지 제자리로 돌아옵니다.
+- **무손실 확인**:
+  - 옮기기 전후 모든 파일의 해시를 대조하고, 그 목록을 `.harness/archive/v1/MANIFEST.txt`로 남깁니다.
+  - Git 추적 여부도 바뀌지 않습니다. 바뀔 것 같으면(`.gitignore` 규칙) 사전 점검에서 막습니다.
+  - Git이 추적하지 않는 파일은 제자리에서 고치지 않습니다(실패 때 되돌릴 수 없으므로 막습니다).
+  - commit hook이 내용을 바꾸면(포맷터 등) 대조한 내용과 달라지므로 되돌립니다.
+  - 이전 직후 `validate`·`status`가 통과해야 commit합니다.
+- **참조 보존**: 열린 Task·Intent·결정·사용자 문서가 경로로 가리키는 v1 기록은 원래 자리에 둡니다. v1 운영 파일이거나 v2와 이름이 겹쳐 둘 수 없는 것은 옮기고, 끊기는 참조를 보고서에 새 위치와 함께 적습니다.
+- **건드리지 않는 곳**: 원격 마운트와 `.harness/worktrees/`. 응답 없는 마운트(끊긴 SSHFS)가 있으면 멈추는 대신 막습니다. 런타임 폴더는 최상위의 v1 파일만 `runtime/v1/`로 옮깁니다(Git 밖). v1이 만든 것만 옮기고, 사용자가 둔 파일과 Skill, 링크인 진입 문서는 그대로 둡니다.
+- **이전 뒤 할 일**은 `.harness/archive/v1/MIGRATION.md`에 정리됩니다. 주로 다음 두 가지입니다.
+  - `verify --legacy`: 증빙이 불완전한 v1 완료 Task를 다시 검증합니다.
+  - Milestone별 `approve-plan`
 - v1을 지우려면:
   - `rm -rf ~/.local/share/herdr-agent-harness ~/.local/bin/herdr-harness`
   - `~/.bashrc`에서 `herdr-harness bash completion` 블록을 삭제

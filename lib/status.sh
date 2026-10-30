@@ -2,6 +2,7 @@
 # harness.sh가 source한다. 단독 실행하지 않는다.
 
 # 기록 파일에서 성과 지표를 계산한다. 어느 에이전트·등급에 어떤 일을 맡겨야 쿼터를 덜 쓰는지의 근거다.
+# .harness 전체를 볼 때도 런타임·작업 공간·원격 마운트(-xdev: 다른 파일시스템)는 들어가지 않는다.
 metrics_table() {  # DIR... (진행 중 기록 폴더, 보관함 한 곳, 또는 .harness 전체)
   local f p k tier ac v n tasks=0 sum=0 rework=0 base
   local -A w_try=() w_pass=() w_fail=() w_first=() r_cnt=() r_ok=() r_cr=() t_try=()
@@ -13,13 +14,13 @@ metrics_table() {  # DIR... (진행 중 기록 폴더, 보관함 한 곳, 또는
     base="${f##*/}"; n="${base##*-attempt-}"; n="${n%.harness.md}"; base="${base%-attempt-*}"
     [[ "$n" != 1 || "$ac" != PASS ]] || w_first[$k]=$(( ${w_first[$k]:-0} + 1 ))
     (( 10#$n <= ${t_try[$base]:-0} )) || t_try[$base]=$((10#$n))
-  done < <(find "$@" -name '*-attempt-*.harness.md' -print0 2>/dev/null || true)   # 기록 폴더가 아직 없을 수 있다
+  done < <(find "$@" -xdev \( -name runtime -o -name worktrees -o -name remote-mount \) -prune -o -name '*-attempt-*.harness.md' -print0 2>/dev/null || true)   # 기록 폴더가 아직 없을 수 있다
   while IFS= read -r -d '' f; do
     p="$(rec_get "$f" Provider)"; p="${p:-?}"
     v="$(review_verdict "${f%.harness.md}.md")"
     r_cnt[$p]=$(( ${r_cnt[$p]:-0} + 1 ))
     case "$v" in APPROVED) r_ok[$p]=$(( ${r_ok[$p]:-0} + 1 )) ;; CHANGES_REQUESTED) r_cr[$p]=$(( ${r_cr[$p]:-0} + 1 )) ;; esac
-  done < <(find "$@" -name '*-review-*.harness.md' -print0 2>/dev/null || true)
+  done < <(find "$@" -xdev \( -name runtime -o -name worktrees -o -name remote-mount \) -prune -o -name '*-review-*.harness.md' -print0 2>/dev/null || true)
   if (( ${#w_try[@]} == 0 && ${#r_cnt[@]} == 0 )); then printf '아직 기록이 없습니다.\n'; return 0; fi
   printf '| Worker | 등급 | 시도 | AC 통과 | AC 실패 | 첫 시도 통과 |\n|---|---|---|---|---|---|\n'
   for k in $(printf '%s\n' "${!w_try[@]}" | sort); do
@@ -122,16 +123,24 @@ cmd_status() {
   printf '%s\n' "${line:-- 없음}"
   printf '\n## 지표 (진행 중 — 전체는 metrics)\n\n'
   metrics_table "$ROOT/.harness/attempts" "$ROOT/.harness/reviews" | head -n 14 || true
-  line="$(git -C "$(code_dir)" status --short 2>&1 | head -n 20 || true)"
-  printf '\n## Git (%s)\n\n%s\n' "$(code_dir)" "${line:-(변경 없음)}"
+  # 원격 모드의 코드는 SSHFS 마운트라 그 위의 git status는 원격 저장소 전체를 네트워크로 훑는다. 프로젝트 저장소를 보인다.
+  local gdir note=""
+  gdir="$(code_dir)"
+  if remote_enabled; then gdir="$ROOT"; note=" — 원격 코드는 remote vcs status로 확인"; fi
+  line="$(git -C "$gdir" status --short 2>&1 | head -n 20 || true)"
+  printf '\n## Git (%s%s)\n\n%s\n' "$gdir" "$note" "${line:-(변경 없음)}"
 }
 
 cmd_validate() {
-  local problems=0 id tf st w r dep other open=0 active=0 s1 s2 max_open max_par intent row t deps scope_txt p
+  local problems=0 todos=0 id tf st w r dep other open=0 active=0 s1 s2 max_open max_par intent row t deps scope_txt p
   local -A scopes=()
-  ok()  { printf '[OK]   %s\n' "$*"; }
-  bad() { printf '[FAIL] %s\n' "$*"; problems=$((problems + 1)); }
+  ok()   { printf '[OK]   %s\n' "$*"; }
+  bad()  { printf '[FAIL] %s\n' "$*"; problems=$((problems + 1)); }
+  # 아직 계획 승인 전(draft)인 Task의 계약 보완 항목. approve-plan이 다시 검사해 거부하므로 상태 불일치는 아니다.
+  todo() { printf '[TODO] %s\n' "$*"; todos=$((todos + 1)); }
   if git -C "$ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1; then ok "Git 기준 commit"; else bad "Git 기준 commit 없음"; fi
+  p="$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null)/harness-migrate.journal"
+  [[ -n "${HARNESS_MIGRATING:-}" || ! -e "$p" ]] || bad "끝나지 않은 v1 이전(migrate) 기록이 있습니다 — 저장소의 harness.sh migrate $ROOT --rollback으로 되돌린 뒤 이어 간다 ($p)"
   if spec_approved; then ok "SPEC 승인됨"; else ok "SPEC 미승인 (계획 승인 전 사용자 승인 필요)"; fi
   local plv fb lvt
   plv="$(project_level 2>/dev/null)" || plv=""
@@ -172,7 +181,9 @@ cmd_validate() {
       bad "$id: 등급·생각 깊이 값 오류"
     ( ylist "$tf" write_scope && ylist "$tf" dependencies ) >/dev/null 2>&1 || bad "$id: write_scope·dependencies는 [a, b] 형식"
     ac_load "$tf"
-    [[ -z "$AC_ERR" ]] || bad "$id: $AC_ERR"
+    if [[ -n "$AC_ERR" ]]; then
+      if [[ "$st" == draft ]]; then todo "$id: 계획 승인 전에 보완 — $AC_ERR"; else bad "$id: $AC_ERR"; fi
+    fi
     [[ "$st" == completed ]] || open=$((open + 1))
     if [[ "$st" != draft ]]; then
       intent="$(yget "$tf" intent)"
@@ -204,7 +215,7 @@ cmd_validate() {
   max_open="$(pnum limits max_open_tasks 10)"; max_par="$(pnum limits max_parallel_workers 5)"
   if (( open <= max_open )); then ok "열린 Task $open / $max_open"; else bad "열린 Task 상한 초과: $open > $max_open"; fi
   if (( active <= max_par )); then ok "동시 Worker $active / $max_par"; else bad "동시 Worker 상한 초과: $active > $max_par"; fi
-  if (( problems == 0 )); then printf '\nvalidate: 통과\n'; return 0; fi
+  if (( problems == 0 )); then printf '\nvalidate: 통과%s\n' "$( ((todos == 0)) || echo " (계획 승인 전 보완 ${todos}건 — [TODO])")"; return 0; fi
   printf '\nvalidate: %s개 문제\n' "$problems"
   exit 1
 }

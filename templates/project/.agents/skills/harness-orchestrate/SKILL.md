@@ -15,6 +15,7 @@ description: 승인된 Milestone을 harness.sh run으로 자동 진행하고, �
    - 계획 없음·draft Task → harness-plan
    - 계획 승인됨 → 아래 "자동 진행"
    - 모든 Task 승인 대기 → 아래 "완료 승인"
+   - v1에서 막 이전한 프로젝트 → `.harness/archive/v1/MIGRATION.md`의 "이전 후 할 일"부터 사용자와 확인한다
 
 ## 자동 진행
 - `H run <milestone> --in-pane`으로 별도 Pane에서 시작한다(도구 시간 제한 회피). 직접 돌릴 때는 `H run <milestone> --max-minutes 8`.
@@ -67,6 +68,8 @@ description: 승인된 Milestone을 harness.sh run으로 자동 진행하고, �
 | "codex 다시 돼" | `H provider on codex` |
 | "task-003 Reviewer는 opus로" | Task의 `reviewer_model: 'opus'` → 비싼 모델이면 사용자 확인을 받아 `H approve-plan <m> --confirm-user-approval` |
 | "이 Task만 같은 모델 검토로 해" | `H review-level same_model --task <t> --reason "<사용자 말>" --confirm-user-approval` |
+| "task-020 다시 검증해줘" | `H verify task-020` → 통과·실패와 기록 경로를 보고한다. 상태는 바뀌지 않는다 |
+| "v1에서 넘어온 증빙 다시 확인해" | `H verify --legacy` → 실패한 Task는 재작업 후보로 보고한다(계획에 넣는 것은 사용자 결정) |
 
 - 검토 수준을 낮추는 결정은 사용자의 말 그대로 사유로 남긴다. 추측해서 낮추지 않는다.
 - 완료 승인을 요청할 때 다른 회사 검토가 아닌 Task가 있으면 `H status`의 "같은 회사 검토" 표시를 그대로 알린다.

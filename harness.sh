@@ -17,7 +17,7 @@ HARNESS_BIN="$(readlink -f "${BASH_SOURCE[0]}")"
 HARNESS_HOME="$(dirname "$HARNESS_BIN")"
 TEMPLATE_DIR="${HARNESS_TEMPLATE_DIR:-$HARNESS_HOME/templates/project}"
 
-for _lib in core gates agents packet models auto remote status project; do
+for _lib in core gates agents packet models auto remote status project verify migrate; do
   [[ -f "$HARNESS_HOME/lib/$_lib.sh" ]] || { printf '오류: %s/lib/%s.sh가 없습니다.\n' "$HARNESS_HOME" "$_lib" >&2; exit 1; }
   # shellcheck source=/dev/null
   source "$HARNESS_HOME/lib/$_lib.sh"
@@ -33,6 +33,11 @@ herdr-harness — Herdr에서 여러 에이전트를 증빙·교차 검토로 �
            [--orchestrator P] [--worker P] [--reviewer P] [--fallback P,P]
            [--approval-mode ask|auto|bypass] [--code-dir DIR] [--review-level cross_provider|cross_model|same_model]
   upgrade DIR...                    프로젝트의 bin·Skill을 이 버전으로 (프로젝트 안에서는 인수 없이)
+  migrate DIR [--apply --confirm-user-approval] [--review-level L --reason "사유"]
+              [--complete T,T --complete-reason "사유"]
+                                    v1 프로젝트를 v2로 이전 (기본은 사전 점검 보고서만, 바꾸지 않음)
+  migrate DIR --undo --confirm-user-approval    병합 전 이전 되돌리기 (Git 밖으로 옮긴 파일 포함)
+  migrate DIR --rollback                        끊긴 이전(강제 종료 등)을 기록대로 되돌리기
 
 프로젝트 안에서 (.harness/bin/harness.sh, 다른 위치면 -C DIR):
   status | metrics | validate | models [--refresh] | doctor | start
@@ -44,6 +49,7 @@ herdr-harness — Herdr에서 여러 에이전트를 증빙·교차 검토로 �
                                                  검토 수준 예외·자동 하향 허용(낮추기·허용은 사용자 결정)
   provider list | off PROVIDER --reason "사유" | on PROVIDER          쿼터 소진·정책 등으로 못 쓰는 에이전트 표시
   prune MILESTONE                                  보관함을 요약만 남기고 정리 (원본은 git 태그)
+  verify TASK | --milestone M | --legacy           AC 명령을 지금 코드에서 다시 실행해 기록 (상태는 바꾸지 않음)
 
 한 단계씩 (run이 내부에서 쓰는 명령):
   transition TASK STATE
@@ -81,6 +87,7 @@ main() {
     help|-h|--help) usage; return 0 ;;
     init) cmd_init "$@"; return 0 ;;
     upgrade) cmd_upgrade "$@"; return 0 ;;
+    migrate) cmd_migrate "$@"; return 0 ;;
     doctor) ROOT="$(resolve_root "$dir" 2>/dev/null)" || ROOT=""; cmd_doctor; return 0 ;;
   esac
   ROOT="$(resolve_root "$dir")"
@@ -96,6 +103,7 @@ main() {
     review-level) cmd_review_level "$@" ;;
     provider) cmd_provider "$@" ;;
     prune) cmd_prune "$@" ;;
+    verify) cmd_verify "$@" ;;
     transition) cmd_transition "$@" ;;
     dispatch) cmd_dispatch "$@" ;;
     observe) cmd_observe "$@" ;;

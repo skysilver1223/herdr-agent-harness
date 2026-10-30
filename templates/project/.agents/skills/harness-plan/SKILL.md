@@ -32,11 +32,15 @@ Worker를 띄우지 않는다. 계획 승인 전에는 아무것도 실행되지
    - 사용자가 특정 모델을 지정하면 등급 대신 `worker_model`·`reviewer_model`에 적는다. premium·매핑에 없는 모델은 계획 승인에 포함된다.
    - **한 회사만 쓰는 프로젝트**(`review.level`이 cross_model)는 Worker와 Reviewer에 서로 다른 모델을 배정한다(예: Worker sonnet, Reviewer opus). 같은 모델이면 계획 승인이 거부된다.
    - premium은 쿼터를 크게 쓴다. 꼭 필요한 Task에만 제안한다.
-5. 병렬성을 점검한다. 의존이 없고 범위가 겹치지 않는 Task는 동시에 돈다(최대 `max_parallel_workers`).
-6. 계획에 넣은 BACKLOG 항목은 `[x] … — milestone-00N`으로 옮긴다.
-7. `H validate`를 통과시킨 뒤, 사용자에게 표 하나로 보고하고 **계획 승인**을 요청한다.
+5. **v1에서 이전된 draft Task**(`.harness/archive/v1/MIGRATION.md`의 "이전 후 할 일")는 v2 계약으로 보완한다.
+   - manual-review만 있으면 실행 가능한 command AC를 더한다. `true` 같은 형식적 명령은 증빙이 아니다.
+   - 같은 회사 Task는 Worker·Reviewer 모델을 다르게 지정한다.
+   - v1 시도·증빙은 `.harness/archive/v1/`에서 참고만 한다. v2 증빙은 run이 새로 남긴다.
+6. 병렬성을 점검한다. 의존이 없고 범위가 겹치지 않는 Task는 동시에 돈다(최대 `max_parallel_workers`).
+7. 계획에 넣은 BACKLOG 항목은 `[x] … — milestone-00N`으로 옮긴다.
+8. `H validate`를 통과시키고 `[TODO]`(계획 승인 전에 보완할 항목)를 모두 해결한 뒤, 사용자에게 표 하나로 보고하고 **계획 승인**을 요청한다.
    - 표 열: Task, 목적, Worker/Reviewer, 등급, AC 요약, 의존
-8. 사용자가 명시적으로 승인하면 Orchestrator가 `H approve-plan <milestone> --confirm-user-approval`을 실행한다. 이 명령이 Task·등급·AC 지문을 기록하고 draft를 ready로 올린다.
+9. 사용자가 명시적으로 승인하면 Orchestrator가 `H approve-plan <milestone> --confirm-user-approval`을 실행한다. 이 명령이 Task·등급·AC 지문을 기록하고 draft를 ready로 올린다.
 
 ## 금지
 - 승인 전 실행·상태 변경을 하지 않는다. status를 손으로 바꾸지 않는다.
