@@ -26,6 +26,16 @@ isolation:
   # 꺼져 있으면(또는 원격 모드면) 한 폴더를 함께 쓰므로 Task를 하나씩 통합까지 진행한다.
   worktree: true
 
+review:
+  # 검토 수준: cross_provider(다른 회사, 기본) > cross_model(같은 회사·다른 모델) > same_model(같은 모델·별도 세션)
+  # 기본보다 낮추는 것은 사용자 결정이다. review-level 명령이 결정 기록을 남긴다(이 줄만 손으로 낮추면 진행이 막힌다).
+  # 회사 정책상 한 회사만 쓰면 cross_model을 권한다(Worker와 Reviewer에 서로 다른 모델 지정).
+  level: '@@REVIEW_LEVEL@@'
+  # 다른 회사 에이전트를 쓸 수 없을 때(쿼터 소진·사용 불가 표시) 자동으로 낮출 수 있는 최저 수준.
+  # none = 멈추고 사용자에게 묻는다. cross_model·same_model = 그 수준까지 자동으로 낮추고 결정 기록을 남긴다.
+  # 켜는 것도 사용자 결정이다: review-level --fallback cross_model --reason "..." --confirm-user-approval
+  fallback_level: 'none'
+
 agents:
   # ask | auto | bypass — 도구 실행 승인만 바꾼다. 상태 전이와 사용자 결정은 그대로 사람 몫이다.
   approval_mode: '@@APPROVAL_MODE@@'

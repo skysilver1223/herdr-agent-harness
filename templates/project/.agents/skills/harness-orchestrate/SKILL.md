@@ -40,7 +40,7 @@ description: 승인된 Milestone을 harness.sh run으로 자동 진행하고, �
 - **교체 규칙 없음(쿼터·장애)**: 원인과 `fallback_chain`의 다음 후보를 보고한다. 사용자가 승인하면 다음 순서로 진행한다.
   1. harness-handover로 인계 문서를 쓴다.
   2. `H transition T handover_required`
-  3. Task YAML의 `primary_worker`를 바꾼다(Reviewer와 달라야 한다).
+  3. Task YAML의 `primary_worker`를 바꾸고 `worker_model`은 비운다(직접 지정 모델은 Provider마다 다르다). Reviewer와 같은 회사가 되면 검토 수준 예외(`review-level`)가 필요하다.
   4. `H transition T ready` → `H run`
   - 사용자가 "앞으로는 자동으로"라고 하면 project.yaml `failover`를 `auto`로 바꾸자고 제안한다.
 - **AC가 계획 이후 바뀜**: 사용자에게 변경을 보여 주고 승인을 받아 `approve-plan`을 다시 한다.
@@ -56,11 +56,27 @@ description: 승인된 Milestone을 harness.sh run으로 자동 진행하고, �
   - 계약(AC) 자체를 바꿔야 하는 반려면 harness-plan → `approve-plan`을 먼저 한다.
 - 배포·외부 반영은 별도로 사용자 승인을 받는다.
 
+## 사용자가 말로 지시하는 예외
+사용자의 명시적인 말이 있을 때만 아래처럼 반영하고, 반영한 결과(`H status`)를 보여 준다.
+
+| 사용자의 말 | 할 일 |
+|---|---|
+| "회사 작업이라 claude만 써" (계속 유지) | `project.yaml`의 `providers.available`을 `[claude]`로 바꿔 commit → `H review-level cross_model --reason "회사 정책: claude만" --confirm-user-approval` → Task의 Worker·Reviewer를 claude로, Reviewer는 Worker와 다른 모델(`reviewer_model` 또는 `reviewer_tier`) → `H approve-plan <m> --confirm-user-approval` → `H run <m>` |
+| "codex 쿼터 다 썼어" (일시) | `H provider off codex --reason "쿼터 소진"` → `H run <m>` (다른 회사가 없으면 검토 수준을 낮출지 사용자에게 묻는다) |
+| "쿼터 떨어지면 알아서 같은 회사 다른 모델로 검토해" | `H review-level --fallback cross_model --reason "<사용자 말>" --confirm-user-approval` |
+| "codex 다시 돼" | `H provider on codex` |
+| "task-003 Reviewer는 opus로" | Task의 `reviewer_model: 'opus'` → 비싼 모델이면 사용자 확인을 받아 `H approve-plan <m> --confirm-user-approval` |
+| "이 Task만 같은 모델 검토로 해" | `H review-level same_model --task <t> --reason "<사용자 말>" --confirm-user-approval` |
+
+- 검토 수준을 낮추는 결정은 사용자의 말 그대로 사유로 남긴다. 추측해서 낮추지 않는다.
+- 완료 승인을 요청할 때 다른 회사 검토가 아닌 Task가 있으면 `H status`의 "같은 회사 검토" 표시를 그대로 알린다.
+
 ## 금지
 - Agent를 직접 띄우지 않는다(증빙이 끊긴다). 한 Task용 추가 지시는 파일로 `--extra-prompt`.
 - Task YAML의 status, `decisions/`, `*.harness.md`를 손으로 고치지 않는다.
 - 사용자 승인·반려를 추론하지 않는다. "좋아 보여"는 완료 승인이 아니다. Milestone을 지목한 명시 승인, Task를 지목한 명시 반려만 인정한다.
-- 교체 규칙이 `ask`인데 Provider를 바꾸지 않는다.
+- 교체 규칙이 `ask`인데 Provider를 바꾸지 않는다. 사용자 결정 없이 검토 수준을 낮추지 않는다.
+- Worker·Reviewer 화면에서 직접 `/model`로 모델을 바꾸지 않는다(기록과 실제가 어긋난다).
 
 ## 보고
 각 처리 뒤 `H status` 요약과 사용자 판단 대기 항목을 짧게 알린다. 마지막 한 줄: `결과: SUCCESS, <요약>` 또는 `결과: BLOCKED, 사유: <...>`.

@@ -13,13 +13,13 @@ metrics_table() {  # DIR... (진행 중 기록 폴더, 보관함 한 곳, 또는
     base="${f##*/}"; n="${base##*-attempt-}"; n="${n%.harness.md}"; base="${base%-attempt-*}"
     [[ "$n" != 1 || "$ac" != PASS ]] || w_first[$k]=$(( ${w_first[$k]:-0} + 1 ))
     (( 10#$n <= ${t_try[$base]:-0} )) || t_try[$base]=$((10#$n))
-  done < <(find "$@" -name '*-attempt-*.harness.md' -print0 2>/dev/null)
+  done < <(find "$@" -name '*-attempt-*.harness.md' -print0 2>/dev/null || true)   # 기록 폴더가 아직 없을 수 있다
   while IFS= read -r -d '' f; do
     p="$(rec_get "$f" Provider)"; p="${p:-?}"
     v="$(review_verdict "${f%.harness.md}.md")"
     r_cnt[$p]=$(( ${r_cnt[$p]:-0} + 1 ))
     case "$v" in APPROVED) r_ok[$p]=$(( ${r_ok[$p]:-0} + 1 )) ;; CHANGES_REQUESTED) r_cr[$p]=$(( ${r_cr[$p]:-0} + 1 )) ;; esac
-  done < <(find "$@" -name '*-review-*.harness.md' -print0 2>/dev/null)
+  done < <(find "$@" -name '*-review-*.harness.md' -print0 2>/dev/null || true)
   if (( ${#w_try[@]} == 0 && ${#r_cnt[@]} == 0 )); then printf '아직 기록이 없습니다.\n'; return 0; fi
   printf '| Worker | 등급 | 시도 | AC 통과 | AC 실패 | 첫 시도 통과 |\n|---|---|---|---|---|---|\n'
   for k in $(printf '%s\n' "${!w_try[@]}" | sort); do
@@ -40,10 +40,24 @@ cmd_metrics() {
   printf '\n# 지표 — 전체 (보관함 포함)\n\n'; metrics_table "$ROOT/.harness"
 }
 
+weak_reviews() {  # MILESTONE → 다른 회사 검토가 아닌 Task 목록 (승인 전에 사용자가 알아야 한다)
+  local id lv out=""
+  while IFS= read -r id; do
+    lv="$(review_level_of "$id")"
+    [[ -z "$lv" || "$lv" == cross_provider ]] || out+="$id($(level_name "$lv")) "
+  done < <(milestone_tasks "$1")
+  [[ -z "$out" ]] || printf ' — 같은 회사 검토: %s' "$out"
+  return 0
+}
+
 cmd_status() {
-  local id tf st m n r ac v pending="" rows="" line lock res tier
+  local id tf st m n r ac v pending="" rows="" line lock res tier lv p tl
   local -A ms_total=() ms_done=() ms_wait=() ms_run=() ms_draft=() ms_hold=()
   printf '# %s (harness %s)\n\n목표: %s\n' "$(pget project name)" "$HARNESS_VERSION" "$(pget project goal)"
+  lv="$(project_level 2>/dev/null)" || lv="결정 기록 없음 — validate 확인"
+  printf '검토 수준: %s · 다른 회사가 없을 때 자동 하향: %s\n' "$(level_name "$lv")" "$(level_name "$(fallback_level)")"
+  line="$(while IFS= read -r p; do ! provider_off "$p" || printf '%s(%s) ' "$p" "$(provider_off_reason "$p")"; done < <(providers))"
+  [[ -z "$line" ]] || printf '사용 불가 에이전트: %s(provider on으로 해제)\n' "$line"
   spec_approved || pending+="- SPEC 승인 필요: .harness/SPEC.md의 '- 상태: approved' (사용자)"$'\n'
   while IFS= read -r id; do
     tf="$ROOT/.harness/tasks/$id.yaml"
@@ -54,7 +68,8 @@ cmd_status() {
     if (( r > 0 )); then v="$r ($(review_verdict "$(rev_file "$id" "$r")"))"; fi
     # die하는 함수는 $( ) 안의 || 로 막을 수 없다(exit가 서브셸째 끝낸다). 대입 뒤에 받는다.
     tier="$(task_tier "$tf" worker 2>/dev/null)" || tier='?'
-    rows+="| $id | $m | $(yget "$tf" title) | $st | $(yget "$tf" primary_worker) ($tier) | $(yget "$tf" reviewer) | $ac | $v |"$'\n'
+    tl="$(required_level "$id" 2>/dev/null)" || tl='결정 기록 없음'
+    rows+="| $id | $m | $(yget "$tf" title) | $st | $(yget "$tf" primary_worker) ($tier) | $(yget "$tf" reviewer) | $(level_name "$tl") | $ac | $v |"$'\n'
     ms_total[$m]=$(( ${ms_total[$m]:-0} + 1 ))
     case "$st" in
       completed) ms_done[$m]=$(( ${ms_done[$m]:-0} + 1 )) ;;
@@ -74,11 +89,11 @@ cmd_status() {
       "${ms_run[$m]:-0}" "${ms_draft[$m]:-0}" "${ms_hold[$m]:-0}" "$([[ -f "$(plan_file "$m")" ]] && echo yes || echo no)" "$res"
     (( ${ms_draft[$m]:-0} == 0 )) || pending+="- $m: 계획 승인 필요 (draft ${ms_draft[$m]}개) → approve-plan $m --confirm-user-approval"$'\n'
     (( ${ms_wait[$m]:-0} + ${ms_done[$m]:-0} != ${ms_total[$m]} || ${ms_wait[$m]:-0} == 0 )) ||
-      pending+="- $m: 모든 Task가 교차 검토·통합을 통과했습니다 → 결과 확인 후 approve $m --confirm-user-approval"$'\n'
+      pending+="- $m: 모든 Task가 검토·통합을 통과했습니다 → 결과 확인 후 approve $m --confirm-user-approval$(weak_reviews "$m")"$'\n'
     [[ "$res" != user_needed ]] || pending+="- $m: 자동 진행이 사용자 판단을 기다립니다 (.harness/runtime/run-$m.log)"$'\n'
   done
 
-  printf '\n## Task\n\n| Task | Milestone | 제목 | 상태 | Worker (등급) | Reviewer | 최신 Attempt | 최신 Review |\n|---|---|---|---|---|---|---|---|\n%s' "$rows"
+  printf '\n## Task\n\n| Task | Milestone | 제목 | 상태 | Worker (등급) | Reviewer | 검토 수준 | 최신 Attempt | 최신 Review |\n|---|---|---|---|---|---|---|---|---|\n%s' "$rows"
 
   printf '\n## Agent (Harness가 띄운 것)\n\n| Task | Role | Agent | Pane | Herdr | 판정 |\n|---|---|---|---|---|---|\n'
   local f task role name state expect verdict
@@ -112,14 +127,29 @@ cmd_status() {
 }
 
 cmd_validate() {
-  local problems=0 id tf st w r dep other open=0 active=0 s1 s2 max_open max_par intent row t deps scope_txt
+  local problems=0 id tf st w r dep other open=0 active=0 s1 s2 max_open max_par intent row t deps scope_txt p
   local -A scopes=()
   ok()  { printf '[OK]   %s\n' "$*"; }
   bad() { printf '[FAIL] %s\n' "$*"; problems=$((problems + 1)); }
   if git -C "$ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1; then ok "Git 기준 commit"; else bad "Git 기준 commit 없음"; fi
   if spec_approved; then ok "SPEC 승인됨"; else ok "SPEC 미승인 (계획 승인 전 사용자 승인 필요)"; fi
+  local plv fb lvt
+  plv="$(project_level 2>/dev/null)" || plv=""
+  if [[ -z "$plv" ]]; then bad "검토 수준($(pget review level cross_provider))에 결정 기록이 없습니다 — review-level 명령으로 사용자 결정을 남긴다"
+  else ok "검토 수준: $(level_name "$plv")"; fi
+  fb="$(pget review fallback_level none)"
+  case "$fb" in
+    none) ok "다른 회사가 없을 때 자동 하향: 하지 않음 (멈추고 묻기)" ;;
+    cross_model|same_model)
+      if [[ "$(fallback_level)" == "$fb" ]]; then ok "다른 회사가 없을 때 자동 하향: $(level_name "$fb")"
+      else bad "자동 하향 허용($fb)에 결정 기록이 없습니다 — review-level --fallback으로 사용자 결정을 남긴다"; fi ;;
+    *) bad "review.fallback_level 값 오류: $fb" ;;
+  esac
   w="$(pget providers primary_worker)"; r="$(pget providers reviewer)"
-  if [[ "$w" != "$r" ]] && is_provider "$w" && is_provider "$r"; then ok "기본 Worker($w) ≠ Reviewer($r)"; else bad "project.yaml Worker/Reviewer 배정 오류 ($w / $r)"; fi
+  if ! is_provider "$w" || ! is_provider "$r"; then bad "project.yaml Worker/Reviewer가 providers.available에 없습니다 ($w / $r)"
+  elif [[ "$w" == "$r" && "${plv:-cross_provider}" == cross_provider ]]; then bad "기본 Worker와 Reviewer가 같은 Provider($w) — 예외는 review-level 명령으로"
+  else ok "기본 Worker($w) / Reviewer($r)"; fi
+  while IFS= read -r p; do ! provider_off "$p" || ok "사용 불가 표시: $p ($(provider_off_reason "$p"))"; done < <(providers)
   case "$(pget agents approval_mode ask)" in ask|auto|bypass) ok "approval_mode=$(pget agents approval_mode ask)" ;; *) bad "approval_mode 값 오류" ;; esac
   for t in max_parallel_workers max_open_tasks max_rework ac_timeout_seconds; do
     [[ "$(pget limits "$t" 1)" =~ ^[0-9]+$ ]] || bad "limits.$t는 숫자여야 합니다"
@@ -135,7 +165,9 @@ cmd_validate() {
     st="$(yget "$tf" status)"
     [[ "$TRANSITIONS" == *">$st "* || "$st" == draft ]] || bad "$id: 알 수 없는 status=$st"
     w="$(yget "$tf" primary_worker)"; r="$(yget "$tf" reviewer)"
-    { is_provider "$w" && is_provider "$r" && [[ "$w" != "$r" ]]; } || bad "$id: Worker/Reviewer 오류 ($w / $r)"
+    { is_provider "$w" && is_provider "$r"; } || bad "$id: Worker/Reviewer 오류 ($w / $r)"
+    lvt="$(required_level "$id" 2>/dev/null)" || { bad "$id: 검토 수준(review_level)에 결정 기록이 없습니다"; lvt=cross_provider; }
+    [[ "$w" != "$r" || "$lvt" != cross_provider ]] || bad "$id: Worker와 Reviewer가 같은 Provider($w) — 예외는 review-level 명령으로"
     ( task_tier "$tf" worker && task_tier "$tf" reviewer && task_effort "$tf" worker && task_effort "$tf" reviewer ) >/dev/null 2>&1 ||
       bad "$id: 등급·생각 깊이 값 오류"
     ( ylist "$tf" write_scope && ylist "$tf" dependencies ) >/dev/null 2>&1 || bad "$id: write_scope·dependencies는 [a, b] 형식"

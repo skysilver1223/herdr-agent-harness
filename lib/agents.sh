@@ -94,6 +94,16 @@ turn() {  # NAME MESSAGE TIMEOUT → T_PS T_POUT T_GS T_GOUT T_ROUT
   hcap herdr agent read "$1" --source recent-unwrapped --lines 200; T_ROUT="$OUT"
 }
 
+# Agent가 사라지면 agent read도 실패한다. 그 Pane에 남은 화면(종료 메시지·로그인·쿼터 안내)을 읽는다.
+pane_screen() {  # PANE → 마지막 화면 (Secret 의심이면 경고만)
+  local s
+  s="$(herdr pane read "$1" --source recent --lines 60 2>/dev/null || true)"
+  if has_secret <<<"$s"; then s="(Secret 의심 패턴 — 화면 원문 생략)"; fi
+  printf '%s' "$s"
+}
+# Pane이 이미 닫혀 화면이 비어 있을 수 있다(herdr는 pane_not_found를 stderr로만 낸다). 빈 입력에서도 실패하지 않는다.
+screen_tail() { { grep -v '^[[:space:]]*$' <<<"$1" || true; } | tail -n 2 | tr '\n' ' ' | cut -c1-200; }
+
 append_log() {  # FILE TITLE TEXT — Secret 의심이면 원문 대신 경고만 남긴다 (Git 제외 영역)
   local text="$3"
   if has_secret <<<"$text"; then text="(Secret 의심 패턴 — 원문 저장 안 함)"; fi
@@ -149,11 +159,11 @@ cmd_dispatch() {
     att="$(last_attempt "$task")"
     ac_passed "$(att_record "$task" "$att")" || die "attempt $att에 AC 통과 증빙이 없습니다."
     worker_provider="$(rec_get "$(att_record "$task" "$att")" Provider)"
-    [[ "$provider" != "$worker_provider" ]] ||
-      die "Reviewer($provider)가 attempt $att의 Worker와 같은 Provider입니다. 교차 검토가 성립하지 않습니다."
     n=$(( $(last_review "$task") + 1 ))
   fi
   is_provider "$provider" || die "Task의 Provider가 project.yaml providers.available에 없습니다: ${provider:-없음}"
+  ! provider_off "$provider" ||
+    die "$provider는 사용 불가로 표시돼 있습니다 ($(provider_off_reason "$provider")). 쿼터가 돌아왔으면 provider on $provider, 아니면 Task의 Provider를 바꾼다."
   command -v herdr >/dev/null 2>&1 || die "herdr 명령이 없습니다."
   [[ "${HERDR_ENV:-}" == 1 ]] || die "dispatch는 Herdr Pane 안(HERDR_ENV=1)에서 실행한다."
   cwd="$(task_cwd "$task")"
@@ -180,6 +190,13 @@ cmd_dispatch() {
   [[ -z "$raw" ]] || read -r -a args <<<"$raw"
   select_model "$task" "$role" "$provider"
   args+=(${SEL_ARGS[@]+"${SEL_ARGS[@]}"})
+  local req="" act=""
+  if [[ "$role" == reviewer ]]; then
+    req="$(required_level "$task")"
+    act="$(actual_level "$worker_provider" "$(rec_get "$(att_record "$task" "$att")" 모델)" "$provider" "$SEL_MODEL")"
+    (( $(level_rank "$act") >= $(level_rank "$req") )) ||
+      die "이 Reviewer로는 필요한 검토 수준($(level_name "$req"))을 채울 수 없습니다: Worker $worker_provider/$(rec_get "$(att_record "$task" "$att")" 모델), Reviewer $provider/${SEL_MODEL:-Provider 기본값}. 다른 회사 Reviewer를 쓰거나, 같은 회사면 다른 모델(reviewer_model·reviewer_tier)을 지정한다."
+  fi
   [[ "$cwd" == "$ROOT" ]] || args+=(--add-dir "$ROOT")
 
   name="$(agent_name "$task" "$role" "$n")"
@@ -204,7 +221,7 @@ cmd_dispatch() {
       "$(now)" "$(date +%s)" "$provider" "$SEL_TIER" "${SEL_MODEL:-Provider 기본값}" "${SEL_EFFORT:-Provider 기본값}"
     printf -- '- 인수: %s\n- Agent: %s\n- Pane: %s\n- 작업 디렉터리: %s\n- 기준 commit: %s\n' \
       "${args[*]:-(없음)}" "$name" "$pane" "$cwd" "$base"
-    [[ "$role" == worker ]] || printf -- '- 검토 대상: attempt %s (Worker %s)\n' "$att" "$worker_provider"
+    [[ "$role" == worker ]] || printf -- '- 검토 대상: attempt %s (Worker %s)\n- 필요 검토 수준: %s\n- 예상 검토 수준: %s\n' "$att" "$worker_provider" "$req" "$act"
   } >"$record"
   write_atomic "$meta" <<EOF
 agent=$name
@@ -216,7 +233,7 @@ cwd=$cwd
 log=$log
 EOF
 
-  local result resent=no msg cleanup signal warning
+  local result resent=no msg cleanup signal warning screen="" T_VIS=""
   msg="Harness Context Packet을 읽고 그 지시대로 이 Task만 수행하라: $packet"
   : >"$log"
   if ! start_agent "$name" "$provider" "$pane" "$tmo" ${args[@]+"${args[@]}"}; then
@@ -249,18 +266,27 @@ EOF
     append_log "$log" "prompt" "$T_POUT"
     append_log "$log" "agent get" "$T_GOUT"
     append_log "$log" "agent read" "$T_ROUT"
+    if (( T_GS == 0 )); then
+      # 전체 화면을 쓰는 TUI는 recent 기록에 안 잡힐 수 있어 현재 화면도 읽는다(쿼터 안내 감지용).
+      hcap herdr agent read "$name" --source visible --lines 60; T_VIS="$OUT"
+    else
+      T_VIS="$(pane_screen "$pane")"; screen="$(screen_tail "$T_VIS")"
+    fi
+    append_log "$log" "screen" "$T_VIS"
   fi
-  signal="$(quota_exhausted "${T_POUT:-}"$'\n'"${T_ROUT:-}" || true)"
-  warning="$(quota_warning "${T_ROUT:-}" || true)"
+  signal="$(quota_exhausted "${T_POUT:-}"$'\n'"${T_ROUT:-}"$'\n'"${T_VIS:-}" || true)"
+  warning="$(quota_warning "${T_ROUT:-}"$'\n'"${T_VIS:-}" || true)"
   {
     printf '\n## dispatch %s\n\n- 결과: %s\n- 프롬프트 재전송: %s\n- 원문 로그(Git 제외): %s\n' \
       "$(now)" "$result" "$resent" "$(rel "$log")"
     [[ -z "$signal" ]] || printf -- '- 쿼터 신호: %s\n' "$signal"
     [[ -z "$warning" ]] || printf -- '- 쿼터 경고: %s\n' "$warning"
+    [[ -z "$screen" ]] || printf -- '- 마지막 화면: %s\n' "$screen"
     [[ "$result" != settled ]] || record_changes "$cwd"
   } >>"$record"
   printf '%s|%s\n' "$result" "$signal" >"$ROOT/.harness/runtime/$task-$role.last"
   printf 'dispatch_result=%s\n' "$result"
+  [[ -z "$screen" ]] || printf 'agent_screen=%s\n' "$screen"
   [[ -z "$signal" ]] || printf 'quota_signal=%s\n' "$signal"
   [[ -z "$warning" ]] || printf 'quota_warning=%s\n' "$warning"
   printf '증빙: %s\n' "$(rel "$record")"
@@ -286,8 +312,14 @@ cmd_observe() {
   name="$(meta_get "$meta" agent)"; record="$(meta_get "$meta" record)"
   cwd="$(meta_get "$meta" cwd)"; log="$(meta_get "$meta" log)"
   [[ -z "$wait_ms" ]] || herdr agent wait "$name" --timeout "$wait_ms" >/dev/null 2>&1 || true
-  hcap herdr agent get "$name"; local gs=$RC gout="$OUT"
-  hcap herdr agent read "$name" --source recent-unwrapped --lines 200
+  hcap herdr agent get "$name"; local gs=$RC gout="$OUT" read vis screen=""
+  hcap herdr agent read "$name" --source recent-unwrapped --lines 200; read="$OUT"
+  if (( gs == 0 )); then
+    hcap herdr agent read "$name" --source visible --lines 60; vis="$OUT"
+  else
+    vis="$(pane_screen "$(meta_get "$meta" pane)")"; screen="$(screen_tail "$vis")"
+  fi
+  OUT="$read"$'\n'"$vis"
   result="$(normalize "$gs" "$gout")"
   signal="$(quota_exhausted "$OUT" || true)"
   warning="$(quota_warning "$OUT" || true)"
@@ -299,11 +331,13 @@ cmd_observe() {
       printf '\n## observe %s\n\n- 결과: %s\n' "$(now)" "$result"
       [[ -z "$signal" ]] || printf -- '- 쿼터 신호: %s\n' "$signal"
       [[ -z "$warning" ]] || printf -- '- 쿼터 경고: %s\n' "$warning"
+      [[ -z "$screen" ]] || printf -- '- 마지막 화면: %s\n' "$screen"
       [[ "$result" != settled ]] || record_changes "$cwd"
     } >>"$record"
     printf '%s|%s\n' "$result" "$signal" >"$ROOT/.harness/runtime/$task-$role.last"
   fi
   printf 'observe_result=%s\n' "$result"
+  [[ -z "$screen" ]] || printf 'agent_screen=%s\n' "$screen"
   [[ -z "$signal" ]] || printf 'quota_signal=%s\n' "$signal"
   [[ -z "$warning" ]] || printf 'quota_warning=%s\n' "$warning"
 }
@@ -335,4 +369,35 @@ cmd_close() {
   fi
   printf 'closed=%s\n' "$(now)" >>"$meta"
   info "정리 완료: $name ($pane)"
+}
+
+# 쿼터 소진·장애·회사 정책으로 잠시 못 쓰는 에이전트를 표시한다. dispatch는 표시된 Provider를 거부하고,
+# run은 다른 Provider로 바꾸거나(교체) 정해 둔 수준까지 같은 회사 검토로 낮춘다.
+cmd_provider() {
+  local sub="${1:-list}" p="${2:-}" reason=""
+  case "$sub" in
+    list)
+      while IFS= read -r p; do
+        if provider_off "$p"; then printf '%-8s 사용 불가 — %s\n' "$p" "$(provider_off_reason "$p")"
+        else printf '%-8s 사용 가능\n' "$p"; fi
+      done < <(providers)
+      return 0 ;;
+    off|on) is_provider "$p" || die "사용법: provider off|on PROVIDER [--reason \"사유\"] (project.yaml providers.available)" ;;
+    *) die "사용법: provider list | off PROVIDER --reason \"사유\" | on PROVIDER" ;;
+  esac
+  shift 2
+  while (( $# )); do
+    case "$1" in
+      --reason) [[ -n "${2:-}" ]] || die "--reason에 사유가 필요합니다."; reason="$2"; shift 2 ;;
+      *) die "알 수 없는 provider 옵션: $1" ;;
+    esac
+  done
+  require_human provider
+  if [[ "$sub" == off ]]; then
+    mark_provider_off "$p" "${reason:-사용자 지정}" user
+    info "$p를 사용 불가로 표시했습니다 (${reason:-사용자 지정}). 되돌리기: provider on $p"
+  else
+    unmark_provider "$p"
+    info "$p를 다시 사용합니다."
+  fi
 }

@@ -15,22 +15,55 @@ task_effort() {  # TASK_FILE ROLE → low|medium|high|빈 값
   case "$e" in ""|low|medium|high) printf '%s' "$e" ;; *) die "생각 깊이는 low | medium | high입니다: ${2}_effort=$e ($1)" ;; esac
 }
 
-# 등급 → project.yaml models.<provider>_<tier> 모델. 비어 있으면 Provider 기본 모델(인수 없음).
-# premium은 계획 승인 표에 premium으로 승인된 Task·역할만 쓴다. 메인 셸에서 부른다.
+task_model() {  # TASK_FILE ROLE PROVIDER → 실제로 쓸 모델 (직접 지정 > 등급 매핑 > 빈 값 = Provider 기본값)
+  local m t
+  m="$(yget "$1" "${2}_model")"
+  if [[ -z "$m" ]]; then t="$(task_tier "$1" "$2")"; m="$(pget models "${3}_$t")"; fi
+  printf '%s' "$m"
+}
+
+# 비싼 모델은 계획 승인 표에 그 모델이 적혀 있어야 쓴다: premium 등급, premium 매핑 모델,
+# 그리고 매핑에 없는 모델(사용자가 직접 지정한 임의 모델)이다.
+needs_plan_approval() {  # PROVIDER TIER MODEL
+  local t
+  [[ "$2" != premium ]] || return 0
+  [[ -n "$3" ]] || return 1
+  [[ "$3" != "$(pget models "${1}_premium")" ]] || return 0
+  for t in light standard; do [[ "$3" != "$(pget models "${1}_$t")" ]] || return 1; done
+  return 0
+}
+
+# 계획 승인 없이 쓸 수 있는 모델이거나, 승인 표의 같은 역할·Provider·모델과 일치하는가.
+model_approved() {  # TASK ROLE PROVIDER TIER(또는 direct) MODEL
+  local pm
+  needs_plan_approval "$3" "$4" "$5" || return 0
+  pm="$(plan_model "$1" "$2")"
+  if [[ -z "$pm" ]]; then
+    # 2.0 형식 승인 표(모델 열 없음): premium 등급만 등급 열로 판정하고, 직접 지정 모델은 다시 승인받는다.
+    [[ "$4" == premium && "$(plan_tier "$1" "$2")" == premium ]]
+    return
+  fi
+  [[ "$pm" == "${5:-Provider 기본값}" && "$(plan_cell "$1" "$( [[ "$2" == worker ]] && echo Worker || echo Reviewer)")" == "$3" ]]
+}
+
+# 모델 = Task의 <role>_model(직접 지정) > <role>_tier의 models.<provider>_<tier> > Provider 기본값.
+# 사용자는 Orchestrator 창에서 "이 Task는 opus로"처럼 말하고, Orchestrator가 <role>_model에 적는다.
+# 메인 셸에서 부른다(서브셸의 die는 삼켜진다).
 select_model() {  # TASK ROLE PROVIDER → SEL_TIER SEL_MODEL SEL_EFFORT SEL_ARGS
-  local tf flag
+  local tf flag direct
   tf="$(task_file "$1")"
+  direct="$(yget "$tf" "${2}_model")"
   SEL_TIER="$(task_tier "$tf" "$2")"
   SEL_EFFORT="$(task_effort "$tf" "$2")"
-  SEL_MODEL="$(pget models "${3}_${SEL_TIER}")"
+  if [[ -n "$direct" ]]; then SEL_MODEL="$direct"; else SEL_MODEL="$(pget models "${3}_${SEL_TIER}")"; fi
   SEL_ARGS=()
-  if [[ "$SEL_TIER" == premium && "$(plan_tier "$1" "$2")" != premium ]]; then
-    die "$1 $2의 premium 등급은 계획 승인 때 승인되지 않았습니다. approve-plan으로 다시 승인받는다."
-  fi
   if [[ -n "$SEL_MODEL" ]]; then
-    [[ "$SEL_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@-]*$ ]] || die "models.${3}_${SEL_TIER} 형식이 올바르지 않습니다: $SEL_MODEL"
-    SEL_ARGS+=(--model "$SEL_MODEL")
+    [[ "$SEL_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@-]*$ ]] || die "모델 이름 형식이 올바르지 않습니다: $SEL_MODEL"
   fi
+  model_approved "$1" "$2" "$3" "$( [[ -n "$direct" ]] && echo direct || echo "$SEL_TIER")" "$SEL_MODEL" ||
+    die "$1 $2의 $3 모델(${SEL_MODEL:-Provider 기본값})은 계획 승인이 필요합니다 (premium·매핑에 없는 모델, 또는 Provider가 승인 때와 다름). 사용자 확인 후 approve-plan으로 다시 승인한다."
+  [[ -z "$direct" ]] || SEL_TIER="직접 지정"
+  [[ -z "$SEL_MODEL" ]] || SEL_ARGS+=(--model "$SEL_MODEL")
   if [[ -n "$SEL_EFFORT" ]]; then
     case "$3" in
       claude) SEL_ARGS+=(--effort "$SEL_EFFORT") ;;

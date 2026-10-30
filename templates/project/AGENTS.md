@@ -22,8 +22,9 @@
 ## 불변 규칙
 
 - 승인된 SPEC과 계획 없이 구현하지 않는다. Task 하나 = 목적 하나 = Worker 한 명.
-- 결과는 Harness가 직접 실행한 AC 증빙(`*.harness.md`)과 다른 Provider의 Review로만 인정한다.
-- Worker·Reviewer는 상태를 바꾸지 않는다. 사용자 결정(SPEC·계획·Milestone 완료·규칙 없는 교체)을 추측하지 않는다.
+- 결과는 Harness가 직접 실행한 AC 증빙(`*.harness.md`)과 독립된 Review로만 인정한다. Review는 기본적으로 다른 회사(Provider)가 하고, 한 회사만 쓸 수 있는 예외(회사 정책·쿼터 소진)는 `review-level` 결정 기록이 있을 때만 같은 회사의 다른 모델(또는 별도 세션)로 한다.
+- Worker·Reviewer는 상태를 바꾸지 않는다. 사용자 결정(SPEC·계획·Milestone 완료·반려·검토 수준 낮추기·규칙 없는 교체)을 추측하지 않는다.
+- Worker·Reviewer 화면에서 `/model` 등으로 모델을 바꾸지 않는다. 모델은 Task의 `worker_model`·`reviewer_model`(또는 등급)로만 정한다(증빙 기록과 실제가 어긋난다).
 - `*.harness.md`, `decisions/`, Task의 `status`는 사람·Agent가 손으로 고치지 않는다.
 - Secret을 프롬프트·파일·출력에 남기지 않는다. 배포·삭제·외부 쓰기는 사용자 승인을 받는다.
 - 사용자에게서 들어온 새 요청은 바로 구현하지 않고 `.harness/BACKLOG.md`에 기록한다.

@@ -14,7 +14,8 @@ description: Worker와 다른 Provider로서 Worker 보고서·Harness 증빙·�
 - Task Contract, SPEC 발췌, Intent 경로, 작성할 Review 파일 경로.
 
 ## 절차
-1. **독립성:** 네 Provider가 증빙 기록의 Worker Provider와 같으면 검토하지 않고 BLOCKED로 보고한다.
+1. **독립성:** Packet에 "같은 회사 검토" 표시가 없는데 네 Provider가 Worker와 같다면 검토하지 않고 BLOCKED로 보고한다.
+   - 표시가 있으면 사용자가 예외를 결정한 경우다. Worker와 판단 습관이 비슷할 수 있으므로, 의심되는 부분은 판단보다 **명령을 실행해** 확인한다.
 2. **변경 범위:** diff가 write_scope 안인지, Intent의 Not을 침범하지 않았는지 본다.
 3. **증빙 대조:** AC마다 다음 세 가지가 일치하는지 확인한다.
    - (a) Harness 기록의 실제 결과

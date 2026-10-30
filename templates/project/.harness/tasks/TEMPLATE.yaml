@@ -13,6 +13,10 @@ reviewer: '@@REVIEWER@@'
 # premium은 계획 승인 때 사용자가 함께 승인한 Task만 실행된다. 근거는 intent에 적는다.
 worker_tier: ''
 reviewer_tier: ''
+# 모델 직접 지정(선택): 등급보다 우선한다. 사용자가 "이 Task는 opus로"라고 하면 여기에 적는다.
+# premium 매핑 모델·매핑에 없는 모델은 계획 승인 표에 적힌 경우에만 쓰인다(approve-plan).
+worker_model: ''
+reviewer_model: ''
 # 생각 깊이: low | medium | high (비우면 models.default_effort)
 worker_effort: ''
 reviewer_effort: ''

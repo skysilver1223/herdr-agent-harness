@@ -12,11 +12,18 @@ PASS=0 FAIL=0 LAST=""
 
 ok() { PASS=$((PASS + 1)); printf 'PASS  %s\n' "$1"; }
 ng() { FAIL=$((FAIL + 1)); printf 'FAIL  %s\n' "$1"; [[ -z "${2:-}" ]] || printf '%s\n' "$2" | tail -n 8 | sed 's/^/      /'; }
-expect_ok() { local name="$1"; shift; if LAST="$("$@" 2>&1 </dev/null)"; then ok "$name"; else ng "$name" "$LAST"; fi; }
+NOISE='에서 실패 (exit'   # ERR trap 잡음: 예상한 결과(성공·거부)에서는 절대 나오면 안 된다
+expect_ok() {
+  local name="$1"; shift
+  if LAST="$("$@" 2>&1 </dev/null)"; then
+    if [[ "$LAST" == *"$NOISE"* ]]; then ng "$name (오류 위치 잡음)" "$LAST"; else ok "$name"; fi
+  else ng "$name" "$LAST"; fi
+}
 expect_fail() {
   local name="$1" pat="$2"; shift 2
   if LAST="$("$@" 2>&1 </dev/null)"; then ng "$name (성공하면 안 됨)" "$LAST"
   elif [[ -n "$pat" && "$LAST" != *"$pat"* ]]; then ng "$name (메시지에 '$pat' 없음)" "$LAST"
+  elif [[ "$LAST" == *"$NOISE"* ]]; then ng "$name (오류 위치 잡음)" "$LAST"
   else ok "$name"; fi
 }
 check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else ng "$name"; fi; }
@@ -37,6 +44,7 @@ case "$1 $2" in
   "pane get") [[ -f "$F/panes/$3" ]] && printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$3" ;;
   "pane current") printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${FAKE_CURRENT_PANE:-p_0}" ;;
   "pane run") echo "$4" >"$F/pane-run" ;;
+  "pane read") echo "${FAKE_SCREEN:-}" ;;
   "agent start")
     name="$3"; shift 3; pane="" kind=""
     while (( $# )); do case "$1" in --pane) pane="$2"; shift ;; --kind) kind="$2"; shift ;; --) shift; break ;; esac; shift; done
@@ -46,6 +54,7 @@ case "$1 $2" in
   "agent prompt")
     name="$3" text="$4"; [[ -f "$F/agents/$name" ]] || exit 1
     if [[ -n "${FAKE_DROP_FIRST:-}" && ! -f "$F/dropped-$name" ]]; then touch "$F/dropped-$name"; echo agent_prompt_stalled; exit 1; fi
+    if [[ -n "${FAKE_VANISH:-}" ]]; then rm -f "$F/agents/$name"; echo '{"result":{"status":"ok"}}'; exit 0; fi   # 에이전트가 곧바로 종료
     [[ "$text" == /status ]] || bash "$FAKE_HOOK" "$text"
     . "$F/agents/$name"; printf 'status=%s\nrev=%s\nseq=%s\npane=%s\nkind=%s\n' "${FAKE_AFTER:-idle}" $((rev + 1)) $((seq + 1)) "$pane" "$kind" >"$F/agents/$name"
     echo '{"result":{"status":"ok"}}' ;;
@@ -78,6 +87,8 @@ EOF
 # 가짜 ssh: 마지막 인수(원격 명령)를 로컬에서 실행한다.
 cat >"$FAKE/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
+n=0; for a in "$@"; do [[ "$a" != -n ]] || n=1; done
+(( n )) || cat >/dev/null   # 실제 ssh처럼 -n이 없으면 호출한 쪽의 표준 입력을 먹는다
 cmd="${!#}"; bash -c "$cmd"
 EOF
 chmod +x "$FAKE/bin/herdr" "$FAKE/bin/ssh"
@@ -131,7 +142,7 @@ setp() { sed -i "s|^  $1:.*|  $1: $2|" "$P/.harness/project.yaml"; }
 
 echo "== 1. 생성 =="
 expect_fail "init: 비대화형에서 --goal 없으면 거부" "--goal" R init "$P"
-expect_fail "init: Worker=Reviewer 거부" "다른 Provider" R init "$WORK/x" --goal g --worker codex --reviewer codex
+expect_fail "init: Worker=Reviewer 거부 (검토 수준 예외 없이)" "--review-level" R init "$WORK/x" --goal g --worker codex --reviewer codex
 expect_ok   "init" R init "$P" --goal "테스트 & 목표 | 특수문자"
 check "프로젝트에 bin·lib 복사" test -x "$P/.harness/bin/harness.sh" -a -f "$P/.harness/bin/lib/gates.sh"
 check "치환되지 않은 @@ 없음" bash -c "! grep -rl '@@' '$P' --exclude-dir=bin --exclude-dir=.git"
@@ -140,6 +151,8 @@ check "Claude Skill 링크" test -L "$P/.claude/skills/harness-work"
 check "기준 commit" git -C "$P" rev-parse --verify -q HEAD
 expect_fail "init: 비어 있지 않은 경로 거부" "비어 있지 않은" R init "$P" --goal g
 expect_ok   "validate (초기)" H validate
+expect_ok   "status (기록이 하나도 없는 새 프로젝트)" H status
+expect_ok   "metrics (기록 없음)" H metrics
 expect_ok   "start (Herdr 안: 중첩 대신 현재 세션에 workspace 생성)" H start
 check "프로젝트 이름의 workspace" grep -qx proj "$FAKE/ws"
 expect_ok   "start 재실행 (있는 workspace로 이동)" H start
@@ -298,6 +311,13 @@ A='{"agent_status":"idle","revision":3,"state_change_seq":5}'
 [[ "$(N 0 '{"agent_status":"idle","revision":4,"state_change_seq":6}' 0 "" "$A")" == settled ]] && ok "활동 지표 변화 → settled" || ng "settled"
 [[ "$(N 0 '{"agent_status":"idle"}' 1 agent_prompt_stalled)" == stalled ]] && ok "stalled" || ng "stalled"
 [[ "$(N 0 '{"agent_status":"weird"}')" == unknown ]] && ok "모르는 상태 → unknown" || ng "unknown"
+OLD="$WORK/oldplan"; mkdir -p "$OLD/.harness/tasks" "$OLD/.harness/decisions"
+printf 'schema_version: 2\nmodels:\n  codex_premium: x\n' >"$OLD/.harness/project.yaml"
+printf 'task_id: task-x\nmilestone_id: m1\nstatus: ready\n' >"$OLD/.harness/tasks/task-x.yaml"
+printf '승인: yes\n\n| Task | Worker | Reviewer | Worker 등급 | Reviewer 등급 | AC 지문 |\n|---|---|---|---|---|---|\n| task-x | codex | agy | premium | standard | abc |\n' >"$OLD/.harness/decisions/m1-plan-approval.md"
+MA() { bash -c 'for f in core gates models; do source "$1/lib/$f.sh"; done; ROOT="$2"; shift 2; model_approved "$@"' _ "$REPO" "$OLD" "$@" 2>/dev/null; }
+MA task-x worker codex premium x && ok "2.0 형식 표: 승인된 premium 등급은 그대로 인정" || ng "2.0 형식 premium"
+! MA task-x worker codex direct custom && ok "2.0 형식 표: 직접 지정 모델은 재승인 필요" || ng "2.0 형식 직접 지정"
 check "Task ID의 sk- 는 Secret 아님" bash -c "source '$REPO/lib/core.sh'; ! has_secret <<<'task-sk-political-lri-trend'"
 check "SPEC 문장 'Password: 8자 이상'은 Secret 아님" bash -c "source '$REPO/lib/core.sh'; ! has_secret <<<'- Password: 8자 이상'"
 check "코드 'api_key = os.getenv(...)'는 Secret 아님" bash -c "source '$REPO/lib/core.sh'; ! has_secret <<<'api_key = os.getenv(\"KEY\")'"
@@ -316,8 +336,17 @@ expect_ok "remote setup (비대화형, 입력 대기 없음)" bash "$P2/.harness
   --host buildhost --user dev --path "$RSRC" --mount "$RSRC" --ssh-key "$WORK/key" --vcs none --no-key
 expect_ok "remote run" bash "$P2/.harness/bin/harness.sh" remote run 'echo remote-ok'
 has remote-ok && ok "원격 명령 출력" || ng "원격 명령 출력" "$LAST"
+LAST="$(printf 'a\nb\nc\n' | while read -r x; do bash "$P2/.harness/bin/harness.sh" remote run "echo got-$x" 2>&1; done)"
+has got-a && has got-b && has got-c && ok "반복문 안의 원격 명령이 남은 입력을 먹지 않음 (ssh -n)" || ng "원격 명령 표준 입력" "$LAST"
 P_SAVE="$P"; P="$P2"
 write_task task-001 milestone-001 r.txt "test -f r.txt"
+cat >>"$P/.harness/tasks/task-001.yaml" <<'EOT'
+  - criterion_id: AC-003
+    statement: 두 번째 명령도 원격에서 실행된다
+    verified_by:
+      type: command
+      command: test -f r.txt && echo second-ac-ran
+EOT
 sed -i 's/^- 상태: draft/- 상태: approved/' "$P/.harness/SPEC.md"; commit_all "remote tasks"
 H approve-plan milestone-001 --confirm-user-approval >/dev/null
 expect_ok "원격 모드 착수 (작업 공간 분리 없이 순서대로)" H transition task-001 active
@@ -326,7 +355,9 @@ grep -q '마운트되어 있지 않습니다' "$WORK/m.out" && ok "마운트가 
 expect_ok "원격 모드 dispatch (코드 = 마운트 경로)" H dispatch task-001 worker
 expect_ok "원격 모드 제출 (AC를 원격에서 실행)" H transition task-001 submitted
 check "AC 실행 위치가 원격" grep -q '실행 위치: 원격' "$P/.harness/attempts/task-001-attempt-1.harness.md"
-write_task task-002 milestone-001 r2.txt "test -f r2.txt"; commit_all "remote task-002"
+check "원격에서 검증 명령 여러 개가 모두 실행됨" bash -c "grep -q '^| AC-001 | command | 0 | PASS' '$P/.harness/attempts/task-001-attempt-1.harness.md' && grep -q '^| AC-003 | command | 0 | PASS' '$P/.harness/attempts/task-001-attempt-1.harness.md'"
+write_task task-002 milestone-001 r2.txt "test -f r2.txt"
+commit_all "remote task-002"
 H approve-plan milestone-001 --confirm-user-approval >/dev/null
 expect_fail "원격 모드는 통합 전 Task가 있으면 다음 Task 착수 거부" "하나씩" H transition task-002 active
 H transition task-001 reviewing >/dev/null; FAKE_VERDICT=CHANGES_REQUESTED H dispatch task-001 reviewer >/dev/null
@@ -334,9 +365,117 @@ H transition task-001 changes_requested >/dev/null; H transition task-001 ready 
 expect_fail "재작업 대기(ready) Task도 자리를 차지" "하나씩" H transition task-002 active
 P="$P_SAVE"
 
+echo "== 9. 한 회사만 쓰는 환경 (회사 정책 예외) =="
+P3="$WORK/proj3"
+expect_ok "claude 단독 init (--review-level cross_model)" R init "$P3" --goal "claude only" --worker claude --reviewer claude --review-level cross_model --fallback claude
+check "init의 검토 수준 결정 기록" grep -q '^- 수준: cross_model' "$P3/.harness/decisions/review-level-1.md"
+P_SAVE="$P"; P="$P3"
+write_task task-001 milestone-001 a.txt "test -f a.txt" "primary_worker: claude" "reviewer: claude"
+sed -i 's/^- 상태: draft/- 상태: approved/' "$P/.harness/SPEC.md"; commit_all "p3 tasks"
+expect_fail "같은 모델이면 계획 승인 거부 (cross_model)" "검토 수준" H approve-plan milestone-001 --confirm-user-approval
+setp claude_standard "'sonnet'"; setp claude_premium "'opus'"
+sed -i "s|^reviewer_tier:.*|reviewer_tier: premium|" "$P/.harness/tasks/task-001.yaml"; commit_all "p3 models"
+expect_ok "계획 승인 (Worker sonnet / Reviewer opus)" H approve-plan milestone-001 --confirm-user-approval
+check "계획 표에 모델·검토 수준" grep -q '| sonnet | opus | cross_model |' "$P/.harness/decisions/milestone-001-plan-approval.md"
+expect_ok "착수" H transition task-001 active
+FAKE_VANISH=1 FAKE_SCREEN="claude: 로그인이 필요합니다" expect_fail "에이전트가 곧바로 사라짐 → agent_lost" "dispatch_result=agent_lost" H dispatch task-001 worker
+has "agent_screen=claude: 로그인이 필요합니다" && ok "사라진 에이전트의 마지막 화면을 보여 줌" || ng "마지막 화면" "$LAST"
+check "증빙에 마지막 화면 기록" grep -q '^- 마지막 화면: claude: 로그인이 필요합니다' "$P/.harness/attempts/task-001-attempt-1.harness.md"
+expect_ok "사라진 에이전트 정리" H close task-001 worker
+FAKE_VANISH=1 expect_fail "Pane 화면이 비어 있어도 agent_lost를 보고 (명령이 죽지 않음)" "dispatch_result=agent_lost" H dispatch task-001 worker
+check "빈 화면에서도 dispatch 기록이 남음" grep -q '^- 결과: agent_lost' "$P/.harness/attempts/task-001-attempt-2.harness.md"
+expect_ok "다시 정리" H close task-001 worker
+expect_ok "run (같은 회사·다른 모델 검토로 끝까지)" H run milestone-001 --max-minutes 2 --poll 1
+has "run_result=milestone_ready" && ok "승인 대기 도달" || ng "run 결과" "$LAST"
+check "검토 기록에 실제 검토 수준" grep -q '^- 검토 수준: cross_model (필요: cross_model)' "$P/.harness/reviews/task-001-review-1.harness.md"
+[[ "$(cat "$FAKE"/agents/hh-task-001-*-r1.args)" == *"--model opus"* && "$(cat "$FAKE"/agents/hh-task-001-*-w3.args)" == *"--model sonnet"* ]] && ok "Worker sonnet / Reviewer opus로 실행" || ng "모델 인수"
+expect_ok "status" H status
+has "같은 회사 검토: task-001" && ok "승인 요청에 같은 회사 검토 표시" || ng "같은 회사 검토 표시" "$LAST"
+sed -i "s|^  level:.*|  level: 'same_model'|" "$P/.harness/project.yaml"
+expect_fail "결정 기록 없이 손으로 낮춘 검토 수준은 거부" "결정 기록" H validate
+sed -i "s|^  level:.*|  level: 'cross_model'|" "$P/.harness/project.yaml"
+expect_fail "검토 수준 낮추기는 확인 플래그 필요" "confirm-user-approval" H review-level same_model --reason "모델 하나뿐"
+expect_ok "사용자 결정으로 낮추기" H review-level same_model --reason "모델 하나뿐" --confirm-user-approval
+check "결정 기록과 설정 반영" bash -c "grep -q '^- 수준: same_model' '$P/.harness/decisions/review-level-2.md' && grep -q \"^  level: 'same_model'\" '$P/.harness/project.yaml'"
+expect_ok "높이기는 확인 없이" H review-level cross_model --reason "원복"
+HARNESS_AGENT=task-001-worker expect_fail "에이전트는 검토 수준을 못 바꿈" "Agent" H review-level same_model --reason x --confirm-user-approval
+sed -i 's/^review:$/review:   # 검토 설정/' "$P/.harness/project.yaml"
+expect_ok "섹션 머리에 주석이 있어도 설정을 읽고 씀" H review-level cross_model --reason "주석 섹션 확인"
+check "주석 달린 섹션이 중복되지 않음" test "$(grep -c '^review:' "$P/.harness/project.yaml")" = 1
+write_task task-002 milestone-002 b.txt "test -f b.txt" "primary_worker: claude" "reviewer: codex"
+commit_all "p3 task-002"
+expect_ok "Task 단위로 검토 수준 올리기 (확인 불필요)" H review-level cross_provider --task task-002 --reason "중요 Task는 다른 회사 검토"
+expect_ok "milestone-002 계획 승인 (claude → codex)" H approve-plan milestone-002 --confirm-user-approval
+sed -i '/^review_level:/d; s/^reviewer:.*/reviewer: claude/' "$P/.harness/tasks/task-002.yaml"
+expect_fail "review_level 줄을 지워도 결정 기록의 수준이 유지됨" "같은 Provider" H validate
+rm -f "$P/.harness/decisions/task-002-review-level-1.md"
+expect_fail "결정 기록까지 지워도 계획 승인 때 수준이 유지됨" "같은 Provider" H validate
+expect_ok "자동 하향 설정만 바꾸는 프로젝트 기록" H review-level --fallback same_model --reason "설정 변경" --confirm-user-approval
+expect_fail "자동 하향 설정 기록으로는 계획 승인 수준이 풀리지 않음" "같은 Provider" H validate
+P="$P_SAVE"
+
+echo "== 10. 쿼터 소진: 사용 불가 표시 · 자동 하향 · 모델 직접 지정 =="
+setp codex_standard "'gpt-a'"; setp codex_light "'gpt-b'"; setp fallback_level "'cross_model'"
+expect_fail "설정 줄만 고친 자동 하향 허용은 무효" "자동 하향 허용" H validate
+setp fallback_level "'none'"
+expect_fail "자동 하향 허용은 확인 플래그 필요" "confirm-user-approval" H review-level --fallback cross_model --reason "쿼터 소진 대비"
+expect_ok "사용자 결정으로 자동 하향 허용" H review-level --fallback cross_model --reason "쿼터 소진 대비" --confirm-user-approval
+write_task task-006 milestone-003 six.txt "test -f six.txt"
+write_task task-007 milestone-003 seven.txt "test -f seven.txt"
+commit_all "m3"
+expect_ok "milestone-003 계획 승인" H approve-plan milestone-003 --confirm-user-approval
+echo "worker_model: 'gpt-x-custom'" >>"$P/.harness/tasks/task-007.yaml"
+expect_ok "task-007 착수" H transition task-007 active
+expect_fail "매핑에 없는 모델은 계획 승인 필요" "계획 승인" H dispatch task-007 worker
+commit_all "task-007 model"
+expect_ok "지정 모델을 포함해 재승인" H approve-plan milestone-003 --confirm-user-approval
+expect_ok "지정 모델로 dispatch" H dispatch task-007 worker
+[[ "$(cat "$FAKE"/agents/hh-task-007-*-w1.args)" == *"--model gpt-x-custom"* ]] && ok "직접 지정 모델 사용" || ng "직접 지정 모델"
+H close task-007 worker >/dev/null
+expect_fail "--reason 값이 없으면 거부 (잡음 없이)" "사유" H provider off codex --reason
+expect_ok "codex 사용 불가 표시" H provider off codex --reason "쿼터 소진"
+expect_ok "task-006 착수" H transition task-006 active
+expect_fail "사용 불가 Provider는 dispatch 거부" "사용 불가" H dispatch task-006 worker
+expect_ok "codex 다시 사용" H provider on codex
+expect_ok "agy·claude 사용 불가 표시" bash -c "bash '$P/.harness/bin/harness.sh' provider off agy --reason '쿼터 소진' && bash '$P/.harness/bin/harness.sh' provider off claude --reason '쿼터 소진'"
+expect_ok "provider list" H provider list
+has "사용 불가 — 쿼터 소진" && ok "사용 불가 목록" || ng "사용 불가 목록" "$LAST"
+expect_ok "run (Reviewer 회사가 없음 → 같은 회사·다른 모델로 자동 하향)" H run milestone-003 --max-minutes 2 --poll 1
+has "run_result=milestone_ready" && ok "milestone-003 승인 대기 도달" || ng "run 결과" "$LAST"
+check "자동 하향 결정 기록" grep -q '^- 결정: 자동 (review.fallback_level)' "$P/.harness/decisions/task-006-review-level-1.md"
+check "Reviewer를 같은 회사·다른 모델 등급으로" bash -c "grep -q '^reviewer: codex' '$P/.harness/tasks/task-006.yaml' && grep -q '^reviewer_tier: light' '$P/.harness/tasks/task-006.yaml'"
+check "검토 기록에 실제 수준" grep -q '^- 검토 수준: cross_model (필요: cross_model)' "$P/.harness/reviews/task-006-review-1.harness.md"
+expect_ok "agy·claude 다시 사용" bash -c "bash '$P/.harness/bin/harness.sh' provider on agy && bash '$P/.harness/bin/harness.sh' provider on claude"
+bash -c 'cd "$1" && source "$2/lib/core.sh" && ROOT="$1" && mark_provider_off agy "쿼터 소진 감지" auto' _ "$P" "$REPO"
+expect_ok "자동 표시된 Provider를 사용자가 다시 표시" H provider off agy --reason "쿼터 소진 확인"
+check "자동 표시가 사용자 표시로 바뀜" grep -qP '^agy\t[^\t]*\tuser\t' "$P/.harness/runtime/providers.off"
+expect_ok "agy 다시 사용" H provider on agy
+setp codex_standard "''"
+write_task task-008 milestone-004 eight.txt "test -f eight.txt"
+commit_all "m4"
+expect_ok "milestone-004 계획 승인" H approve-plan milestone-004 --confirm-user-approval
+expect_ok "agy·claude 사용 불가" bash -c "bash '$P/.harness/bin/harness.sh' provider off agy --reason x && bash '$P/.harness/bin/harness.sh' provider off claude --reason x"
+expect_ok "run (Worker 모델을 모르면 다른 모델 검토를 증명 못 함 → 하향하지 않고 멈춤)" H run milestone-004 --max-minutes 2 --poll 1
+has "run_result=user_needed" && ok "사용자 판단 대기로 멈춤" || ng "run 결과" "$LAST"
+check "증명 못 하는 하향은 기록도 배정 변경도 하지 않음" bash -c "test ! -e '$P/.harness/decisions/task-008-review-level-1.md' && grep -q '^reviewer: .agy.' '$P/.harness/tasks/task-008.yaml'"
+expect_ok "원상 복구" bash -c "bash '$P/.harness/bin/harness.sh' provider on agy && bash '$P/.harness/bin/harness.sh' provider on claude"
+setp codex_standard "'gpt-a'"
+write_task task-009 milestone-005 nine.txt "test -f nine.txt" "reviewer: codex"
+commit_all "m5"
+setp level "'same_model'"
+expect_fail "손으로 낮춘 프로젝트 수준으로는 같은 회사 계획을 승인할 수 없음 (안쪽 거부도 전파)" "결정 기록" H approve-plan milestone-005 --confirm-user-approval
+check "실패한 계획 승인은 표를 남기지 않음" test ! -e "$P/.harness/decisions/milestone-005-plan-approval.md"
+expect_fail "손으로 낮춘 상태에서도 Task 수준은 확인 없이 못 낮춤" "confirm-user-approval" H review-level same_model --task task-009 --reason x
+expect_ok "review-level로 손으로 고친 줄 바로잡기 (결정 기록 기준)" H review-level cross_provider --reason "손으로 고친 줄 원복"
+check "설정 줄이 결정 기록대로 돌아옴" grep -q "^  level: 'cross_provider'" "$P/.harness/project.yaml"
+rm -f "$P/.harness/tasks/task-009.yaml" "$P/.harness/intents/task-009-intent.md"; commit_all "m5 정리"
+sed -i '/^- 검토 수준:/d' "$P/.harness/reviews/task-004-review-1.harness.md"
+expect_ok "2.0 리뷰(검토 수준 줄 없음)도 기록으로 계산해 Milestone 승인" H approve milestone-002 --confirm-user-approval
+check "요약에 계산된 검토 수준" grep -q '^| task-004 |.*| cross_provider |$' "$P/.harness/archive/milestone-002/SUMMARY.md"
+
 echo "== 8. 업그레이드 =="
 expect_ok "저장소에서 업그레이드" R upgrade "$P"
-has "2.0.0 → 2.0.0" && ok "버전 표시" || ng "버전 표시" "$LAST"
+has "2.1.0 → 2.1.0" && ok "버전 표시" || ng "버전 표시" "$LAST"
 commit_all "upgrade" 2>/dev/null || true
 echo "# local edit" >>"$P/.agents/skills/harness-work/SKILL.md"
 expect_fail "로컬 수정이 있으면 덮어쓰지 않음" "커밋되지 않은 변경" H upgrade

@@ -13,7 +13,7 @@ run_child() {  # 하위 명령을 실행하고 결과 한 줄을 로그에 남�
   return "$RC"
 }
 
-last_line() { grep -v '^\[harness\]' <<<"$OUT" | grep -v '^[[:space:]]*$' | tail -n 1; }
+last_line() { { grep -v '^\[harness\]' <<<"$OUT" || true; } | { grep -v '^[[:space:]]*$' || true; } | tail -n 1; }
 
 reviews_for_attempt() {  # TASK N → 그 attempt를 대상으로 dispatch된 Review 수
   local f c=0
@@ -26,31 +26,117 @@ reviews_for_attempt() {  # TASK N → 그 attempt를 대상으로 dispatch된 Re
 
 # --------------------------------------------------------------------------
 # 교체 규칙 — project.yaml failover.<사유>가 auto일 때만 자동으로 교체한다. 기본은 ask
-# (멈추고 사용자에게). Reviewer와 같은 Provider는 건너뛰어 교차 검토를 유지한다.
+# (멈추고 사용자에게). 사람이 provider off로 표시한 Provider를 피하는 것은 이미 정해진 결정이라
+# 묻지 않는다(자동 감지로 표시된 것은 failover.quota_exhausted 규칙을 따른다).
+# 다른 회사 에이전트가 남지 않으면 review.fallback_level까지만 같은 회사 검토로 낮추고 기록한다.
 # --------------------------------------------------------------------------
-failover() {  # TASK ROLE REASON DETAIL → 0 자동 교체함, 1 사용자 판단 필요
-  local t="$1" role="$2" reason="$3" detail="$4" tf cur other next p k max n hand cwd
-  [[ "$(pget failover "$reason" ask)" == auto ]] || return 1
-  tf="$(task_file "$t")"
-  max="$(pnum failover max_per_task 1)"
-  k="$(grep -l '^- 자동 교체: yes' "$ROOT"/.harness/handovers/"$t"-handover-*.md 2>/dev/null | wc -l)"
-  (( k < max )) || return 1
-  if [[ "$role" == worker ]]; then cur="$(yget "$tf" primary_worker)"; other="$(yget "$tf" reviewer)"
-  else cur="$(yget "$tf" reviewer)"; other="$(yget "$tf" primary_worker)"; fi
+
+# 이 함수들은 failover가 if 안에서 불려 set -e가 꺼진 채로 돈다. die할 수 있는 판정은 먼저 변수로 받고
+# 실패하면 1(사용자 판단)을 돌려준다 — 판정 실패를 통과로 삼키지 않는다.
+
+# 같은 회사 검토가 허용되는지 따지고, 다른 모델이 필요하면 Reviewer 등급을 고른다.
+# 결과: SP_LEVEL(새로 기록할 검토 수준, 이미 허용되면 빈 값), SP_TIER(바꿀 Reviewer 등급). 허용 안 되면 1.
+plan_same_provider() {  # TASK ROLE PROVIDER
+  local t="$1" role="$2" p="$3" tf fb req target wm rm tier m wt rt
+  SP_LEVEL=""; SP_TIER=""
+  tf="$(task_file "$t")" || return 1
+  fb="$(fallback_level)" || return 1
+  req="$(required_level "$t")" || return 1
+  wt="$(task_tier "$tf" worker)" || return 1
+  rt="$(task_tier "$tf" reviewer)" || return 1
+  if (( $(level_rank "$req") <= 2 )); then target="$req"
+  elif [[ "$fb" != none ]]; then target="$fb"
+  else return 1; fi
+  # 직접 지정 모델은 Provider마다 다르므로 Provider가 바뀌는 쪽은 등급 매핑 모델로 계산한다.
+  if [[ "$role" == reviewer ]]; then
+    wm="$(rec_get "$(att_record "$t" "$(last_attempt "$t")")" 모델)"
+    rm="$(pget models "${p}_$rt")"
+  else
+    wm="$(pget models "${p}_$wt")"
+    rm="$(task_model "$tf" reviewer "$p")" || return 1
+  fi
+  if [[ "$target" == cross_model && "$(actual_level "$p" "$wm" "$p" "$rm")" != cross_model ]]; then
+    # 다른 모델임을 확인할 수 있어야 한다: Worker 모델을 모르면(Provider 기본값) cross_model은 성립하지 않는다.
+    if [[ -n "$wm" && "$wm" != "Provider 기본값" ]]; then
+      for tier in standard light premium; do
+        m="$(pget models "${p}_$tier")"
+        [[ -n "$m" && "$m" != "$wm" ]] || continue
+        model_approved "$t" reviewer "$p" "$tier" "$m" || continue
+        SP_TIER="$tier"; break
+      done
+    fi
+    if [[ -z "$SP_TIER" ]]; then
+      [[ "$fb" == same_model ]] || return 1
+      target=same_model
+    fi
+  fi
+  (( $(level_rank "$target") >= $(level_rank "$req") )) || SP_LEVEL="$target"
+  return 0
+}
+
+# 교체 뒤 배정(Provider·등급·모델)이 계획 승인과 검토 수준을 만족하는지 바꾸기 전에 확인한다.
+preflight_assignment() {  # TASK ROLE NEXT REVIEWER_TIER TARGET_LEVEL
+  local t="$1" role="$2" next="$3" rtier="$4" target="$5" tf w r wt rt mw mr wm
+  tf="$(task_file "$t")" || return 1
+  if [[ "$role" == worker ]]; then w="$next"; r="$(yget "$tf" reviewer)" || return 1; else w="$(yget "$tf" primary_worker)" || return 1; r="$next"; fi
+  if [[ "$role" == worker ]]; then
+    wt="$(task_tier "$tf" worker)" || return 1
+    mw="$(pget models "${w}_$wt")"           # 교체되는 쪽은 직접 지정 모델을 지우고 등급 매핑을 쓴다
+    model_approved "$t" worker "$w" "$wt" "$mw" || return 1
+    wm="$mw"
+  else
+    wm="$(rec_get "$(att_record "$t" "$(last_attempt "$t")")" 모델)"
+  fi
+  if [[ "$role" == reviewer || -n "$rtier" ]]; then
+    if [[ -n "$rtier" ]]; then rt="$rtier"; else rt="$(task_tier "$tf" reviewer)" || return 1; fi
+    mr="$(pget models "${r}_$rt")"
+    model_approved "$t" reviewer "$r" "$rt" "$mr" || return 1
+  else
+    mr="$(task_model "$tf" reviewer "$r")" || return 1
+  fi
+  (( $(level_rank "$(actual_level "$w" "$wm" "$r" "$mr")") >= $(level_rank "$target") ))
+}
+
+failover() {  # TASK ROLE REASON DETAIL → 0 자동 처리함, 1 사용자 판단 필요
+  local t="$1" role="$2" reason="$3" detail="$4" tf cur other next p k max n hand cwd rule note="" user_off=0 req
+  tf="$(task_file "$t")" || return 1
+  if [[ "$role" == worker ]]; then cur="$(yget "$tf" primary_worker)" || return 1; other="$(yget "$tf" reviewer)" || return 1
+  else cur="$(yget "$tf" reviewer)" || return 1; other="$(yget "$tf" primary_worker)" || return 1; fi
+  # 사람이 provider off로 표시한 Provider를 피하는 것은 이미 정해진 결정이라 묻지 않고, 교체 횟수에도 넣지 않는다.
+  if [[ "$reason" == provider_off && "$(provider_off_source "$cur")" == user ]]; then user_off=1; fi
+  if (( ! user_off )); then
+    rule="$reason"; [[ "$rule" != provider_off ]] || rule=quota_exhausted
+    [[ "$(pget failover "$rule" ask)" == auto ]] || return 1
+    max="$(pnum failover max_per_task 1)" || return 1
+    k="$(grep -l '^- 자동 교체: yes' "$ROOT"/.harness/handovers/"$t"-handover-*.md 2>/dev/null | wc -l)"
+    (( k < max )) || return 1
+  fi
+  req="$(required_level "$t")" || return 1
   next=""
   for p in $(pget providers fallback_chain | tr -d '[],'); do
-    if [[ "$p" != "$cur" && "$p" != "$other" ]] && is_provider "$p"; then next="$p"; break; fi
+    if [[ "$p" != "$cur" && "$p" != "$other" ]] && is_provider "$p" && ! provider_off "$p"; then next="$p"; break; fi
   done
-  [[ -n "$next" ]] || return 1
+  SP_LEVEL=""; SP_TIER=""
+  if [[ -n "$next" ]]; then
+    preflight_assignment "$t" "$role" "$next" "" "$req" || return 1
+  else
+    { is_provider "$other" && ! provider_off "$other"; } || return 1
+    plan_same_provider "$t" "$role" "$other" || return 1
+    next="$other"
+    preflight_assignment "$t" "$role" "$next" "$SP_TIER" "${SP_LEVEL:-$req}" || return 1
+    note="다른 회사 에이전트가 없어 같은 회사 검토로 진행 (검토 수준 $(level_name "${SP_LEVEL:-$req}"))"
+  fi
   harness_child close "$t" "$role" --force
   n=$(( $(last_n "$ROOT/.harness/handovers" "$t-handover-" .md) + 1 ))
   hand="$ROOT/.harness/handovers/$t-handover-$n.md"
   cwd="$(task_cwd "$t")"
   mkdir -p "$(dirname "$hand")"
   {
-    printf '# Handover: %s-handover-%s (자동)\n\n- 자동 교체: yes\n- 일시: %s\n- 역할: %s\n- 사유: %s %s\n- 원작업자: %s → 대상: %s\n\n' \
-      "$t" "$n" "$(now)" "$role" "$reason" "$detail" "$cur" "$next"
-    printf '## 작업 공간 상태 (%s)\n\n```text\n%s\n```\n\n' "$cwd" "$(git -C "$cwd" status --short 2>/dev/null || true)"
+    printf '# Handover: %s-handover-%s (자동)\n\n- 자동 교체: %s\n- 일시: %s\n- 역할: %s\n- 사유: %s %s\n- 원작업자: %s → 대상: %s\n' \
+      "$t" "$n" "$( ((user_off)) && echo 'no (사용자가 사용 불가로 표시한 Provider를 대체)' || echo yes)" \
+      "$(now)" "$role" "$reason" "$detail" "$cur" "$next"
+    [[ -z "$note" ]] || printf -- '- 검토: %s\n' "$note"
+    printf '\n## 작업 공간 상태 (%s)\n\n```text\n%s\n```\n\n' "$cwd" "$(git -C "$cwd" status --short 2>/dev/null || true)"
     printf '## 다음 한 단계\n\n%s가 같은 작업 공간에서 이어서 수행한다. 직전 Harness 증빙과 보고서를 먼저 읽는다.\n' "$next"
   } >"$hand"
   if [[ "$role" == worker ]]; then
@@ -58,12 +144,20 @@ failover() {  # TASK ROLE REASON DETAIL → 0 자동 교체함, 1 사용자 판�
       harness_child transition "$t" handover_required; (( RC == 0 )) || return 1
     fi
     set_field "$tf" primary_worker "$next"
+    [[ -z "$(yget "$tf" worker_model)" ]] || set_field "$tf" worker_model "''"   # 직접 지정 모델은 Provider마다 다르다
     harness_child transition "$t" ready; (( RC == 0 )) || return 1
   else
     set_field "$tf" reviewer "$next"
+    [[ -z "$(yget "$tf" reviewer_model)" ]] || set_field "$tf" reviewer_model "''"
   fi
+  if [[ -n "$SP_TIER" ]]; then
+    upsert_field "$tf" reviewer_tier "$SP_TIER"
+    [[ -z "$(yget "$tf" reviewer_model)" ]] || set_field "$tf" reviewer_model "''"
+  fi
+  [[ -z "$SP_LEVEL" ]] || record_level "$t" "$SP_LEVEL" "$req" \
+    "다른 회사 에이전트를 쓸 수 없어 자동으로 낮춤: $reason $detail (원작업자 $cur)" "자동 (review.fallback_level)"
   commit_harness "$t 자동 교체 $cur → $next ($reason)"
-  run_log "  자동 교체: $t $role $cur → $next ($reason)"
+  run_log "  자동 교체: $t $role $cur → $next ($reason)${note:+ — $note}"
   return 0
 }
 
@@ -81,13 +175,27 @@ quota_of() { sed -n 's/^quota_signal=//p' <<<"$OUT"; }   # 마지막 하위 명�
 
 # Agent가 비정상으로 멈췄을 때만 원인을 고른다. 정상 종료 화면의 429·rate limit 문구(테스트 출력 등)는 보지 않는다.
 agent_failed() {  # TASK ROLE DETAIL
-  local q
+  local q prov
   q="$(quota_of)"
-  if [[ -n "$q" ]]; then on_agent_failure "$1" "$2" quota_exhausted "$q"; else on_agent_failure "$1" "$2" agent_error "$3"; fi
+  if [[ -n "$q" ]]; then
+    # 쿼터가 바닥난 Provider는 다른 Task에서도 헛시도하지 않도록 사용 불가로 표시한다(provider on으로 해제).
+    prov="$(yget "$(task_file "$1")" "$( [[ "$2" == worker ]] && echo primary_worker || echo reviewer)")"
+    mark_provider_off "$prov" "쿼터 소진 감지: $q" auto
+    run_log "  $prov 사용 불가 표시 (쿼터 소진 감지)"
+    on_agent_failure "$1" "$2" quota_exhausted "$q"
+  else
+    on_agent_failure "$1" "$2" agent_error "$3"
+  fi
 }
 
 dispatch_role() {  # TASK ROLE — 게이트 거부는 보류, Agent 기동·전달 실패는 교체 규칙
-  local res
+  local res prov
+  prov="$(yget "$(task_file "$1")" "$( [[ "$2" == worker ]] && echo primary_worker || echo reviewer)")"
+  if provider_off "$prov"; then
+    if failover "$1" "$2" provider_off "$prov 사용 불가 ($(provider_off_reason "$prov"))"; then STEP_PROGRESS=1
+    else hold "$1" "$2 Provider $prov 사용 불가 — 대신할 에이전트가 없거나 교체·검토 수준 규칙이 없어 사용자 판단 필요"; fi
+    return 0
+  fi
   if run_child dispatch "$1" "$2"; then STEP_PROGRESS=1; STEP_RUNNING=1; return 0; fi
   res="$(sed -n 's/^dispatch_result=//p' <<<"$OUT")"
   if [[ -z "$res" ]]; then hold "$1" "$(last_line)"; else agent_failed "$1" "$2" "$res"; fi
@@ -120,7 +228,7 @@ step_worker() {
     blocked)
       if [[ -n "$(quota_of)" ]]; then agent_failed "$t" worker blocked
       else hold "$t" "Worker가 입력을 기다립니다 (blocked) — Pane에서 확인"; fi ;;
-    agent_lost) agent_failed "$t" worker agent_lost ;;
+    agent_lost) agent_failed "$t" worker "agent_lost $(sed -n 's/^agent_screen=//p' <<<"$OUT")" ;;
     *) hold "$t" "Worker 상태 $res — 확인 필요" ;;
   esac
   return 0
@@ -168,7 +276,7 @@ step_reviewer() {
     blocked)
       if [[ -n "$(quota_of)" ]]; then agent_failed "$t" reviewer blocked
       else hold "$t" "Reviewer가 입력을 기다립니다 (blocked)"; fi ;;
-    agent_lost) agent_failed "$t" reviewer agent_lost ;;
+    agent_lost) agent_failed "$t" reviewer "agent_lost $(sed -n 's/^agent_screen=//p' <<<"$OUT")" ;;
     *) hold "$t" "Reviewer 상태 $res — 확인 필요" ;;
   esac
   return 0

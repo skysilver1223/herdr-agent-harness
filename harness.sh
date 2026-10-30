@@ -9,6 +9,9 @@
 # 이 파일은 진입점이다. 기능은 옆 lib/*.sh에 나뉘어 있다. init이 이 파일과 lib/를 프로젝트의
 # .harness/bin/으로 복사하므로, 프로젝트는 bash·git·herdr만 있으면 설치 없이 동작한다.
 set -Eeuo pipefail
+# $( ) 안에서도 set -e를 유지한다. 없으면 $( ) 속 함수가 다시 $( )를 부를 때 안쪽의 거부(die)가
+# 빈 값으로 바뀌어 게이트가 통과해 버린다(2.1.0 검토에서 실제로 재현됨). bash 4.4 이상.
+shopt -s inherit_errexit
 
 HARNESS_BIN="$(readlink -f "${BASH_SOURCE[0]}")"
 HARNESS_HOME="$(dirname "$HARNESS_BIN")"
@@ -28,7 +31,7 @@ herdr-harness — Herdr에서 여러 에이전트를 증빙·교차 검토로 �
 프로젝트 (저장소의 harness.sh로):
   init DIR --goal TEXT [--name N] [--profile generic|python-timeseries|network-device]
            [--orchestrator P] [--worker P] [--reviewer P] [--fallback P,P]
-           [--approval-mode ask|auto|bypass] [--code-dir DIR]
+           [--approval-mode ask|auto|bypass] [--code-dir DIR] [--review-level cross_provider|cross_model|same_model]
   upgrade DIR...                    프로젝트의 bin·Skill을 이 버전으로 (프로젝트 안에서는 인수 없이)
 
 프로젝트 안에서 (.harness/bin/harness.sh, 다른 위치면 -C DIR):
@@ -37,6 +40,9 @@ herdr-harness — Herdr에서 여러 에이전트를 증빙·교차 검토로 �
   run MILESTONE [--in-pane] [--max-minutes N]      사람 결정이 필요할 때까지 자동 진행
   approve MILESTONE --confirm-user-approval        Milestone 완료 승인 → 보관·태그
   reject TASK --reason "사유" --confirm-user-approval  승인 대기 결과 반려 → 사유를 받아 재작업
+  review-level [LEVEL] [--task TASK] [--fallback none|cross_model|same_model] --reason "사유" [--confirm-user-approval]
+                                                 검토 수준 예외·자동 하향 허용(낮추기·허용은 사용자 결정)
+  provider list | off PROVIDER --reason "사유" | on PROVIDER          쿼터 소진·정책 등으로 못 쓰는 에이전트 표시
   prune MILESTONE                                  보관함을 요약만 남기고 정리 (원본은 git 태그)
 
 한 단계씩 (run이 내부에서 쓰는 명령):
@@ -87,6 +93,8 @@ main() {
     run) cmd_run "$@" ;;
     approve) cmd_approve "$@" ;;
     reject) cmd_reject "$@" ;;
+    review-level) cmd_review_level "$@" ;;
+    provider) cmd_provider "$@" ;;
     prune) cmd_prune "$@" ;;
     transition) cmd_transition "$@" ;;
     dispatch) cmd_dispatch "$@" ;;

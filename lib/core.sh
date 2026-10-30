@@ -1,12 +1,14 @@
 # herdr-harness: 공통 함수 — 출력·임시 파일·Secret 검사·설정 읽기·경로·Acceptance Criteria.
 # harness.sh가 source한다. 단독 실행하지 않는다.
 
-HARNESS_VERSION="2.0.0"
+HARNESS_VERSION="2.1.0"
+shopt -s inherit_errexit 2>/dev/null || true   # harness.sh를 거치지 않고 source해도 같은 규칙(테스트 등)
 ROOT=""
 TMP_FILES=()
 
 trap 'rm -f -- ${TMP_FILES[@]+"${TMP_FILES[@]}"}' EXIT
 # die는 3으로 끝난다. 그 밖의 예상하지 못한 실패는 어느 줄인지 남겨 조용히 끝나지 않게 한다.
+# 주의: set -E라 이 trap은 프로세스 치환 <(…) 안에도 상속된다. 거기 넣는 명령은 실패해도 되면 || true를 붙인다.
 on_err() { [[ "$1" -eq 3 ]] || printf 'harness: %s:%s 에서 실패 (exit %s)\n' "${3##*/}" "$2" "$1" >&2; }
 trap 'on_err "$?" "$LINENO" "${BASH_SOURCE[0]:-}"' ERR
 
@@ -96,8 +98,8 @@ ylist() {  # FILE KEY → 'KEY: [a, b]' 항목을 한 줄씩. 블록 목록(- a)
 pget() {  # SECTION KEY [DEFAULT] → project.yaml의 'SECTION:' 아래 '  KEY: 값'
   local v
   v="$(awk -v s="$1:" -v k="  $2:" '
-    { sub(/\r$/, "") }
-    $0 == s { inside = 1; next }
+    { sub(/\r$/, ""); h = $0; sub(/[ \t]+#.*$/, "", h); sub(/[ \t]+$/, "", h) }
+    h == s { inside = 1; next }
     /^[^[:space:]#]/ { inside = 0 }
     inside && index($0, k) == 1 { print substr($0, length(k) + 1); exit }
   ' "$ROOT/.harness/project.yaml")"
@@ -122,9 +124,164 @@ set_field() {  # TASK_FILE KEY VALUE — 최상위 키 한 줄만 원자적으�
   mv -f -- "$tmp" "$tf"
 }
 
+upsert_field() {  # TASK_FILE KEY VALUE — 있으면 바꾸고 없으면 끝에 덧붙인다
+  if grep -q "^$2:" "$1"; then set_field "$1" "$2" "$3"; return 0; fi
+  [[ -z "$(tail -c1 "$1")" ]] || printf '\n' >>"$1"
+  printf '%s: %s\n' "$2" "$3" >>"$1"
+}
+
+pset() {  # SECTION KEY VALUE — project.yaml의 'SECTION:' 아래 '  KEY: VALUE'를 바꾸거나 추가한다
+  local f="$ROOT/.harness/project.yaml" tmp
+  tmp="$(mktemp "$(dirname "$f")/.harness-tmp.XXXXXX")"
+  TMP_FILES+=("$tmp")
+  awk -v s="$1:" -v k="$2" -v v="$3" '
+    { sub(/\r$/, ""); h = $0; sub(/[ \t]+#.*$/, "", h); sub(/[ \t]+$/, "", h) }
+    h == s { print; inside = 1; seen = 1; next }
+    inside && /^[^[:space:]#]/ { if (!done) { print "  " k ": " v; done = 1 } inside = 0 }
+    inside && index($0, "  " k ":") == 1 { if (!done) { print "  " k ": " v; done = 1 } next }
+    { print }
+    END { if (inside && !done) print "  " k ": " v; if (!seen) { print ""; print s; print "  " k ": " v } }
+  ' "$f" >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f -- "$tmp" "$f"
+}
+
+# --------------------------------------------------------------------------
+# 검토 수준 — 결과는 Worker와 독립된 Reviewer가 판정한다. 기본은 다른 회사(cross_provider).
+# 한 회사만 쓸 수 있는 환경(회사 정책·쿼터 소진)을 위한 예외가 cross_model·same_model이며,
+# 기본보다 낮추려면 결정 기록(review-level 명령 또는 review.fallback_level 자동 하향)이 있어야 한다.
+# --------------------------------------------------------------------------
+level_rank() { case "$1" in cross_provider) echo 3 ;; cross_model) echo 2 ;; same_model) echo 1 ;; *) echo 0 ;; esac; }
+valid_level() { case "$1" in cross_provider|cross_model|same_model) return 0 ;; *) return 1 ;; esac; }
+level_name() {
+  case "$1" in
+    cross_provider) echo '다른 회사' ;; cross_model) echo '같은 회사·다른 모델' ;; same_model) echo '같은 모델·별도 세션' ;; *) echo "$1" ;;
+  esac
+}
+
+actual_level() {  # WORKER_PROVIDER WORKER_MODEL REVIEWER_PROVIDER REVIEWER_MODEL → 실제로 성립한 검토 수준
+  local wm="${2:-Provider 기본값}" rm="${4:-Provider 기본값}"
+  if [[ "$1" != "$3" ]]; then echo cross_provider
+  elif [[ "$wm" != "Provider 기본값" && "$rm" != "Provider 기본값" && "$wm" != "$rm" ]]; then echo cross_model
+  else echo same_model; fi
+}
+
+latest_level_record() {  # TASK|"" → 최신 검토 수준 결정 기록 (Task 단위 또는 프로젝트 단위)
+  local prefix k
+  if [[ -n "$1" ]]; then prefix="$1-review-level-"; else prefix="review-level-"; fi
+  k="$(last_n "$ROOT/.harness/decisions" "$prefix" .md)"
+  (( k == 0 )) || printf '%s/.harness/decisions/%s%s.md' "$ROOT" "$prefix" "$k"
+}
+
+# 결정 기록이 기준이다. Task의 review_level 줄은 기록을 비춘 것일 뿐이라, 줄을 지우거나 바꿔도 낮아지지 않는다.
+# 또 계획 승인 때 기록한 수준보다 낮아지려면 그 승인 이후의 결정 기록(Task 또는 프로젝트)이 있어야 한다.
+required_level() {  # TASK → 이 Task에 필요한 검토 수준
+  local tf lv rec field plv
+  tf="$(task_file "$1")"
+  field="$(yget "$tf" review_level)"
+  rec="$(latest_level_record "$1")"
+  if [[ -n "$rec" ]]; then
+    lv="$(rec_get "$rec" 수준)"
+    valid_level "$lv" || die "$(rel "$rec")의 수준 값이 올바르지 않습니다: $lv"
+    [[ -z "$field" || "$field" == "$lv" ]] ||
+      die "$1의 review_level($field)이 결정 기록($(rel "$rec"): $lv)과 다릅니다. 검토 수준은 review-level 명령으로만 바꾼다."
+  elif [[ -n "$field" ]]; then
+    die "$1의 검토 수준($field)에 결정 기록이 없습니다. 사용자 결정은 review-level 명령으로 남긴다."
+  else
+    lv="$(project_level)" || exit 3
+  fi
+  plv="$(plan_cell "$1" '검토 수준')"
+  if valid_level "$plv" && (( $(level_rank "$lv") < $(level_rank "$plv") )); then
+    newer_level_record "$1" "$plv" || lv="$plv"
+  fi
+  valid_level "$lv" || die "$1의 검토 수준을 정할 수 없습니다 (${lv:-빈 값})."
+  printf '%s' "$lv"
+}
+
+# 계획 승인 이후에 새 검토 수준 결정 기록이 생겼는가. 승인 표의 "수준 근거"(승인 당시 기록 번호)와
+# 비교하므로 시계와 무관하다. 그 열이 없는 이전 형식 표는 승인 시각과 비교한다(같은 초는 이후로 보지 않음).
+newer_level_record() {  # TASK PLAN_LEVEL
+  local cell tn pn t pt r bt bp k
+  cell="$(plan_cell "$1" '수준 근거')"
+  tn="$(last_n "$ROOT/.harness/decisions" "$1-review-level-" .md)"
+  pn="$(last_n "$ROOT/.harness/decisions" "review-level-" .md)"
+  if [[ "$cell" =~ ^task:([0-9]+)\ project:([0-9]+)$ ]]; then
+    bt=$((10#${BASH_REMATCH[1]})); bp=$((10#${BASH_REMATCH[2]}))
+    (( tn <= bt )) || return 0                 # 승인 뒤의 Task 결정
+    (( bt == 0 )) || return 1                  # 승인 때 Task 결정이 근거였다면 프로젝트 기록으로는 풀리지 않는다
+    for (( k = bp + 1; k <= pn; k++ )); do     # 승인 뒤 프로젝트 수준을 실제로 승인 수준 아래로 낮춘 기록만
+      r="$ROOT/.harness/decisions/review-level-$k.md"
+      (( $(level_rank "$(rec_get "$r" 수준)") < $(level_rank "${2:-cross_provider}") )) && return 0
+    done
+    return 1
+  fi
+  pt="$(sed -n 's/^승인 시각: //p' "$(plan_file "$(yget "$(task_file "$1")" milestone_id)")" 2>/dev/null | head -n 1)"
+  for r in "$(latest_level_record "$1")" "$(latest_level_record "")"; do
+    [[ -n "$r" ]] || continue
+    t="$(rec_get "$r" 시각)"
+    [[ -n "$t" && "$t" > "${pt:-}" ]] && return 0
+  done
+  return 1
+}
+
+# 다른 회사가 없을 때 자동으로 낮출 수 있는 최저 수준. none이 아니면 사용자가 남긴 결정 기록이 있어야
+# 유효하다(설정 한 줄만 고쳐 자동 하향을 켜는 경로를 막는다). 기록이 없으면 none으로 본다.
+recorded_level() {  # TASK|"" → 결정 기록만으로 본 현재 수준 (Task 기록 > 프로젝트 기록 > 다른 회사)
+  local r lv
+  if [[ -n "$1" ]]; then r="$(latest_level_record "$1")"; [[ -z "$r" ]] || { lv="$(rec_get "$r" 수준)"; valid_level "$lv" && { printf '%s' "$lv"; return 0; }; }; fi
+  r="$(latest_level_record "")"
+  [[ -z "$r" ]] || { lv="$(rec_get "$r" 수준)"; valid_level "$lv" && { printf '%s' "$lv"; return 0; }; }
+  printf cross_provider
+}
+
+fallback_level() {
+  local fb rec
+  fb="$(pget review fallback_level none)"
+  if [[ "$fb" != none ]]; then
+    rec="$(latest_level_record "")"
+    valid_level "$fb" && [[ -n "$rec" && "$(rec_get "$rec" '자동 하향 허용')" == "$fb" ]] || fb=none
+  fi
+  printf '%s' "$fb"
+}
+
+project_level() {  # → 프로젝트 기본 검토 수준 (다른 회사보다 낮으면 결정 기록 필수)
+  local lv rec
+  lv="$(pget review level cross_provider)"
+  valid_level "$lv" || die "project.yaml review.level 값이 올바르지 않습니다: $lv"
+  if [[ "$lv" != cross_provider ]]; then
+    rec="$(latest_level_record "")"
+    [[ -n "$rec" && "$(rec_get "$rec" 수준)" == "$lv" ]] ||
+      die "project.yaml review.level($lv)에 결정 기록이 없습니다. review-level 명령으로 사용자 결정을 남긴다."
+  fi
+  printf '%s' "$lv"
+}
+
 # --------------------------------------------------------------------------
 # Provider — herdr agent start --kind 이름. 기본 3종 외에는 project.yaml에 추가한다.
+# 쿼터 소진 등으로 잠시 못 쓰는 Provider는 runtime/providers.off에 표시한다(provider off|on).
 # --------------------------------------------------------------------------
+off_file() { printf '%s/.harness/runtime/providers.off' "$ROOT"; }
+provider_off() { [[ -f "$(off_file)" ]] && awk -F'\t' -v p="$1" '$1 == p { f = 1 } END { exit !f }' "$(off_file)"; }
+provider_off_reason() { [[ -f "$(off_file)" ]] || return 0; awk -F'\t' -v p="$1" '$1 == p { r = $4 } END { print r }' "$(off_file)"; }
+provider_off_source() { [[ -f "$(off_file)" ]] || return 0; awk -F'\t' -v p="$1" '$1 == p { r = $3 } END { print r }' "$(off_file)"; }
+mark_provider_off() {  # PROVIDER REASON SOURCE(user|auto)
+  local src="${3:-user}"
+  if provider_off "$1"; then
+    # 자동 표시를 사용자가 다시 표시하면 사용자 결정으로 바꾼다(그때부터 교체 규칙을 묻지 않는다).
+    [[ "$src" == user && "$(provider_off_source "$1")" != user ]] || return 0
+    unmark_provider "$1"
+  fi
+  mkdir -p "$ROOT/.harness/runtime"
+  printf '%s\t%s\t%s\t%s\n' "$1" "$(now)" "$src" "${2//$'\t'/ }" >>"$(off_file)"
+}
+unmark_provider() {  # PROVIDER
+  local tmp
+  [[ -f "$(off_file)" ]] || return 0
+  tmp="$(mktemp "$ROOT/.harness/runtime/.harness-tmp.XXXXXX")"
+  TMP_FILES+=("$tmp")
+  awk -F'\t' -v p="$1" '$1 != p' "$(off_file)" >"$tmp"
+  mv -f -- "$tmp" "$(off_file)"
+}
 providers() {
   local list=""
   [[ -z "$ROOT" ]] || list="$(pget providers available)"
@@ -269,7 +426,7 @@ ac_load() {  # TASK_FILE → AC_ID·AC_TYPE·AC_CMD, 형식 문제는 AC_ERR (di
       *) AC_ERR="$id: verified_by.type을 알 수 없습니다 (${type:-없음}; command | manual-review)" ;;
     esac
     AC_ID+=("$id"); AC_TYPE+=("$type"); AC_CMD+=("$cmd")
-  done < <(ac_entries "$1")
+  done < <(ac_entries "$1" || true)
   if (( ${#AC_ID[@]} == 0 )); then AC_ERR="${AC_ERR:-acceptance_criteria가 비어 있습니다}"
   elif (( commands == 0 )); then AC_ERR="${AC_ERR:-type: command인 AC가 하나 이상 필요합니다 (증빙 없는 제출 금지)}"
   fi

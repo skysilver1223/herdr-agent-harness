@@ -29,6 +29,8 @@ Worker를 띄우지 않는다. 계획 승인 전에는 아무것도 실행되지
    | premium | 설계 판단·보안 경계·상태 전이·원인 추적 |
 
    - Reviewer는 기본 standard로 둔다. premium Worker라고 Reviewer를 반드시 올릴 필요는 없다.
+   - 사용자가 특정 모델을 지정하면 등급 대신 `worker_model`·`reviewer_model`에 적는다. premium·매핑에 없는 모델은 계획 승인에 포함된다.
+   - **한 회사만 쓰는 프로젝트**(`review.level`이 cross_model)는 Worker와 Reviewer에 서로 다른 모델을 배정한다(예: Worker sonnet, Reviewer opus). 같은 모델이면 계획 승인이 거부된다.
    - premium은 쿼터를 크게 쓴다. 꼭 필요한 Task에만 제안한다.
 5. 병렬성을 점검한다. 의존이 없고 범위가 겹치지 않는 Task는 동시에 돈다(최대 `max_parallel_workers`).
 6. 계획에 넣은 BACKLOG 항목은 `[x] … — milestone-00N`으로 옮긴다.

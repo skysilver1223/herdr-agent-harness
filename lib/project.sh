@@ -27,6 +27,7 @@ render_file() {  # FILE — R_* 값으로 @@…@@를 치환한다 (치환 문자
   content="${content//@@APPROVAL_MODE@@/"$R_MODE"}"
   content="${content//@@SOURCE_YAML@@/"$(yaml_q "$HARNESS_HOME")"}"
   content="${content//@@CODE_DIR_YAML@@/"$(yaml_q "$R_CODE")"}"
+  content="${content//@@REVIEW_LEVEL@@/"${R_LEVEL:-cross_provider}"}"
   printf '%s' "$content" >"$1"
 }
 
@@ -48,7 +49,7 @@ install_bin() {  # ROOT — 실행 파일 일체를 .harness/bin/으로 (예전 
 
 cmd_init() {
   local target="${1:-}" p f
-  R_NAME="" R_GOAL="" R_PROFILE=generic R_ORCH=claude R_WORKER=codex R_REVIEWER=agy R_FALLBACK=claude R_MODE=auto R_CODE=.
+  R_NAME="" R_GOAL="" R_PROFILE=generic R_ORCH=claude R_WORKER=codex R_REVIEWER=agy R_FALLBACK=claude R_MODE=auto R_CODE=. R_LEVEL=cross_provider
   [[ -n "$target" && "$target" != -* ]] || die "사용법: init DIR --goal TEXT [옵션] (help 참고)"
   shift
   while (( $# )); do
@@ -57,6 +58,7 @@ cmd_init() {
       --name) R_NAME="$2" ;; --goal) R_GOAL="$2" ;; --profile) R_PROFILE="$2" ;;
       --orchestrator) R_ORCH="$2" ;; --worker) R_WORKER="$2" ;; --reviewer) R_REVIEWER="$2" ;;
       --fallback) R_FALLBACK="$2" ;; --approval-mode) R_MODE="$2" ;; --code-dir) R_CODE="$2" ;;
+      --review-level) R_LEVEL="$2" ;;
       *) die "알 수 없는 init 옵션: $1" ;;
     esac
     shift 2
@@ -75,14 +77,20 @@ cmd_init() {
   [[ "$R_CODE" != *$'\n'* ]] || die "--code-dir에 개행을 넣을 수 없습니다."
   profile_focus "$R_PROFILE" >/dev/null || die "지원하지 않는 profile: $R_PROFILE"
   for p in "$R_ORCH" "$R_WORKER" "$R_REVIEWER" ${R_FALLBACK//,/ }; do is_provider "$p" || die "지원하지 않는 Provider: $p"; done
-  [[ "$R_WORKER" != "$R_REVIEWER" ]] || die "Worker와 Reviewer는 다른 Provider여야 합니다 (교차 검토)."
+  valid_level "$R_LEVEL" || die "--review-level은 cross_provider | cross_model | same_model"
+  [[ "$R_WORKER" != "$R_REVIEWER" || "$R_LEVEL" != cross_provider ]] ||
+    die "Worker와 Reviewer가 같은 Provider입니다. 다른 회사 검토가 기본이며, 한 회사만 쓰는 환경이면 --review-level cross_model(다른 모델) 또는 same_model을 지정한다."
   case "$R_MODE" in ask|auto|bypass) ;; *) die "--approval-mode는 ask | auto | bypass" ;; esac
 
   mkdir -p "$target"
   cp -R "$TEMPLATE_DIR/." "$target/"
-  while IFS= read -r -d '' f; do render_file "$f"; done < <(grep -rlZ '@@' "$target")
+  while IFS= read -r -d '' f; do render_file "$f"; done < <(grep -rlZ '@@' "$target" || true)
   link_skills "$target"
   install_bin "$target"
+  if [[ "$R_LEVEL" != cross_provider ]]; then
+    ROOT="$target"
+    record_level "" "$R_LEVEL" cross_provider "init 때 사용자가 지정 (--review-level $R_LEVEL, Worker $R_WORKER / Reviewer $R_REVIEWER)" "사용자 (init)"
+  fi
 
   if command -v git >/dev/null 2>&1; then
     git -C "$target" init -q
@@ -106,6 +114,7 @@ upgrade_one() {  # DIR — 저장소의 harness.sh로 실행된다
   R_NAME="$(pget project name)" R_GOAL="$(pget project goal)" R_PROFILE="$(pget project profile generic)"
   R_ORCH="$(pget providers orchestrator)" R_WORKER="$(pget providers primary_worker)" R_REVIEWER="$(pget providers reviewer)"
   R_FALLBACK="$(pget providers fallback_chain | tr -d '[] ')" R_MODE="$(pget agents approval_mode auto)" R_CODE="$(pget workspace code_dir .)"
+  R_LEVEL="$(pget review level cross_provider)"
   for d in "$TEMPLATE_DIR"/.agents/skills/*/; do
     d="$(basename "$d")"
     mkdir -p "$ROOT/.agents/skills/$d"

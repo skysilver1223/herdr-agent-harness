@@ -61,6 +61,10 @@ write_packet() {  # TASK ROLE N ATTEMPT CWD BASE OUT EXTRA → Secret 의심이�
       printf -- '- Worker 보고서: %s\n' "$(att_report "$task" "$att")"
       printf -- '- Harness 증빙 기록: %s\n' "$att_rec"
       printf -- '- 변경 확인: git -C %s diff %s %s\n' "$cwd" "$(rec_get "$att_rec" '기준 commit')" "${verified:-}"
+      if [[ "$(rec_get "$att_rec" Provider)" == "$(yget "$tf" reviewer)" ]]; then
+        printf -- '- 같은 회사 검토(%s): Worker와 판단 습관이 비슷할 수 있다. 의심되는 부분은 판단보다 명령을 실행해 확인한다.\n' \
+          "$(level_name "$(required_level "$task")")"
+      fi
     fi
     printf -- '- 다뤄야 할 AC: %s\n' "${ids:-(없음)}"
     [[ -z "$intent" ]] || printf -- '- Intent (Not·Invariants·Open Questions 정본): %s/%s\n' "$ROOT" "$intent"

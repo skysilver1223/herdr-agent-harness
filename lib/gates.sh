@@ -43,11 +43,19 @@ plan_check() {  # TASK → 승인된 계획과 AC가 같은지
     die "$1의 Acceptance Criteria가 계획 승인 이후 바뀌었습니다. 바뀐 계약은 사용자가 approve-plan으로 다시 승인한다."
 }
 
-plan_tier() {  # TASK ROLE → 승인된 등급 (표의 Worker 등급·Reviewer 등급 열)
-  local col=5
-  [[ "$2" == worker ]] || col=6
-  plan_row "$1" | awk -F'|' -v c="$col" '{ gsub(/[[:space:]]/, "", $c); print $c }'
+plan_cell() {  # TASK 열이름 → 계획 승인 표에서 그 Task 행의 값 (열은 머리줄 이름으로 찾는다)
+  local m f
+  m="$(yget "$(task_file "$1")" milestone_id)"
+  f="$(plan_file "$m")"
+  [[ -f "$f" ]] || return 0
+  awk -F'|' -v t="$1" -v c="$2" '
+    /^\| Task \|/ { for (i = 2; i < NF; i++) { h = $i; gsub(/^[ \t]+|[ \t]+$/, "", h); idx[h] = i } next }
+    { id = $2; gsub(/^[ \t]+|[ \t]+$/, "", id) }
+    id == t && (c in idx) { v = $(idx[c]); gsub(/^[ \t]+|[ \t]+$/, "", v); print v; exit }
+  ' "$f"
 }
+plan_tier()  { plan_cell "$1" "$( [[ "$2" == worker ]] && echo 'Worker 등급' || echo 'Reviewer 등급')"; }
+plan_model() { plan_cell "$1" "$( [[ "$2" == worker ]] && echo 'Worker 모델' || echo 'Reviewer 모델')"; }
 
 # --------------------------------------------------------------------------
 # AC 실행 — Task 작업 공간에서(원격 모드면 원격에서) 직접 실행하고 표를 기록에 붙인다.
@@ -224,7 +232,10 @@ gate_reviewing() {
   local task="$1" tf="$2" w r
   plan_check "$task"
   w="$(yget "$tf" primary_worker)"; r="$(yget "$tf" reviewer)"
-  [[ "$w" != "$r" ]] || die "Worker와 Reviewer가 같은 Provider($w)입니다. 교차 검토가 성립하지 않습니다."
+  local req
+  req="$(required_level "$task")"   # $( ) 안의 die는 삼켜지므로 먼저 받아 실패가 전파되게 한다
+  [[ "$w" != "$r" || "$req" != cross_provider ]] ||
+    die "Worker와 Reviewer가 같은 Provider($w)입니다. 다른 회사 검토가 기본이며, 예외(회사 정책·쿼터 소진)는 review-level 명령(사용자 결정)으로만 허용한다."
   ac_passed "$(att_record "$task" "$(last_attempt "$task")")" || die "최신 attempt에 AC 통과 증빙이 없습니다."
 }
 
@@ -279,7 +290,7 @@ integrate() {  # TASK RECORD
 }
 
 gate_review() {  # changes_requested·awaiting_approval 공통: dispatch된 최신 Review가 근거다
-  local task="$1" tf="$2" to="$3" r n file record verdict target rp wp missing start
+  local task="$1" tf="$2" to="$3" r n file record verdict target rp wp missing start req act
   r="$(last_review "$task")"
   (( r > 0 )) || die "dispatch된 Review가 없습니다. Reviewer는 dispatch로만 기동한다."
   file="$(rev_file "$task" "$r")"; record="$(rev_record "$task" "$r")"
@@ -308,8 +319,14 @@ gate_review() {  # changes_requested·awaiting_approval 공통: dispatch된 최�
   [[ "$(rec_get "$record" '검토 대상')" == "attempt $n "* ]] ||
     die "review $r는 attempt $n 대상으로 dispatch되지 않았습니다 (Harness 기록: $(rec_get "$record" '검토 대상')). Reviewer를 다시 dispatch한다."
   plan_check "$task"
+  # 검토 독립성: 실제 기록(Provider·모델)로 판정한다. 다른 회사가 기본, 예외는 결정 기록이 있는 수준까지만.
   rp="$(rec_get "$record" Provider)"; wp="$(rec_get "$(att_record "$task" "$n")" Provider)"
-  [[ -n "$rp" && -n "$wp" && "$rp" != "$wp" ]] || die "교차 검토가 아닙니다: Reviewer=${rp:-?}, Worker=${wp:-?}"
+  [[ -n "$rp" && -n "$wp" ]] || die "검토 기록에 Provider가 없습니다."
+  req="$(required_level "$task")"
+  act="$(actual_level "$wp" "$(rec_get "$(att_record "$task" "$n")" 모델)" "$rp" "$(rec_get "$record" 모델)")"
+  (( $(level_rank "$act") >= $(level_rank "$req") )) ||
+    die "검토 독립성이 부족합니다: 실제 $(level_name "$act") < 필요 $(level_name "$req") (Worker $wp, Reviewer $rp)"
+  [[ "$(rec_last "$record" '검토 수준')" == "$act (필요: $req)" ]] || printf -- '- 검토 수준: %s (필요: %s)\n' "$act" "$req" >>"$record"
   ac_load "$tf"
   missing="$(missing_ids "$file" ${AC_ID[@]+"${AC_ID[@]}"})"
   [[ -z "$missing" ]] || die "Review가 다음 AC의 증빙 대조를 빠뜨렸습니다: $missing"
@@ -372,7 +389,7 @@ need_confirm() {
 }
 
 cmd_approve_plan() {
-  local m="${1:-}" id tf w r wt rt rows="" tasks=()
+  local m="${1:-}" id tf w r wt rt wm rm_ mm req planned basis rows="" tasks=()
   [[ -n "$m" ]] || die "사용법: approve-plan MILESTONE --confirm-user-approval"
   need_id "$m"; shift; need_confirm "$@"
   require_human approve-plan
@@ -386,21 +403,30 @@ cmd_approve_plan() {
     [[ -f "$ROOT/$(yget "$tf" intent)" ]] || die "$id: intent 파일이 없습니다."
     ylist "$tf" write_scope >/dev/null; ylist "$tf" dependencies >/dev/null
     w="$(yget "$tf" primary_worker)"; r="$(yget "$tf" reviewer)"
-    is_provider "$w" && is_provider "$r" && [[ "$w" != "$r" ]] || die "$id: Worker/Reviewer 배정 오류 ($w / $r)"
+    is_provider "$w" && is_provider "$r" || die "$id: Worker/Reviewer 배정 오류 ($w / $r)"
     wt="$(task_tier "$tf" worker)"; rt="$(task_tier "$tf" reviewer)"
-    rows+="| $id | $w | $r | $wt | $rt | $(ac_hash "$tf") |"$'\n'
+    wm="$(task_model "$tf" worker "$w")"; rm_="$(task_model "$tf" reviewer "$r")"
+    for mm in "$wm" "$rm_"; do
+      [[ -z "$mm" || "$mm" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@-]*$ ]] || die "$id: 모델 이름 형식이 올바르지 않습니다: $mm"
+    done
+    req="$(required_level "$id")"
+    planned="$(actual_level "$w" "$wm" "$r" "$rm_")"
+    (( $(level_rank "$planned") >= $(level_rank "$req") )) ||
+      die "$id: 계획된 검토 수준($(level_name "$planned"): $w/${wm:-Provider 기본값} → $r/${rm_:-Provider 기본값})이 필요 수준($(level_name "$req"))보다 낮습니다. 다른 회사 Reviewer를 쓰거나, 같은 회사면 Reviewer 모델을 다르게(reviewer_model·reviewer_tier) 지정한다."
+    basis="task:$(last_n "$ROOT/.harness/decisions" "$id-review-level-" .md) project:$(last_n "$ROOT/.harness/decisions" "review-level-" .md)"
+    rows+="| $id | $w | $r | $wt | $rt | ${wm:-Provider 기본값} | ${rm_:-Provider 기본값} | $req | $basis | $(ac_hash "$tf") |"$'\n'
   done
   write_atomic "$(plan_file "$m")" <<EOF
 # 계획 승인: $m
 
-이 파일은 approve-plan만 쓴다. 등급·AC가 이 표와 달라지면 진행이 막힌다.
+이 파일은 approve-plan만 쓴다. AC가 이 표와 달라지거나, 비싼 모델(premium·매핑에 없는 모델)이 이 표와 다르면 진행이 막힌다.
 
 승인: yes
 승인 시각: $(now)
 명시 확인: --confirm-user-approval
 
-| Task | Worker | Reviewer | Worker 등급 | Reviewer 등급 | AC 지문 |
-|---|---|---|---|---|---|
+| Task | Worker | Reviewer | Worker 등급 | Reviewer 등급 | Worker 모델 | Reviewer 모델 | 검토 수준 | 수준 근거 | AC 지문 |
+|---|---|---|---|---|---|---|---|---|---|
 $rows
 EOF
   for id in "${tasks[@]}"; do
@@ -411,7 +437,7 @@ EOF
 }
 
 cmd_approve() {
-  local m="${1:-}" id tf st r rows="" tasks=() problems=""
+  local m="${1:-}" id tf st r lv rq rows="" tasks=() problems=""
   [[ -n "$m" ]] || die "사용법: approve MILESTONE --confirm-user-approval"
   need_id "$m"; shift; need_confirm "$@"
   require_human approve
@@ -422,7 +448,10 @@ cmd_approve() {
     if [[ "$st" != awaiting_approval ]]; then problems+="$id($st) "; continue; fi
     [[ "$(review_verdict "$(rev_file "$id" "$r")")" == APPROVED ]] || problems+="$id(Review) "
     ! worktree_enabled || grep -q '^- 통합: OK' "$(rev_record "$id" "$r")" || problems+="$id(통합) "
-    rows+="| $id | .harness/reviews/$id-review-$r.md | $(rec_get "$(att_record "$id" "$(last_attempt "$id")")" Provider) | $(rec_get "$(rev_record "$id" "$r")" Provider) |"$'\n'
+    lv="$(review_level_of "$id" "$r")"
+    rq="$(required_level "$id")"
+    (( $(level_rank "${lv:-x}") >= $(level_rank "$rq") )) || problems+="$id(검토 수준 $(level_name "${lv:-없음}") < 필요 $(level_name "$rq")) "
+    rows+="| $id | .harness/reviews/$id-review-$r.md | $(rec_get "$(att_record "$id" "$(last_attempt "$id")")" Provider) | $(rec_get "$(rev_record "$id" "$r")" Provider) | ${lv:-?} |"$'\n'
   done
   [[ -z "$problems" ]] || die "아직 승인할 수 없는 Task가 있습니다: $problems"
   write_atomic "$ROOT/.harness/decisions/$m-approval.md" <<EOF
@@ -433,12 +462,81 @@ cmd_approve() {
 코드 commit: $(git -C "$(code_dir)" rev-parse HEAD 2>/dev/null || echo '-')
 명시 확인: --confirm-user-approval
 
-| Task | 근거 Review | Worker | Reviewer |
-|---|---|---|---|
+| Task | 근거 Review | Worker | Reviewer | 검토 수준 |
+|---|---|---|---|---|
 $rows
 EOF
   for id in "${tasks[@]}"; do do_transition "$id" completed; done
   archive_milestone "$m" "${tasks[@]}"
+}
+
+# 검토 수준 결정 기록. 사용자 결정(review-level 명령)과 자동 하향(review.fallback_level)이 같은 형식으로 남는다.
+record_level() {  # TASK|"" LEVEL PREVIOUS REASON DECIDER [FALLBACK]
+  local prefix k fb="" fbline=""
+  if [[ -n "$1" ]]; then prefix="$1-review-level-"
+  else prefix="review-level-"; fb="${6:-$(fallback_level)}"; fbline=$'\n'"- 자동 하향 허용: $fb"; fi
+  k=$(( $(last_n "$ROOT/.harness/decisions" "$prefix" .md) + 1 ))
+  write_atomic "$ROOT/.harness/decisions/$prefix$k.md" <<EOF
+# 검토 수준 결정: ${1:-프로젝트} #$k
+
+- 수준: $2
+- 이전: $3${fbline}
+- 범위: ${1:-project}
+- 결정: $5
+- 시각: $(now)
+
+## 사유
+
+$4
+EOF
+  if [[ -n "$1" ]]; then upsert_field "$(task_file "$1")" review_level "$2"
+  else pset review level "'$2'"; pset review fallback_level "'$fb'"; fi
+}
+
+# 한 회사만 쓸 수 있는 환경(회사 정책·쿼터 소진)을 위한 예외. 낮추는 것과 자동 하향을 허용하는 것은 사용자 결정이다.
+#   review-level LEVEL [--task T]           검토 수준 (Task 단위 또는 프로젝트)
+#   review-level [LEVEL] --fallback FB       다른 회사가 없을 때 자동으로 낮출 수 있는 최저 수준 (프로젝트만)
+cmd_review_level() {
+  local lv="" task="" reason="" confirm=0 cur fb="" curfb loosen=0
+  if valid_level "${1:-}"; then lv="$1"; shift; fi
+  while (( $# )); do
+    case "$1" in
+      --task) task="${2:-}"; need_id "$task"; shift 2 ;;
+      --fallback) [[ "${2:-}" =~ ^(none|cross_model|same_model)$ ]] || die "--fallback은 none | cross_model | same_model"; fb="$2"; shift 2 ;;
+      --reason) [[ -n "${2:-}" ]] || die "--reason에 사유가 필요합니다."; reason="$2"; shift 2 ;;
+      --confirm-user-approval) confirm=1; shift ;;
+      *) die "알 수 없는 review-level 옵션: $1" ;;
+    esac
+  done
+  [[ -n "$lv" || -n "$fb" ]] ||
+    die "사용법: review-level [cross_provider|cross_model|same_model] [--task TASK] [--fallback none|cross_model|same_model] --reason \"사유\" [--confirm-user-approval]"
+  [[ -z "$task" || -z "$fb" ]] || die "--fallback은 프로젝트 단위 설정이라 --task와 함께 쓸 수 없습니다."
+  [[ -n "$reason" ]] || die "--reason \"사유\"가 필요합니다 (결정 기록에 남는다)."
+  ! has_secret <<<"$reason" || die "사유에 Secret 의심 패턴이 있습니다."
+  require_human review-level
+  # 현재 수준은 결정 기록에서 읽는다: 설정 줄이 손으로 바뀌어 다른 명령이 막힌 상태도 이 명령으로 바로잡는다.
+  cur="$(recorded_level "$task")"
+  curfb="$(fallback_level)"
+  lv="${lv:-$cur}"; fb="${fb:-$curfb}"
+  if [[ "$fb" != none ]] && { [[ "$curfb" == none ]] || (( $(level_rank "$fb") < $(level_rank "$curfb") )); }; then loosen=1; fi
+  if (( $(level_rank "$lv") < $(level_rank "$cur") || loosen )); then
+    (( confirm )) || die "검토 수준을 낮추거나 자동 하향을 허용하는 것은 사용자 결정입니다. 사용자가 명시했을 때만 --confirm-user-approval과 함께 호출한다."
+  fi
+  record_level "$task" "$lv" "$cur" "$reason" "사용자$( ((confirm)) && echo ' (--confirm-user-approval)')" "$fb"
+  commit_harness "검토 수준 ${task:-프로젝트}: $cur → $lv$( [[ -n "$task" ]] || echo ", 자동 하향 $curfb → $fb")"
+  info "검토 수준 ${task:-프로젝트}: $(level_name "$cur") → $(level_name "$lv")$( [[ -n "$task" ]] || echo " · 자동 하향 허용: $(level_name "$curfb") → $(level_name "$fb")") (결정 기록: $(rel "$(latest_level_record "$task")"))"
+}
+
+review_level_of() {  # TASK [REVIEW_N] → 그 리뷰의 실제 검토 수준 (기록 줄이 없으면 Provider·모델 기록으로 계산)
+  local r rr ar lv
+  r="${2:-$(last_review "$1")}"; rr="$(rev_record "$1" "$r")"
+  lv="$(rec_last "$rr" '검토 수준' | cut -d' ' -f1)"
+  if [[ -z "$lv" && -f "$rr" ]]; then
+    ar="$(att_record "$1" "$(rec_get "$rr" '검토 대상' | sed -n 's/^attempt \([0-9]*\).*/\1/p')")"
+    [[ -f "$ar" ]] || ar="$(att_record "$1" "$(last_attempt "$1")")"
+    lv="$(actual_level "$(rec_get "$ar" Provider)" "$(rec_get "$ar" 모델)" "$(rec_get "$rr" Provider)" "$(rec_get "$rr" 모델)")"
+  fi
+  printf '%s' "$lv"
 }
 
 latest_rejection() {  # TASK → 최신 사용자 반려 기록 경로 (없으면 빈 값)
@@ -495,13 +593,13 @@ archive_milestone() {
   mkdir -p "$dst/tasks" "$dst/intents" "$dst/attempts" "$dst/reviews" "$dst/handovers" "$dst/decisions"
   for id in "$@"; do
     n="$(last_attempt "$id")"; attempts=$((attempts + n))
-    rows+="| $id | $(yget "$ROOT/.harness/tasks/$id.yaml" title) | $(yget "$ROOT/.harness/tasks/$id.yaml" primary_worker) | $(yget "$ROOT/.harness/tasks/$id.yaml" reviewer) | $n | $(rec_last "$(att_record "$id" "$n")" 'AC 요약' | cut -d' ' -f1) | $(review_verdict "$(rev_file "$id" "$(last_review "$id")")") |"$'\n'
+    rows+="| $id | $(yget "$ROOT/.harness/tasks/$id.yaml" title) | $(yget "$ROOT/.harness/tasks/$id.yaml" primary_worker) | $(yget "$ROOT/.harness/tasks/$id.yaml" reviewer) | $n | $(rec_last "$(att_record "$id" "$n")" 'AC 요약' | cut -d' ' -f1) | $(review_verdict "$(rev_file "$id" "$(last_review "$id")")") | $(review_level_of "$id") |"$'\n'
     f="$(yget "$ROOT/.harness/tasks/$id.yaml" intent)"
     [[ -z "$f" || ! -f "$ROOT/$f" ]] || mv -- "$ROOT/$f" "$dst/intents/"
     mv -- "$ROOT/.harness/tasks/$id.yaml" "$dst/tasks/"
     for f in "$ROOT"/.harness/attempts/"$id"-attempt-* "$ROOT"/.harness/reviews/"$id"-review-* \
              "$ROOT"/.harness/handovers/"$id"-handover-* "$ROOT"/.harness/decisions/"$id"-decision-* \
-             "$ROOT"/.harness/decisions/"$id"-rejection-*; do
+             "$ROOT"/.harness/decisions/"$id"-rejection-* "$ROOT"/.harness/decisions/"$id"-review-level-*; do
       [[ -e "$f" ]] || continue
       mv -- "$f" "$dst/${f#"$ROOT/.harness/"}"
     done
@@ -518,7 +616,7 @@ archive_milestone() {
   {
     printf '# Milestone 요약: %s\n\n- 승인: %s\n- 코드 commit: %s\n- 태그: %s (상세 원본은 이 태그로 복원)\n- 시도 합계: %s\n\n' \
       "$m" "$(now)" "$(git -C "$(code_dir)" rev-parse HEAD 2>/dev/null || echo -)" "$tag" "$attempts"
-    printf '| Task | 제목 | Worker | Reviewer | 시도 | 최종 AC | Review |\n|---|---|---|---|---|---|---|\n%s\n' "$rows"
+    printf '| Task | 제목 | Worker | Reviewer | 시도 | 최종 AC | Review | 검토 수준 |\n|---|---|---|---|---|---|---|---|\n%s\n' "$rows"
     printf '## 지표\n\n'
     metrics_table "$dst"
   } >"$dst/SUMMARY.md"

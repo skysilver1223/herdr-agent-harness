@@ -59,6 +59,7 @@ Herdr 첫 Pane에서 Orchestrator 에이전트(기본 claude)를 실행하고 `A
 | 완료·배포 | `approve <milestone> --confirm-user-approval` — 완료 처리, 보관, git 태그 |
 | 반려 | `reject <task> --reason "사유" --confirm-user-approval` — 사유를 기록하고 수정 요청으로. 다음 Worker·Reviewer가 사유를 받고, 재작업 상한은 새로 센다 |
 | 에이전트 교체 | 기본은 사용자 승인. `project.yaml`의 `failover`에 규칙(`auto`)이 있으면 그대로 자동 교체 |
+| 검토 수준 낮추기 | `review-level <수준> --reason "사유" --confirm-user-approval` — 한 회사만 쓸 수 있는 예외 (아래) |
 
 ## 신뢰성 — 스크립트가 강제하는 것
 
@@ -66,13 +67,44 @@ Herdr 첫 Pane에서 Orchestrator 에이전트(기본 claude)를 실행하고 `A
 |---|---|
 | 착수 | 계획 승인 이후 AC가 바뀌지 않았고, 선행 Task가 통합됐고, 동시 Worker가 상한(기본 5) 이하이며, 통합 전 Task와 `write_scope`가 겹치지 않음 |
 | 제출 | 아래를 모두 충족하면 하네스가 AC 명령을 Task 작업 공간에서 직접 실행하고 결과표를 Git 기록에 남긴 뒤 commit합니다 (하나라도 실패하면 거부):<br>· 정상 실행 기록이 있음<br>· Worker가 작업을 마침<br>· 보고서가 이번 실행 이후 작성됐고 모든 AC를 다룸 |
-| 검토 | Reviewer가 Worker와 다른 Provider이고, 최신 시도에 AC 통과 증빙이 있음 |
-| 승인 대기 | dispatch된 최신 Review가 아래를 모두 충족한 뒤, 통합 상태에서 AC를 다시 돌려 본 브랜치에 반영합니다:<br>· APPROVED<br>· 최신 시도 대상<br>· 다른 Provider<br>· 모든 AC 대조 |
+| 검토 | 같은 Provider 배정이면 검토 수준 예외(결정 기록)가 있어야 하고, 최신 시도에 AC 통과 증빙이 있음. 실제 독립성(Provider·모델)은 Reviewer dispatch와 승인 대기에서 판정 |
+| 승인 대기 | dispatch된 최신 Review가 아래를 모두 충족한 뒤, 통합 상태에서 AC를 다시 돌려 본 브랜치에 반영합니다:<br>· APPROVED<br>· 최신 시도 대상<br>· 실제 Provider·모델 기록으로 판정한 검토 수준이 필요 수준 이상<br>· 모든 AC 대조 |
 | 완료 | Milestone 승인 기록이 그 Task와 최신 Review를 가리킴 |
 
 - 하네스가 띄운 에이전트 Pane에는 표식이 심깁니다. 그 Pane에서 상태 변경이나 승인을 시도하면 거부합니다.
 - 지시서에 Secret 의심 패턴이 있으면 보내지 않습니다.
 - 이 장치들은 가드레일이지 보안 경계가 아닙니다. 에이전트는 사용자와 같은 권한으로 돕니다.
+
+## 한 회사만 쓸 수 있을 때 (예외)
+
+기본은 다른 회사 에이전트의 교차 검토입니다. 회사 정책상 claude만 쓰거나, 다른 에이전트의 쿼터를 다 쓴 경우를 위해 검토 수준을 3단계로 둡니다.
+
+| 수준 | 의미 |
+|---|---|
+| `cross_provider` (기본) | 다른 회사 에이전트가 검토 |
+| `cross_model` | 같은 회사, **다른 모델**이 별도 세션으로 검토 (예: Worker sonnet, Reviewer opus) |
+| `same_model` | 같은 모델, 별도 세션으로만 검토 |
+
+**회사 정책 (상시):**
+```bash
+harness.sh init DIR --goal "..." --worker claude --reviewer claude --review-level cross_model --fallback claude
+```
+- 계속 유지할 제한은 `providers.available: [claude]`처럼 `project.yaml`(커밋됨)에 둡니다. `provider off`는 이 PC의 런타임에만 남는 일시 표시입니다.
+- `project.yaml`에 `models.claude_standard: 'sonnet'`, `models.claude_premium: 'opus'`처럼 모델을 매핑하고, Reviewer 등급(또는 `reviewer_model`)을 Worker와 다르게 둡니다.
+- 같은 모델이면 계획 승인이 거부됩니다.
+
+**쿼터 소진 (일시):**
+- 쿼터 소진이 감지되면 그 에이전트를 사용 불가로 자동 표시합니다. `provider off|on`으로 직접 표시하거나 해제할 수도 있습니다.
+- 다른 회사 검토자를 구할 수 없을 때 `review.fallback_level`(기본 `none` = 멈추고 묻기)에 정한 수준까지만 자동으로 낮추고, 결정 기록을 남깁니다.
+- 자동 하향을 켜는 것도 사용자 결정입니다: `review-level --fallback cross_model --reason "..." --confirm-user-approval`. 설정 줄만 고치면 무시됩니다.
+
+**프롬프트 창에서 말로:** Orchestrator에게 "회사 작업이라 claude만 써", "codex 쿼터 다 썼어", "task-003 Reviewer는 opus로"라고 말하면, Orchestrator가 위 명령으로 반영합니다(harness-orchestrate Skill의 표).
+
+**지켜지는 원칙**
+- 기본보다 낮추는 것은 사용자 결정이나 미리 정한 규칙만 가능하고, 결정 기록(`decisions/review-level-*.md`)이 없으면 진행이 막힙니다.
+- Task의 `review_level` 줄을 지우거나 고쳐도 낮아지지 않습니다. 결정 기록이 기준이고, 계획 승인 때의 수준보다 낮아지려면 그 뒤의 결정 기록이 있어야 합니다.
+- 낮아진 검토 수준은 Review 기록, `status`의 승인 대기 표시, Milestone 요약에 그대로 드러납니다.
+- 하네스의 AC 실행 증빙, 통합 후 재검증, 사용자 완료 승인은 어떤 수준에서도 그대로입니다.
 
 ## 병렬 작업과 작업 공간
 
@@ -98,6 +130,8 @@ Herdr 첫 Pane에서 Orchestrator 에이전트(기본 claude)를 실행하고 `A
 | `approve-plan <m>` / `approve <m>` / `reject <task> --reason ...` | 사용자 결정 기록 (`--confirm-user-approval` 필수) |
 | `prune <m>` | 보관함을 요약만 남기고 정리 (원본은 git 태그 `<m>-approved`) |
 | `models [--refresh]` | 등급별 모델 매핑. `--refresh`는 agy·codex의 실제 모델 목록과 대조 |
+| `review-level [수준] [--task T] [--fallback 수준] --reason ...` | 검토 수준 예외·자동 하향 허용. 낮추기·허용은 `--confirm-user-approval` 필수 |
+| `provider list` / `provider off <p> --reason ...` / `provider on <p>` | 쿼터 소진·정책 등으로 못 쓰는 에이전트 표시 |
 | `quota-check TASK [ROLE]` / `quota-check --provider agy` | 쿼터 확인 |
 | `transition` `dispatch` `observe` `close` | 한 단계씩 진행 (run이 내부에서 사용) |
 | `remote <하위 명령>` | 원격 모드 (아래) |
@@ -127,6 +161,8 @@ models:
 | premium | 설계 판단·보안·상태 전이·원인 추적 |
 
 - 계획 담당 에이전트가 Task마다 등급을 근거와 함께 제안합니다.
+- 특정 모델이 필요하면 Task에 `worker_model`·`reviewer_model`을 직접 적습니다(등급보다 우선). premium 매핑 모델이나 매핑에 없는 모델은 계획 승인 표에 적힌 경우에만 쓰입니다.
+- Worker·Reviewer 화면에서 직접 `/model`로 바꾸지 마세요. 증빙 기록과 실제 모델이 어긋납니다.
 - premium은 계획 승인 때 사용자가 함께 승인한 Task만 실행됩니다.
 - 에이전트가 비정상으로 멈췄을 때(막힘·사라짐·보고서 없음) 화면에 한도 소진 문구가 있으면 쿼터 소진으로 봅니다. 교체 규칙이 있으면 예비 에이전트로 넘기고, 없으면 그 Task를 멈춥니다.
 - 정상으로 끝난 작업 화면의 `429`·rate limit 문구(테스트 출력 등)는 무시합니다.
@@ -149,6 +185,7 @@ models:
 ```
 
 - 원격 모드가 켜지면 AC 검증도 원격에서 실행됩니다.
+- 원격 명령(ssh)은 호출한 쪽의 표준 입력을 읽지 않습니다(`-n`). 반복문 안에서 불러도 다음 입력을 먹지 않습니다. v1은 이 결함 때문에 원격 모드에서 첫 번째 AC만 실행됐습니다.
 - 비밀번호는 파일에 저장하지 않습니다. 키 등록 때 한 번만 `HH_REMOTE_PASSWORD`로 넘깁니다.
 - 설정 정본은 `.harness/remote.yaml`입니다.
 

@@ -118,7 +118,9 @@ _remote_require_password_tool() {
 }
 
 _remote_ssh() {
-  local -a opts=(-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=3) tty=()
+  # 대화형 셸(--tty)이 아니면 -n: ssh가 호출한 쪽의 표준 입력을 먹지 않게 한다. 반복문 안에서 부르면
+  # 남은 입력(다음 AC 등)을 삼켜 첫 명령만 실행되는 결함이 v1에서 실제로 있었다.
+  local -a opts=(-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=3) tty=(-n)
   if [[ "${1:-}" == --tty ]]; then tty=(-t); shift; fi
   if [[ "$(_remote_auth_mode)" == key ]]; then
     ssh ${tty[@]+"${tty[@]}"} "${opts[@]}" -i "$REMOTE_SSH_KEY" "$REMOTE_TARGET" "$@"
@@ -163,7 +165,7 @@ remote_bootstrap_key() {
     info "SSH 키 생성: $REMOTE_SSH_KEY"
   fi
   key="$(base64 -w 0 <"${REMOTE_SSH_KEY}.pub")"
-  SSHPASS="$password" sshpass -e ssh -o StrictHostKeyChecking=accept-new "$REMOTE_TARGET" \
+  SSHPASS="$password" sshpass -e ssh -n -o StrictHostKeyChecking=accept-new "$REMOTE_TARGET" \
     "key=\$(printf '%s' '$key' | base64 -d); umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -qxF \"\$key\" ~/.ssh/authorized_keys || printf '%s\\n' \"\$key\" >> ~/.ssh/authorized_keys"
   info "SSH 키 등록 완료. 이후에는 HH_REMOTE_PASSWORD 없이 접속한다 — 환경변수를 지운다."
 }
