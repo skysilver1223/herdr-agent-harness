@@ -1,0 +1,443 @@
+# herdr-harness: 상태 전이와 게이트 — 계획 승인, 증빙(AC 실행), 교차 검토, 통합, Milestone 승인.
+# harness.sh가 source한다. 단독 실행하지 않는다.
+
+TRANSITIONS=" draft>ready ready>active active>submitted active>blocked active>handover_required blocked>active submitted>reviewing reviewing>changes_requested reviewing>awaiting_approval changes_requested>ready handover_required>ready awaiting_approval>completed "
+
+# 상태를 바꾸는 명령은 Harness가 띄운 Agent 안에서 실행할 수 없다. dispatch가 Pane에
+# HARNESS_AGENT를 심고, herdr pane current --current(터미널 기준)도 대조한다.
+# 같은 사용자 권한의 Agent는 이 파일도 고칠 수 있으므로 가드레일이지 보안 경계는 아니다.
+require_human() {
+  local pane="" m
+  [[ -z "${HARNESS_AGENT:-}" ]] ||
+    die "$1은(는) Harness가 띄운 Agent($HARNESS_AGENT) 안에서 실행할 수 없습니다. 상태 결정은 사람·Orchestrator가 한다."
+  if command -v herdr >/dev/null 2>&1; then pane="$(jfield "$(herdr pane current --current 2>/dev/null || true)" pane_id)"; fi
+  [[ -n "$pane" ]] || return 0
+  for m in "$ROOT"/.harness/runtime/*.meta; do
+    [[ -f "$m" ]] && ! grep -q '^closed=' "$m" || continue
+    [[ "$(meta_get "$m" pane)" != "$pane" ]] ||
+      die "$1은(는) Harness가 띄운 Agent Pane($pane)에서 실행할 수 없습니다."
+  done
+  return 0
+}
+
+# --------------------------------------------------------------------------
+# 계획 승인 스냅숏 — 사용자가 승인한 Task·등급·AC 지문. 이후 AC가 바뀌면 진행을 막는다
+# (우회 모드 Agent가 command를 true로 바꿔 가짜 PASS를 만드는 경로를 닫는다).
+# --------------------------------------------------------------------------
+plan_file() { printf '%s/.harness/decisions/%s-plan-approval.md' "$ROOT" "$1"; }
+
+plan_row() {  # TASK → 승인 표의 그 Task 행 (없으면 빈 값)
+  local m f
+  m="$(yget "$(task_file "$1")" milestone_id)"
+  f="$(plan_file "$m")"
+  [[ -f "$f" ]] || return 0
+  grep -m1 "^| $1 |" "$f" || true
+}
+
+plan_check() {  # TASK → 승인된 계획과 AC가 같은지
+  local row tf
+  tf="$(task_file "$1")"
+  row="$(plan_row "$1")"
+  [[ -n "$row" ]] || die "$1이(가) 계획 승인에 없습니다. approve-plan $(yget "$tf" milestone_id) --confirm-user-approval"
+  [[ "$row" == *"| $(ac_hash "$tf") |"* ]] ||
+    die "$1의 Acceptance Criteria가 계획 승인 이후 바뀌었습니다. 바뀐 계약은 사용자가 approve-plan으로 다시 승인한다."
+}
+
+plan_tier() {  # TASK ROLE → 승인된 등급 (표의 Worker 등급·Reviewer 등급 열)
+  local col=5
+  [[ "$2" == worker ]] || col=6
+  plan_row "$1" | awk -F'|' -v c="$col" '{ gsub(/[[:space:]]/, "", $c); print $c }'
+}
+
+# --------------------------------------------------------------------------
+# AC 실행 — Task 작업 공간에서(원격 모드면 원격에서) 직접 실행하고 표를 기록에 붙인다.
+# 같은 명령은 한 번만 실행한다. 결과는 AC_RESULT(PASS|FAIL).
+# --------------------------------------------------------------------------
+run_checks() {  # TASK RECORD TITLE
+  local task="$1" record="$2" title="$3" cwd limit i id cmd out rc tail cell
+  local pass=0 fail=0 manual=0 rows="" where
+  local -A seen_rc=() seen_out=()
+  cwd="$(task_cwd "$task")"
+  limit="$(pnum limits ac_timeout_seconds 600)"
+  where="$cwd"
+  if remote_enabled; then where="원격 ($(sed -n 's/^  path:[[:space:]]*//p' "$ROOT/.harness/remote.yaml" | head -n 1))"; fi
+  for i in "${!AC_ID[@]}"; do
+    id="${AC_ID[$i]}"; cmd="${AC_CMD[$i]}"
+    if [[ "${AC_TYPE[$i]}" == manual-review ]]; then
+      manual=$((manual + 1))
+      rows+="| $id | manual-review | - | MANUAL | - | Reviewer가 직접 확인 |"$'\n'
+      continue
+    fi
+    if [[ -z "${seen_rc[$cmd]+x}" ]]; then
+      info "AC 실행: $id — $cmd"
+      rc=0
+      if remote_enabled; then
+        out="$(bash "$HARNESS_BIN" -C "$ROOT" remote run "timeout -k 10 $limit bash -c $(printf '%q' "$cmd")" 2>&1 </dev/null)" || rc=$?
+      else
+        # -k 없이는 TERM을 무시하는 명령이 전이를 영원히 붙잡는다.
+        out="$(cd "$cwd" && timeout -k 10 "$limit" bash -c "$cmd" 2>&1 </dev/null)" || rc=$?
+      fi
+      seen_rc[$cmd]=$rc; seen_out[$cmd]="$out"
+    fi
+    rc="${seen_rc[$cmd]}"; out="${seen_out[$cmd]}"
+    if (( rc == 0 )); then pass=$((pass + 1)); else fail=$((fail + 1)); fi
+    tail="$(printf '%s' "$out" | tail -n 5 | tr '\n\r\t' '   ' | cut -c1-300)"
+    if has_secret <<<"$out"; then tail="(Secret 의심 — 원문 생략)"; fi
+    cell="${cmd//|/\\|}"; tail="${tail//|/\\|}"
+    rows+="| $id | command | $rc | $( ((rc == 0)) && echo PASS || echo FAIL ) | \`$cell\` | $tail |"$'\n'
+  done
+  AC_RESULT=PASS
+  (( fail == 0 )) || AC_RESULT=FAIL
+  {
+    printf '\n## %s %s\n\n실행 위치: %s · 명령당 제한 %s초\n\n' "$title" "$(now)" "$where" "$limit"
+    printf '| Criterion | 유형 | 종료 코드 | 결과 | 명령 | 출력 끝부분 |\n|---|---|---|---|---|---|\n%s\n' "$rows"
+    printf -- '- %s: %s (pass %s / fail %s / manual %s / 전체 %s)\n' \
+      "$( [[ "$title" == "AC 검증" ]] && echo 'AC 요약' || echo '통합 AC 요약')" \
+      "$AC_RESULT" "$pass" "$fail" "$manual" "${#AC_ID[@]}"
+  } >>"$record"
+}
+
+# --------------------------------------------------------------------------
+# 게이트
+# --------------------------------------------------------------------------
+dep_done() {  # 선행 Task가 통합까지 끝났는가 (Milestone 승인 전에도 뒤 Task가 시작할 수 있게)
+  local f="$ROOT/.harness/tasks/$1.yaml" st
+  if [[ ! -f "$f" ]]; then archived_task "$1"; return; fi
+  st="$(yget "$f" status)"
+  [[ "$st" == awaiting_approval || "$st" == completed ]]
+}
+
+gate_ready() {
+  spec_approved || die "SPEC이 승인되지 않았습니다. .harness/SPEC.md의 '- 상태: approved'는 사용자가 정한다."
+  plan_check "$1"
+}
+
+gate_active() {
+  local task="$1" tf="$2" dep other theirs mine active=0 max deps scopes_txt wt branch code
+  local -a scopes=()
+  git -C "$ROOT" rev-parse --verify -q HEAD >/dev/null || die "Git 기준 commit이 없습니다 (git add -A && git commit)."
+  plan_check "$task"
+  deps="$(ylist "$tf" dependencies)"
+  while IFS= read -r dep; do
+    [[ -z "$dep" ]] || dep_done "$dep" || die "선행 Task $dep가 아직 교차 검토·통합 전입니다."
+  done <<<"$deps"
+  scopes_txt="$(ylist "$tf" write_scope)"
+  [[ -n "$scopes_txt" ]] || die "$task의 write_scope가 비어 있습니다."
+  mapfile -t scopes <<<"$scopes_txt"
+  max="$(pnum limits max_parallel_workers 5)"
+  # 원격은 작업 공간을 분리하지 않으므로 순서대로 실행한다(검증 오염 방지).
+  if remote_enabled; then max=1; fi
+  # 상한은 active만 센다. 범위 충돌은 아직 본 브랜치에 통합되지 않은 Task 전부와 비교한다
+  # (작업 공간이 나뉘어 있어도 겹치는 범위는 통합 때 충돌한다).
+  while IFS= read -r other; do
+    [[ "$other" != "$task" ]] || continue
+    case "$(yget "$ROOT/.harness/tasks/$other.yaml" status)" in
+      active) active=$((active + 1)) ;;
+      submitted|reviewing|changes_requested|blocked|handover_required) ;;
+      *) continue ;;
+    esac
+    while IFS= read -r theirs; do
+      [[ -n "$theirs" ]] || continue
+      for mine in "${scopes[@]}"; do
+        if overlap "$mine" "$theirs"; then die "write_scope 충돌: '$mine'($task) ↔ '$theirs'($other)"; fi
+      done
+    done <<<"$(ylist "$ROOT/.harness/tasks/$other.yaml" write_scope)"
+  done < <(task_ids)
+  (( active < max )) || die "동시 Worker 상한($max)에 도달했습니다."
+
+  if worktree_enabled; then
+    wt="$ROOT/.harness/worktrees/$task"; branch="hh/$task"; code="$(code_dir)"
+    if [[ ! -d "$wt" ]]; then
+      mkdir -p "$ROOT/.harness/worktrees"
+      if git -C "$code" rev-parse --verify -q "refs/heads/$branch" >/dev/null; then
+        hcap git -C "$code" worktree add -q "$wt" "$branch"
+      else
+        hcap git -C "$code" worktree add -q -b "$branch" "$wt" HEAD
+      fi
+      (( RC == 0 )) || die "작업 공간을 만들지 못했습니다 ($wt): $OUT"
+      info "작업 공간: $(rel "$wt") (브랜치 $branch)"
+    fi
+  fi
+}
+
+worker_busy() {  # TASK → Worker Agent가 아직 working인가
+  local m name
+  m="$(meta_file "$1" worker)"
+  [[ -f "$m" ]] && ! grep -q '^closed=' "$m" || return 1
+  name="$(meta_get "$m" agent)"
+  command -v herdr >/dev/null 2>&1 || return 1
+  [[ "$(jfield "$(herdr agent get "$name" 2>/dev/null || true)" agent_status)" == working ]]
+}
+
+gate_submitted() {
+  local task="$1" tf="$2" n report record missing start cwd sha
+  ac_load "$tf"
+  [[ -z "$AC_ERR" ]] || die "$AC_ERR ($(rel "$tf"))"
+  plan_check "$task"
+  n="$(last_attempt "$task")"
+  (( n > 0 )) || die "dispatch 기록이 없습니다. Worker는 dispatch로만 기동한다."
+  report="$(att_report "$task" "$n")"; record="$(att_record "$task" "$n")"
+  ! grep -q '^- 기동 실패:' "$record" || die "attempt $n은 Agent 기동에 실패한 기록입니다. 다시 dispatch한다."
+  [[ "$(rec_last "$record" 결과)" == settled ]] || die "attempt $n의 Agent가 작업을 마친 기록(settled)이 없습니다. observe로 확인한다."
+  ! ac_passed "$record" || die "attempt $n은 이미 제출된 시도입니다. 수정은 새 dispatch로 한다."
+  ! worker_busy "$task" || die "Worker가 아직 working입니다. 끝난 뒤 제출한다."
+  [[ -s "$report" ]] || die "Worker 보고서가 없습니다: $(rel "$report")"
+  start="$(rec_get "$record" '시작(epoch)')"
+  [[ "$(stat -c %Y "$report")" -ge "${start:-0}" ]] || die "보고서가 이번 dispatch보다 먼저 작성됐습니다: $(rel "$report")"
+  missing="$(missing_ids "$report" "${AC_ID[@]}")"
+  [[ -z "$missing" ]] || die "보고서에 AC 결과가 빠졌습니다: ${missing}($(rel "$report"))"
+  run_checks "$task" "$record" "AC 검증"
+  [[ "$AC_RESULT" == PASS ]] || { commit_harness "$task attempt $n AC FAIL"; die "AC 검증 실패 — 증빙: $(rel "$record")"; }
+  # 증빙을 정확한 코드 상태에 묶는다: 작업 공간의 변경을 Task 브랜치에 commit한다.
+  if worktree_enabled; then
+    cwd="$(task_cwd "$task")"
+    git -C "$cwd" add -A -- . ':(exclude).harness' >/dev/null
+    if ! git -C "$cwd" diff --cached --quiet; then
+      hcap git -C "$cwd" commit -q -m "$task attempt $n (AC PASS)"
+      (( RC == 0 )) || die "Task 브랜치 commit 실패: $OUT"
+    fi
+    sha="$(git -C "$cwd" rev-parse HEAD)"
+    printf -- '- 검증 commit: %s (브랜치 hh/%s)\n' "$sha" "$task" >>"$record"
+  fi
+  commit_harness "$task attempt $n 제출 (AC PASS)"
+  info "AC 검증 통과 — 증빙: $(rel "$record")"
+}
+
+gate_reviewing() {
+  local task="$1" tf="$2" w r
+  w="$(yget "$tf" primary_worker)"; r="$(yget "$tf" reviewer)"
+  [[ "$w" != "$r" ]] || die "Worker와 Reviewer가 같은 Provider($w)입니다. 교차 검토가 성립하지 않습니다."
+  ac_passed "$(att_record "$task" "$(last_attempt "$task")")" || die "최신 attempt에 AC 통과 증빙이 없습니다."
+}
+
+# Task 브랜치에 본 브랜치를 합쳐 통합 상태로 AC를 다시 돌린 뒤 본 브랜치를 fast-forward한다.
+# 본 브랜치는 한 번도 검증되지 않은 상태를 거치지 않는다. 결과는 기록에 남긴다.
+integrate() {  # TASK RECORD → 0 성공, 1 충돌·실패(기록에 사유)
+  local task="$1" record="$2" code wt main
+  worktree_enabled || return 0
+  code="$(code_dir)"; wt="$ROOT/.harness/worktrees/$task"
+  main="$(git -C "$code" symbolic-ref --short HEAD 2>/dev/null)" || { printf -- '- 통합: FAIL (본 저장소가 브랜치에 있지 않음)\n' >>"$record"; return 1; }
+  [[ -d "$wt" ]] || { printf -- '- 통합: FAIL (작업 공간 없음)\n' >>"$record"; return 1; }
+  git -C "$wt" checkout -q -- .harness 2>/dev/null || true   # 작업 공간의 .harness는 사본이다
+  git -C "$wt" clean -fdq -- .harness 2>/dev/null || true
+  hcap git -C "$wt" merge --no-edit -q "$main"
+  if (( RC != 0 )); then
+    git -C "$wt" merge --abort >/dev/null 2>&1 || true
+    printf -- '- 통합: CONFLICT (%s와 충돌 — Worker가 작업 공간에서 git merge %s로 해결)\n' "$main" "$main" >>"$record"
+    return 1
+  fi
+  ac_load "$(task_file "$task")"
+  run_checks "$task" "$record" "통합 AC 검증"
+  if [[ "$AC_RESULT" != PASS ]]; then printf -- '- 통합: FAIL (통합 후 AC 실패)\n' >>"$record"; return 1; fi
+  hcap git -C "$code" merge --ff-only -q "hh/$task"
+  if (( RC != 0 )); then printf -- '- 통합: FAIL (fast-forward 불가: %s)\n' "$(head -n 1 <<<"$OUT")" >>"$record"; return 1; fi
+  printf -- '- 통합: OK %s → %s\n' "$(git -C "$code" rev-parse HEAD)" "$main" >>"$record"
+  git -C "$code" worktree remove --force "$wt" >/dev/null 2>&1 || true
+  return 0
+}
+
+gate_review() {  # changes_requested·awaiting_approval 공통: dispatch된 최신 Review가 근거다
+  local task="$1" tf="$2" to="$3" r n file record verdict target rp wp missing start
+  r="$(last_review "$task")"
+  (( r > 0 )) || die "dispatch된 Review가 없습니다. Reviewer는 dispatch로만 기동한다."
+  file="$(rev_file "$task" "$r")"; record="$(rev_record "$task" "$r")"
+  if [[ "$to" == changes_requested ]] && grep -Eq '^- 통합: (CONFLICT|FAIL)' "$record"; then return 0; fi
+  ! grep -q '^- 기동 실패:' "$record" || die "review $r는 Agent 기동에 실패한 기록입니다."
+  [[ "$(rec_last "$record" 결과)" == settled ]] || die "review $r의 Reviewer가 작업을 마친 기록(settled)이 없습니다."
+  [[ -s "$file" ]] || die "Review 파일이 없습니다: $(rel "$file")"
+  start="$(rec_get "$record" '시작(epoch)')"
+  [[ "$(stat -c %Y "$file")" -ge "${start:-0}" ]] || die "Review가 이번 dispatch보다 먼저 작성됐습니다: $(rel "$file")"
+  verdict="$(review_verdict "$file")"
+  if [[ "$to" == changes_requested ]]; then
+    [[ "$verdict" == CHANGES_REQUESTED ]] || die "최신 Review 판정이 CHANGES_REQUESTED가 아닙니다 (${verdict:-없음})."
+    commit_harness "$task review $r CHANGES_REQUESTED"
+    return 0
+  fi
+  [[ "$verdict" == APPROVED ]] || die "최신 Review 판정이 APPROVED가 아닙니다 (${verdict:-없음}): $(rel "$file")"
+  n="$(last_attempt "$task")"
+  target="$(review_target "$file")"
+  [[ "$target" == "$n" ]] || die "Review가 최신 attempt $n을 대상으로 하지 않습니다 (대상 Attempt: ${target:-없음})."
+  rp="$(rec_get "$record" Provider)"; wp="$(rec_get "$(att_record "$task" "$n")" Provider)"
+  [[ -n "$rp" && -n "$wp" && "$rp" != "$wp" ]] || die "교차 검토가 아닙니다: Reviewer=${rp:-?}, Worker=${wp:-?}"
+  ac_load "$tf"
+  missing="$(missing_ids "$file" ${AC_ID[@]+"${AC_ID[@]}"})"
+  [[ -z "$missing" ]] || die "Review가 다음 AC의 증빙 대조를 빠뜨렸습니다: $missing"
+  if ! integrate "$task" "$record"; then
+    commit_harness "$task 통합 실패"
+    die "통합 실패 — $(rec_last "$record" '통합'). changes_requested로 돌려 Worker가 해결한다."
+  fi
+  commit_harness "$task review $r APPROVED, 통합"
+}
+
+gate_completed() {
+  local task="$1" m f r
+  m="$(yget "$(task_file "$task")" milestone_id)"
+  f="$ROOT/.harness/decisions/$m-approval.md"
+  r="$(last_review "$task")"
+  [[ -f "$f" ]] && grep -qxF '승인: yes' "$f" && grep -q "^| $task | .harness/reviews/$task-review-$r.md |" "$f" ||
+    die "$task의 Milestone 승인 기록이 없습니다 (approve $m --confirm-user-approval)."
+}
+
+set_status() { set_field "$1" status "$2"; }
+
+do_transition() {
+  local task="$1" to="$2" tf from
+  tf="$(task_file "$task")"
+  from="$(yget "$tf" status)"
+  [[ "$TRANSITIONS" == *" $from>$to "* ]] || die "허용되지 않은 전이: $from -> $to ($task)"
+  case "$to" in
+    ready) gate_ready "$task" ;;
+    active) gate_active "$task" "$tf" ;;
+    submitted) gate_submitted "$task" "$tf" ;;
+    reviewing) gate_reviewing "$task" "$tf" ;;
+    changes_requested|awaiting_approval) gate_review "$task" "$tf" "$to" ;;
+    handover_required)
+      compgen -G "$ROOT/.harness/handovers/$task-handover-*.md" >/dev/null ||
+        die "인계 문서가 없습니다: .harness/handovers/$task-handover-N.md (harness-handover)" ;;
+    completed) gate_completed "$task" ;;
+  esac
+  set_status "$tf" "$to"
+  printf '%s: %s -> %s\n' "$task" "$from" "$to"
+}
+
+cmd_transition() {
+  [[ $# -eq 2 ]] || die "사용법: transition TASK STATE"
+  require_human transition
+  do_transition "$1" "$2"
+}
+
+# --------------------------------------------------------------------------
+# 사용자 결정 — 계획 승인과 Milestone 완료 승인. 사용자가 채팅에서 명시했을 때만
+# Orchestrator가 --confirm-user-approval과 함께 부른다.
+# --------------------------------------------------------------------------
+need_confirm() {
+  local a
+  for a in "$@"; do [[ "$a" != --confirm-user-approval ]] || return 0; done
+  die "사용자가 명시적으로 승인했을 때만 --confirm-user-approval과 함께 호출한다."
+}
+
+cmd_approve_plan() {
+  local m="${1:-}" id tf w r wt rt rows="" tasks=()
+  [[ -n "$m" ]] || die "사용법: approve-plan MILESTONE --confirm-user-approval"
+  need_id "$m"; shift; need_confirm "$@"
+  require_human approve-plan
+  spec_approved || die "SPEC이 먼저 승인돼야 합니다."
+  mapfile -t tasks < <(milestone_tasks "$m")
+  (( ${#tasks[@]} > 0 )) || die "$m에 속한 Task가 없습니다 (Task YAML의 milestone_id)."
+  for id in "${tasks[@]}"; do
+    tf="$(task_file "$id")"
+    [[ "$(yget "$tf" task_id)" == "$id" ]] || die "$id: 파일명과 task_id가 다릅니다."
+    ac_load "$tf"; [[ -z "$AC_ERR" ]] || die "$id: $AC_ERR"
+    [[ -f "$ROOT/$(yget "$tf" intent)" ]] || die "$id: intent 파일이 없습니다."
+    ylist "$tf" write_scope >/dev/null; ylist "$tf" dependencies >/dev/null
+    w="$(yget "$tf" primary_worker)"; r="$(yget "$tf" reviewer)"
+    is_provider "$w" && is_provider "$r" && [[ "$w" != "$r" ]] || die "$id: Worker/Reviewer 배정 오류 ($w / $r)"
+    wt="$(task_tier "$tf" worker)"; rt="$(task_tier "$tf" reviewer)"
+    rows+="| $id | $w | $r | $wt | $rt | $(ac_hash "$tf") |"$'\n'
+  done
+  write_atomic "$(plan_file "$m")" <<EOF
+# 계획 승인: $m
+
+이 파일은 approve-plan만 쓴다. 등급·AC가 이 표와 달라지면 진행이 막힌다.
+
+승인: yes
+승인 시각: $(now)
+명시 확인: --confirm-user-approval
+
+| Task | Worker | Reviewer | Worker 등급 | Reviewer 등급 | AC 지문 |
+|---|---|---|---|---|---|
+$rows
+EOF
+  for id in "${tasks[@]}"; do
+    [[ "$(yget "$(task_file "$id")" status)" != draft ]] || do_transition "$id" ready
+  done
+  commit_harness "$m 계획 승인"
+  info "계획 승인 기록: $(rel "$(plan_file "$m")")"
+}
+
+cmd_approve() {
+  local m="${1:-}" id tf st r rows="" tasks=() problems=""
+  [[ -n "$m" ]] || die "사용법: approve MILESTONE --confirm-user-approval"
+  need_id "$m"; shift; need_confirm "$@"
+  require_human approve
+  mapfile -t tasks < <(milestone_tasks "$m")
+  (( ${#tasks[@]} > 0 )) || die "$m에 속한 Task가 없습니다."
+  for id in "${tasks[@]}"; do
+    tf="$(task_file "$id")"; st="$(yget "$tf" status)"; r="$(last_review "$id")"
+    if [[ "$st" != awaiting_approval ]]; then problems+="$id($st) "; continue; fi
+    [[ "$(review_verdict "$(rev_file "$id" "$r")")" == APPROVED ]] || problems+="$id(Review) "
+    ! worktree_enabled || grep -q '^- 통합: OK' "$(rev_record "$id" "$r")" || problems+="$id(통합) "
+    rows+="| $id | .harness/reviews/$id-review-$r.md | $(rec_get "$(att_record "$id" "$(last_attempt "$id")")" Provider) | $(rec_get "$(rev_record "$id" "$r")" Provider) |"$'\n'
+  done
+  [[ -z "$problems" ]] || die "아직 승인할 수 없는 Task가 있습니다: $problems"
+  write_atomic "$ROOT/.harness/decisions/$m-approval.md" <<EOF
+# Milestone 완료 승인: $m
+
+승인: yes
+승인 시각: $(now)
+코드 commit: $(git -C "$(code_dir)" rev-parse HEAD 2>/dev/null || echo '-')
+명시 확인: --confirm-user-approval
+
+| Task | 근거 Review | Worker | Reviewer |
+|---|---|---|---|
+$rows
+EOF
+  for id in "${tasks[@]}"; do do_transition "$id" completed; done
+  archive_milestone "$m" "${tasks[@]}"
+}
+
+# 승인된 Milestone을 보관함으로 옮긴다. 진행 중인 것만 앞에 남겨 지시서·상태 확인이
+# 작업 기간과 무관하게 가볍게 유지된다. 원본은 git 태그로 언제든 되살릴 수 있다.
+archive_milestone() {
+  local m="$1" dst id f tag code attempts=0 n rows=""
+  shift
+  dst="$ROOT/.harness/archive/$m"
+  mkdir -p "$dst/tasks" "$dst/intents" "$dst/attempts" "$dst/reviews" "$dst/handovers" "$dst/decisions"
+  for id in "$@"; do
+    n="$(last_attempt "$id")"; attempts=$((attempts + n))
+    rows+="| $id | $(yget "$ROOT/.harness/tasks/$id.yaml" title) | $(yget "$ROOT/.harness/tasks/$id.yaml" primary_worker) | $(yget "$ROOT/.harness/tasks/$id.yaml" reviewer) | $n | $(rec_last "$(att_record "$id" "$n")" 'AC 요약' | cut -d' ' -f1) | $(review_verdict "$(rev_file "$id" "$(last_review "$id")")") |"$'\n'
+    f="$(yget "$ROOT/.harness/tasks/$id.yaml" intent)"
+    [[ -z "$f" || ! -f "$ROOT/$f" ]] || mv -- "$ROOT/$f" "$dst/intents/"
+    mv -- "$ROOT/.harness/tasks/$id.yaml" "$dst/tasks/"
+    for f in "$ROOT"/.harness/attempts/"$id"-attempt-* "$ROOT"/.harness/reviews/"$id"-review-* \
+             "$ROOT"/.harness/handovers/"$id"-handover-* "$ROOT"/.harness/decisions/"$id"-*; do
+      [[ -e "$f" ]] || continue
+      mv -- "$f" "$dst/${f#"$ROOT/.harness/"}"
+    done
+    rm -f -- "$ROOT"/.harness/runtime/"$id"-*
+    code="$(code_dir)"
+    git -C "$code" branch -d "hh/$id" >/dev/null 2>&1 || true
+  done
+  for f in "$(plan_file "$m")" "$ROOT/.harness/decisions/$m-approval.md"; do
+    [[ ! -f "$f" ]] || mv -- "$f" "$dst/decisions/"
+  done
+  find "$dst" -type d -empty -delete
+  tag="$m-approved"
+  {
+    printf '# Milestone 요약: %s\n\n- 승인: %s\n- 코드 commit: %s\n- 태그: %s (상세 원본은 이 태그로 복원)\n- 시도 합계: %s\n\n' \
+      "$m" "$(now)" "$(git -C "$(code_dir)" rev-parse HEAD 2>/dev/null || echo -)" "$tag" "$attempts"
+    printf '| Task | 제목 | Worker | Reviewer | 시도 | 최종 AC | Review |\n|---|---|---|---|---|---|---|\n%s\n' "$rows"
+    printf '## 지표\n\n'
+    metrics_table "$dst"
+  } >"$dst/SUMMARY.md"
+  [[ -f "$ROOT/.harness/HISTORY.md" ]] || printf '# 완료 이력\n\n| 날짜 | Milestone | Task | 시도 합계 | 태그 |\n|---|---|---|---|---|\n' >"$ROOT/.harness/HISTORY.md"
+  printf '| %s | %s | %s개 | %s | %s |\n' "$(date +%F)" "$m" "$#" "$attempts" "$tag" >>"$ROOT/.harness/HISTORY.md"
+  commit_harness "$m 완료 승인·보관"
+  if git -C "$ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    git -C "$ROOT" tag -f "$tag" >/dev/null 2>&1 || warn "태그 생성 실패: $tag"
+  fi
+  info "$m 보관 완료: $(rel "$dst") · 태그 $tag"
+}
+
+# 오래된 보관함의 상세 파일을 지우고 요약만 남긴다. 원본은 태그에 남아 있다.
+cmd_prune() {
+  local m="${1:-}" dst
+  [[ -n "$m" ]] || die "사용법: prune MILESTONE  (요약만 남기고 상세 파일 삭제, 원본은 태그 $m-approved)"
+  need_id "$m"; require_human prune
+  dst="$ROOT/.harness/archive/$m"
+  [[ -f "$dst/SUMMARY.md" ]] || die "보관된 Milestone이 아닙니다: $m"
+  git -C "$ROOT" rev-parse --verify -q "refs/tags/$m-approved" >/dev/null || die "태그 $m-approved가 없어 삭제하지 않습니다."
+  find "$dst" -mindepth 1 -maxdepth 1 ! -name SUMMARY.md -exec rm -rf -- {} +
+  commit_harness "$m 보관함 정리 (원본: 태그 $m-approved)"
+  info "$m: SUMMARY.md만 남겼습니다. 원본 확인: git show $m-approved:.harness/archive/$m/"
+}

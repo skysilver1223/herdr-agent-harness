@@ -1,0 +1,11 @@
+schema_version: '1.0'
+remote:
+  # 원격 실행 모드. remote setup이 이 파일을 채우고 enabled: true로 바꾼다.
+  # Agent는 로컬에서 실행된다. 원격은 소스를 SSHFS로 노출하고 빌드·테스트·VCS만 SSH로 실행한다.
+  enabled: false
+  host: ''
+  user: ''
+  path: ''
+  mount_path: ''
+  ssh_key: '~/.ssh/herdr_remote_ed25519'
+  vcs: 'git'

@@ -1,0 +1,69 @@
+schema_version: '2'
+# upgrade가 최신 bin·Skill을 가져올 Harness 저장소
+harness_source: @@SOURCE_YAML@@
+
+project:
+  name: @@NAME_YAML@@
+  goal: @@GOAL_YAML@@
+  profile: '@@PROFILE@@'
+
+providers:
+  orchestrator: '@@ORCHESTRATOR@@'
+  primary_worker: '@@WORKER@@'
+  reviewer: '@@REVIEWER@@'
+  # 교체 순서. 자동 교체(failover: auto)와 사람의 교체 판단 모두 이 순서를 따른다.
+  fallback_chain: [@@FALLBACK@@]
+  # 쓸 수 있는 에이전트 = herdr agent start --kind 이름. 추가하면 아래 agents·models에 인수를 둔다.
+  available: [claude, codex, agy]
+
+workspace:
+  # 수정 대상 코드 저장소. 기본은 이 프로젝트 자체. 원격 모드에서는 remote.yaml의 마운트 경로를 쓴다.
+  code_dir: @@CODE_DIR_YAML@@
+
+isolation:
+  # Task마다 git worktree(.harness/worktrees/T, 브랜치 hh/T)에서 작업한다. 병렬 Worker의
+  # 변경·검증이 서로 섞이지 않는다. 교차 검토를 통과하면 본 브랜치에 통합한다. 원격 모드에서는 꺼진다.
+  worktree: true
+
+agents:
+  # ask | auto | bypass — 도구 실행 승인만 바꾼다. 상태 전이와 사용자 결정은 그대로 사람 몫이다.
+  approval_mode: '@@APPROVAL_MODE@@'
+  # 모드별 Provider 인수. 비우면 내장 기본값(claude·codex·agy). 다른 에이전트는 여기에 추가한다.
+  # 예) opencode_auto: '--some-flag'   opencode_effort_flag: '--reasoning'
+  claude_auto: ''
+  claude_bypass: ''
+  codex_auto: ''
+  codex_bypass: ''
+  agy_auto: ''
+  agy_bypass: ''
+
+models:
+  # 등급 기준: light=기계적 변경 · standard=정해진 설계의 일반 구현 · premium=설계 판단·보안·원인 추적
+  # 비우면 그 Provider의 기본 모델. premium Task는 계획 승인 때 함께 승인된 것만 실행된다.
+  default_tier: 'standard'
+  # low | medium | high (비우면 지정 안 함). claude --effort, codex model_reasoning_effort로 전달.
+  default_effort: ''
+  claude_light: ''
+  claude_standard: ''
+  claude_premium: ''
+  codex_light: ''
+  codex_standard: ''
+  codex_premium: ''
+  agy_light: ''
+  agy_standard: ''
+  agy_premium: ''
+
+limits:
+  max_parallel_workers: 5   # 동시에 active인 Task 상한 (transition active가 강제)
+  max_open_tasks: 10        # completed가 아닌 Task 상한 (validate)
+  max_rework: 3             # Task당 재작업 상한. 넘으면 사용자 판단
+  ac_timeout_seconds: 600   # AC 명령 하나의 제한 시간
+  run_max_minutes: 240      # run 한 번의 최대 시간
+  quota_low_pct: 25         # quota-check가 low로 보는 남은 한도(%)
+
+failover:
+  # 사용자가 미리 정한 교체 규칙. ask = 멈추고 사용자에게 묻는다, auto = fallback_chain 순서로 자동 교체
+  # (인계 문서 자동 작성, Reviewer와 같은 Provider는 건너뛴다).
+  quota_exhausted: 'ask'
+  agent_error: 'ask'
+  max_per_task: 1

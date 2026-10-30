@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+# Harness 런타임(Pane 추적·로그·지시서)과 Task 작업 공간·원격 마운트는 커밋하지 않는다.
+.harness/runtime/
+.harness/worktrees/
+.harness/remote-mount/
+__pycache__/
+.pytest_cache/
+.venv/
+node_modules/
