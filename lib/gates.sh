@@ -125,15 +125,19 @@ gate_active() {
   [[ -n "$scopes_txt" ]] || die "$task의 write_scope가 비어 있습니다."
   mapfile -t scopes <<<"$scopes_txt"
   max="$(pnum limits max_parallel_workers 5)"
-  # 원격은 작업 공간을 분리하지 않으므로 순서대로 실행한다(검증 오염 방지).
-  if remote_enabled; then max=1; fi
+  # 작업 공간을 나누지 않는 모드(원격·worktree 꺼짐)는 통합 전 Task가 하나뿐이어야 검증이 섞이지 않는다.
+  local shared=0
+  if ! worktree_enabled; then shared=1; max=1; fi
   # 상한은 active만 센다. 범위 충돌은 아직 본 브랜치에 통합되지 않은 Task 전부와 비교한다
   # (작업 공간이 나뉘어 있어도 겹치는 범위는 통합 때 충돌한다).
   while IFS= read -r other; do
     [[ "$other" != "$task" ]] || continue
     case "$(yget "$ROOT/.harness/tasks/$other.yaml" status)" in
       active) active=$((active + 1)) ;;
-      submitted|reviewing|changes_requested|blocked|handover_required) ;;
+      submitted|reviewing|changes_requested|blocked|handover_required) (( shared == 0 )) || active=$((active + 1)) ;;
+      ready)  # 재작업 대기: 통합되지 않은 변경이 작업 공간에 남아 있다
+        (( $(last_attempt "$other") > 0 )) || continue
+        (( shared == 0 )) || active=$((active + 1)) ;;
       *) continue ;;
     esac
     while IFS= read -r theirs; do
@@ -143,7 +147,7 @@ gate_active() {
       done
     done <<<"$(ylist "$ROOT/.harness/tasks/$other.yaml" write_scope)"
   done < <(task_ids)
-  (( active < max )) || die "동시 Worker 상한($max)에 도달했습니다."
+  (( active < max )) || die "동시 Worker 상한($max)에 도달했습니다.$( ((shared)) && echo ' 작업 공간을 나누지 않는 모드(원격·worktree 꺼짐)는 Task를 하나씩 통합까지 진행한다.')"
 
   if worktree_enabled; then
     wt="$ROOT/.harness/worktrees/$task"; branch="hh/$task"; code="$(code_dir)"
@@ -194,17 +198,23 @@ gate_submitted() {
     git -C "$cwd" add -A -- . ':(exclude).harness' >/dev/null
     if ! git -C "$cwd" diff --cached --quiet; then
       hcap git -C "$cwd" commit -q -m "$task attempt $n (AC PASS)"
-      (( RC == 0 )) || die "Task 브랜치 commit 실패: $OUT"
+      if (( RC != 0 )); then
+        local why; why="$(tail -n 3 <<<"$OUT" | tr '\n' ' ' | cut -c1-300)"
+        if has_secret <<<"$why"; then why="(Secret 의심 — 생략)"; fi
+        printf -- '- AC 요약: FAIL (AC는 통과했지만 commit 실패 — hook 등: %s)\n' "$why" >>"$record"
+        commit_harness "$task attempt $n commit 실패"
+        die "AC는 통과했지만 Task 브랜치 commit이 실패했습니다(hook 등). 원인을 고친 뒤 다시 submitted: $why"
+      fi
     fi
     sha="$(git -C "$cwd" rev-parse HEAD)"
     printf -- '- 검증 commit: %s (브랜치 hh/%s)\n' "$sha" "$task" >>"$record"
   fi
-  commit_harness "$task attempt $n 제출 (AC PASS)"
   info "AC 검증 통과 — 증빙: $(rel "$record")"
 }
 
 gate_reviewing() {
   local task="$1" tf="$2" w r
+  plan_check "$task"
   w="$(yget "$tf" primary_worker)"; r="$(yget "$tf" reviewer)"
   [[ "$w" != "$r" ]] || die "Worker와 Reviewer가 같은 Provider($w)입니다. 교차 검토가 성립하지 않습니다."
   ac_passed "$(att_record "$task" "$(last_attempt "$task")")" || die "최신 attempt에 AC 통과 증빙이 없습니다."
@@ -212,25 +222,47 @@ gate_reviewing() {
 
 # Task 브랜치에 본 브랜치를 합쳐 통합 상태로 AC를 다시 돌린 뒤 본 브랜치를 fast-forward한다.
 # 본 브랜치는 한 번도 검증되지 않은 상태를 거치지 않는다. 결과는 기록에 남긴다.
-integrate() {  # TASK RECORD → 0 성공, 1 충돌·실패(기록에 사유)
-  local task="$1" record="$2" code wt main
+# 결과는 INTEG: OK | CONFLICT·FAIL(Worker가 고친다) | BLOCKED(사람이 본 저장소를 정리한다).
+integrate() {  # TASK RECORD
+  local task="$1" record="$2" code wt main verified dirty
+  INTEG=OK
   worktree_enabled || return 0
   code="$(code_dir)"; wt="$ROOT/.harness/worktrees/$task"
-  main="$(git -C "$code" symbolic-ref --short HEAD 2>/dev/null)" || { printf -- '- 통합: FAIL (본 저장소가 브랜치에 있지 않음)\n' >>"$record"; return 1; }
-  [[ -d "$wt" ]] || { printf -- '- 통합: FAIL (작업 공간 없음)\n' >>"$record"; return 1; }
-  git -C "$wt" checkout -q -- .harness 2>/dev/null || true   # 작업 공간의 .harness는 사본이다
-  git -C "$wt" clean -fdq -- .harness 2>/dev/null || true
+  integ_stop() { INTEG="$1"; printf -- '- 통합: %s (%s)\n' "$1" "$2" >>"$record"; }
+  main="$(git -C "$code" symbolic-ref --short HEAD 2>/dev/null)" || { integ_stop BLOCKED "본 저장소가 브랜치에 있지 않음"; return 0; }
+  [[ -d "$wt" ]] || { integ_stop BLOCKED "작업 공간 없음: $wt"; return 0; }
+  # 본 브랜치에는 검증된 commit만 들어간다. 검증 뒤 생긴 commit은 아무도 검증하지 않았다.
+  verified="$(rec_last "$(att_record "$task" "$(last_attempt "$task")")" '검증 commit' | cut -d' ' -f1)"
+  [[ -n "$verified" ]] || { integ_stop BLOCKED "검증 commit 기록이 없음"; return 0; }
+  # 검증 commit 이후의 commit·변경(리뷰 중 재실행 산출물 등)은 아무도 검증하지 않았다 — 기록하고 버린다.
+  if [[ "$(git -C "$wt" rev-parse HEAD)" != "$verified" ]]; then
+    git -C "$wt" merge-base --is-ancestor "$verified" HEAD 2>/dev/null ||
+      { integ_stop BLOCKED "작업 공간 HEAD가 검증 commit $verified과 이어지지 않음"; return 0; }
+    printf -- '- 검증 commit 이후 commit 버림:\n%s\n' "$(git -C "$wt" log --oneline "$verified..HEAD" | sed 's/^/    /')" >>"$record"
+  fi
+  dirty="$(git -C "$wt" status --porcelain 2>/dev/null)" || dirty=""
+  if [[ -n "$dirty" || "$(git -C "$wt" rev-parse HEAD)" != "$verified" ]]; then
+    git -C "$wt" reset -q --hard "$verified" && git -C "$wt" clean -fdq ||
+      { integ_stop BLOCKED "작업 공간을 검증 commit으로 되돌리지 못함"; return 0; }
+    [[ -z "$dirty" ]] || printf -- '- 검증 commit 이후 변경 버림 (%s건):\n%s\n' "$(wc -l <<<"$dirty")" "$(head -n 20 <<<"$dirty" | sed 's/^/    /')" >>"$record"
+  fi
+  [[ -z "$(git -C "$code" status --porcelain --untracked-files=no -- . ':(exclude).harness' 2>/dev/null)" ]] ||
+    { integ_stop BLOCKED "본 저장소($main)에 커밋되지 않은 변경이 있음"; return 0; }
   hcap git -C "$wt" merge --no-edit -q "$main"
   if (( RC != 0 )); then
     git -C "$wt" merge --abort >/dev/null 2>&1 || true
-    printf -- '- 통합: CONFLICT (%s와 충돌 — Worker가 작업 공간에서 git merge %s로 해결)\n' "$main" "$main" >>"$record"
-    return 1
+    integ_stop CONFLICT "$main와 충돌 — Worker가 작업 디렉터리에서 git merge $main로 해결"
+    return 0
   fi
   ac_load "$(task_file "$task")"
   run_checks "$task" "$record" "통합 AC 검증"
-  if [[ "$AC_RESULT" != PASS ]]; then printf -- '- 통합: FAIL (통합 후 AC 실패)\n' >>"$record"; return 1; fi
+  [[ "$AC_RESULT" == PASS ]] || { integ_stop FAIL "통합 후 AC 실패"; return 0; }
   hcap git -C "$code" merge --ff-only -q "hh/$task"
-  if (( RC != 0 )); then printf -- '- 통합: FAIL (fast-forward 불가: %s)\n' "$(head -n 1 <<<"$OUT")" >>"$record"; return 1; fi
+  if (( RC != 0 )); then
+    git -C "$wt" reset -q --hard "$verified" || true   # 다음 시도가 다시 검증 commit에서 시작하도록 merge를 되돌린다
+    integ_stop BLOCKED "fast-forward 불가: $(head -n 1 <<<"$OUT")"
+    return 0
+  fi
   printf -- '- 통합: OK %s → %s\n' "$(git -C "$code" rev-parse HEAD)" "$main" >>"$record"
   git -C "$code" worktree remove --force "$wt" >/dev/null 2>&1 || true
   return 0
@@ -241,7 +273,7 @@ gate_review() {  # changes_requested·awaiting_approval 공통: dispatch된 최�
   r="$(last_review "$task")"
   (( r > 0 )) || die "dispatch된 Review가 없습니다. Reviewer는 dispatch로만 기동한다."
   file="$(rev_file "$task" "$r")"; record="$(rev_record "$task" "$r")"
-  if [[ "$to" == changes_requested ]] && grep -Eq '^- 통합: (CONFLICT|FAIL)' "$record"; then return 0; fi
+  if [[ "$to" == changes_requested && "$(rec_last "$record" 통합)" =~ ^(CONFLICT|FAIL) ]]; then return 0; fi
   ! grep -q '^- 기동 실패:' "$record" || die "review $r는 Agent 기동에 실패한 기록입니다."
   [[ "$(rec_last "$record" 결과)" == settled ]] || die "review $r의 Reviewer가 작업을 마친 기록(settled)이 없습니다."
   [[ -s "$file" ]] || die "Review 파일이 없습니다: $(rel "$file")"
@@ -250,23 +282,28 @@ gate_review() {  # changes_requested·awaiting_approval 공통: dispatch된 최�
   verdict="$(review_verdict "$file")"
   if [[ "$to" == changes_requested ]]; then
     [[ "$verdict" == CHANGES_REQUESTED ]] || die "최신 Review 판정이 CHANGES_REQUESTED가 아닙니다 (${verdict:-없음})."
-    commit_harness "$task review $r CHANGES_REQUESTED"
     return 0
   fi
   [[ "$verdict" == APPROVED ]] || die "최신 Review 판정이 APPROVED가 아닙니다 (${verdict:-없음}): $(rel "$file")"
   n="$(last_attempt "$task")"
   target="$(review_target "$file")"
   [[ "$target" == "$n" ]] || die "Review가 최신 attempt $n을 대상으로 하지 않습니다 (대상 Attempt: ${target:-없음})."
+  [[ "$(rec_get "$record" '검토 대상')" == "attempt $n "* ]] ||
+    die "review $r는 attempt $n 대상으로 dispatch되지 않았습니다 (Harness 기록: $(rec_get "$record" '검토 대상')). Reviewer를 다시 dispatch한다."
+  plan_check "$task"
   rp="$(rec_get "$record" Provider)"; wp="$(rec_get "$(att_record "$task" "$n")" Provider)"
   [[ -n "$rp" && -n "$wp" && "$rp" != "$wp" ]] || die "교차 검토가 아닙니다: Reviewer=${rp:-?}, Worker=${wp:-?}"
   ac_load "$tf"
   missing="$(missing_ids "$file" ${AC_ID[@]+"${AC_ID[@]}"})"
   [[ -z "$missing" ]] || die "Review가 다음 AC의 증빙 대조를 빠뜨렸습니다: $missing"
-  if ! integrate "$task" "$record"; then
-    commit_harness "$task 통합 실패"
-    die "통합 실패 — $(rec_last "$record" '통합'). changes_requested로 돌려 Worker가 해결한다."
-  fi
-  commit_harness "$task review $r APPROVED, 통합"
+  integrate "$task" "$record"
+  case "$INTEG" in
+    OK) ;;
+    BLOCKED) commit_harness "$task 통합 보류"
+      die "통합 보류 — $(rec_last "$record" 통합). 사람이 본 저장소를 정리한 뒤 다시 transition $task awaiting_approval." ;;
+    *) commit_harness "$task 통합 실패"
+      die "통합 실패 — $(rec_last "$record" 통합). changes_requested로 돌려 Worker가 해결한다." ;;
+  esac
 }
 
 gate_completed() {
@@ -297,6 +334,7 @@ do_transition() {
     completed) gate_completed "$task" ;;
   esac
   set_status "$tf" "$to"
+  commit_harness "$task: $from -> $to"
   printf '%s: %s -> %s\n' "$task" "$from" "$to"
 }
 
@@ -400,11 +438,12 @@ archive_milestone() {
     [[ -z "$f" || ! -f "$ROOT/$f" ]] || mv -- "$ROOT/$f" "$dst/intents/"
     mv -- "$ROOT/.harness/tasks/$id.yaml" "$dst/tasks/"
     for f in "$ROOT"/.harness/attempts/"$id"-attempt-* "$ROOT"/.harness/reviews/"$id"-review-* \
-             "$ROOT"/.harness/handovers/"$id"-handover-* "$ROOT"/.harness/decisions/"$id"-*; do
+             "$ROOT"/.harness/handovers/"$id"-handover-* "$ROOT"/.harness/decisions/"$id"-decision-*; do
       [[ -e "$f" ]] || continue
       mv -- "$f" "$dst/${f#"$ROOT/.harness/"}"
     done
-    rm -f -- "$ROOT"/.harness/runtime/"$id"-*
+    rm -f -- "$ROOT"/.harness/runtime/"$id"-worker.* "$ROOT"/.harness/runtime/"$id"-reviewer.* \
+             "$ROOT"/.harness/runtime/"$id"-worker-[0-9]*.log "$ROOT"/.harness/runtime/"$id"-reviewer-[0-9]*.log
     code="$(code_dir)"
     git -C "$code" branch -d "hh/$id" >/dev/null 2>&1 || true
   done
@@ -422,9 +461,12 @@ archive_milestone() {
   } >"$dst/SUMMARY.md"
   [[ -f "$ROOT/.harness/HISTORY.md" ]] || printf '# 완료 이력\n\n| 날짜 | Milestone | Task | 시도 합계 | 태그 |\n|---|---|---|---|---|\n' >"$ROOT/.harness/HISTORY.md"
   printf '| %s | %s | %s개 | %s | %s |\n' "$(date +%F)" "$m" "$#" "$attempts" "$tag" >>"$ROOT/.harness/HISTORY.md"
+  rm -f -- "$ROOT/.harness/runtime/run-$m.log" "$ROOT/.harness/runtime/run-$m.result"
   commit_harness "$m 완료 승인·보관"
-  if git -C "$ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+  if git -C "$ROOT" cat-file -e "HEAD:.harness/archive/$m/SUMMARY.md" 2>/dev/null; then
     git -C "$ROOT" tag -f "$tag" >/dev/null 2>&1 || warn "태그 생성 실패: $tag"
+  else
+    warn "보관 commit이 확인되지 않아 태그를 만들지 않았습니다. 기록을 commit한 뒤 git tag $tag"
   fi
   info "$m 보관 완료: $(rel "$dst") · 태그 $tag"
 }
@@ -436,7 +478,8 @@ cmd_prune() {
   need_id "$m"; require_human prune
   dst="$ROOT/.harness/archive/$m"
   [[ -f "$dst/SUMMARY.md" ]] || die "보관된 Milestone이 아닙니다: $m"
-  git -C "$ROOT" rev-parse --verify -q "refs/tags/$m-approved" >/dev/null || die "태그 $m-approved가 없어 삭제하지 않습니다."
+  git -C "$ROOT" cat-file -e "$m-approved:.harness/archive/$m/SUMMARY.md" 2>/dev/null ||
+    die "태그 $m-approved에 보관 원본이 없어 삭제하지 않습니다."
   find "$dst" -mindepth 1 -maxdepth 1 ! -name SUMMARY.md -exec rm -rf -- {} +
   commit_harness "$m 보관함 정리 (원본: 태그 $m-approved)"
   info "$m: SUMMARY.md만 남겼습니다. 원본 확인: git show $m-approved:.harness/archive/$m/"

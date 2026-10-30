@@ -23,6 +23,7 @@ workspace:
 isolation:
   # Task마다 git worktree(.harness/worktrees/T, 브랜치 hh/T)에서 작업한다. 병렬 Worker의
   # 변경·검증이 서로 섞이지 않는다. 교차 검토를 통과하면 본 브랜치에 통합한다. 원격 모드에서는 꺼진다.
+  # 꺼져 있으면(또는 원격 모드면) 한 폴더를 함께 쓰므로 Task를 하나씩 통합까지 진행한다.
   worktree: true
 
 agents:

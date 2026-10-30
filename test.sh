@@ -79,7 +79,7 @@ cmd="${!#}"; bash -c "$cmd"
 EOF
 chmod +x "$FAKE/bin/herdr" "$FAKE/bin/ssh"
 
-export FAKE_DIR="$FAKE" FAKE_HOOK="$FAKE/hook.sh" PATH="$FAKE/bin:$PATH" HERDR_ENV=1 HARNESS_NO_SLEEP=1 HARNESS_NO_PULL=1
+export FAKE_DIR="$FAKE" FAKE_HOOK="$FAKE/hook.sh" PATH="$FAKE/bin:$PATH" HERDR_ENV=1 HARNESS_NO_SLEEP=1 HARNESS_NO_PULL=1 HARNESS_SKIP_MOUNT_CHECK=1
 export GIT_CONFIG_GLOBAL="$WORK/gitconfig" GIT_CONFIG_NOSYSTEM=1
 unset HARNESS_AGENT HERDR_PANE_ID FAKE_CURRENT_PANE
 git config --file "$GIT_CONFIG_GLOBAL" user.name tester
@@ -148,11 +148,16 @@ sed -i 's/^- 상태: draft/- 상태: approved/' "$P/.harness/SPEC.md"; commit_al
 expect_fail "확인 플래그 없는 계획 승인 거부" "confirm-user-approval" H approve-plan milestone-001
 expect_ok   "계획 승인" H approve-plan milestone-001 --confirm-user-approval
 check "draft → ready" test "$(st task-001)" = ready
+cp "$P/.harness/tasks/task-001.yaml" "$WORK/t1a.bak"
 sed -i 's|command: test -f out.txt.*|command: true|' "$P/.harness/tasks/task-001.yaml"
 expect_fail "승인 뒤 AC를 바꾸면 착수 거부" "바뀌었습니다" H transition task-001 active
-git -C "$P" checkout -q -- .harness/tasks/task-001.yaml
+cp "$WORK/t1a.bak" "$P/.harness/tasks/task-001.yaml"
 printf 'write_scope:\n  - a\n' >"$WORK/block.yaml"
 expect_fail "블록 목록 형식 거부" "블록 목록" bash -c "source '$REPO/lib/core.sh'; ylist '$WORK/block.yaml' write_scope"
+printf 'dependencies:\n  # 주석\n\n  - task-001\n' >"$WORK/block2.yaml"
+expect_fail "주석 뒤 블록 목록도 거부 (의존성 누락 방지)" "블록 목록" bash -c "source '$REPO/lib/core.sh'; ylist '$WORK/block2.yaml' dependencies"
+printf 'dependencies:\n  # 주석만\n\n' >"$WORK/block3.yaml"
+expect_ok "키 뒤에 주석만 있으면 빈 목록" bash -c "source '$REPO/lib/core.sh'; ylist '$WORK/block3.yaml' dependencies"
 expect_fail "선행 Task 미완료면 착수 거부" "선행" H transition task-002 active
 expect_fail "ready에서 worker dispatch 거부" "active" H dispatch task-001 worker
 
@@ -177,6 +182,9 @@ expect_ok "Worker 정리" H close task-001 worker
 FAKE_WORKER=good FAKE_DROP_FIRST=1 expect_ok "재작업 dispatch (첫 프롬프트 유실 → 1회 재전송)" H dispatch task-001 worker
 check "재전송 기록" grep -q '프롬프트 재전송: yes' "$P/.harness/attempts/task-001-attempt-2.harness.md"
 check "지시서에 직전 실패 증빙" grep -q '직전 attempt 1의 Harness AC 증빙' "$P/.harness/runtime/task-001-worker.context.md"
+printf '#!/bin/sh\n[ -z "$FAKE_HOOK_FAIL" ] || { echo "hook says no"; exit 1; }\n' >"$P/.git/hooks/pre-commit"; chmod +x "$P/.git/hooks/pre-commit"
+FAKE_HOOK_FAIL=1 expect_fail "commit hook 실패면 제출 거부" "commit" H transition task-001 submitted
+check "hook 실패는 PASS로 남지 않음" grep -q '^- AC 요약: FAIL (AC는 통과했지만 commit 실패' "$P/.harness/attempts/task-001-attempt-2.harness.md"
 expect_ok "제출 (Harness가 AC 실행 → PASS → commit)" H transition task-001 submitted
 check "통과 증빙과 검증 commit" grep -q '^- 검증 commit:' "$P/.harness/attempts/task-001-attempt-2.harness.md"
 H close task-001 worker >/dev/null
@@ -190,17 +198,33 @@ expect_ok "재착수" bash -c "bash '$P/.harness/bin/harness.sh' transition task
 expect_ok "attempt 3 dispatch" H dispatch task-001 worker
 check "지시서에 Review 지적" grep -q '최신 Review 1 (판정: CHANGES_REQUESTED)' "$P/.harness/runtime/task-001-worker.context.md"
 H transition task-001 submitted >/dev/null; H close task-001 worker >/dev/null; H transition task-001 reviewing >/dev/null
+cp "$P/.harness/reviews/task-001-review-1.md" "$WORK/r1.bak"
+printf '판정: APPROVED\n대상 Attempt: 3\nAC-001 AC-002\n' >"$P/.harness/reviews/task-001-review-1.md"
+expect_fail "다른 attempt용 Review를 고쳐 써도 거부" "dispatch되지 않았습니다" H transition task-001 awaiting_approval
+cp "$WORK/r1.bak" "$P/.harness/reviews/task-001-review-1.md"
 expect_ok "Reviewer 재검토" H dispatch task-001 reviewer
+cp "$P/.harness/tasks/task-001.yaml" "$WORK/t1r.bak"
+sed -i 's|command: test -f out.txt.*|command: true|' "$P/.harness/tasks/task-001.yaml"
+expect_fail "검토 중 AC를 바꾸면 승인 대기 거부" "바뀌었습니다" H transition task-001 awaiting_approval
+cp "$WORK/t1r.bak" "$P/.harness/tasks/task-001.yaml"
 cp "$P/.harness/reviews/task-001-review-2.md" "$WORK/r2.bak"; sed -i '/AC-002/d' "$P/.harness/reviews/task-001-review-2.md"
 expect_fail "AC 대조가 빠진 Review 거부" "AC-002" H transition task-001 awaiting_approval
 cp "$WORK/r2.bak" "$P/.harness/reviews/task-001-review-2.md"
+WT="$P/.harness/worktrees/task-001"
+git -C "$WT" commit -q --allow-empty -m "검증 뒤 몰래 넣은 commit"
+echo bad >"$WT/out.txt"; for i in $(seq 400); do echo junk >"$WT/junk$i.txt"; done; echo dirty >>"$P/AGENTS.md"
+expect_fail "본 저장소에 커밋 안 된 변경이면 통합 보류" "통합 보류" H transition task-001 awaiting_approval
+expect_fail "통합 보류는 수정 요청 사유가 아님" "" H transition task-001 changes_requested
+git -C "$P" checkout -q -- AGENTS.md
 expect_ok "승인 대기 (통합 AC → 본 브랜치 fast-forward)" H transition task-001 awaiting_approval
+check "검증 뒤 commit·변경(400건)은 버리고 기록" bash -c "grep -q '검증 commit 이후 commit 버림' '$P/.harness/reviews/task-001-review-2.harness.md' && grep -q '검증 commit 이후 변경 버림 (401건)' '$P/.harness/reviews/task-001-review-2.harness.md'"
+check "본 브랜치에는 검증된 내용만" bash -c "grep -qx ok '$P/out.txt' && test ! -e '$P/junk1.txt' && ! git -C '$P' log --format=%s | grep -q '몰래'"
 check "본 브랜치에 결과 반영" test -f "$P/out.txt"
 check "통합 기록 + 작업 공간 정리" bash -c "grep -q '^- 통합: OK' '$P/.harness/reviews/task-001-review-2.harness.md' && test ! -d '$P/.harness/worktrees/task-001'"
 H close task-001 reviewer >/dev/null
 
 echo "== 4. 자동 진행 · Milestone 승인 · 보관 =="
-expect_ok "run (task-002: 착수→구현→증빙→검토→통합)" H run milestone-001 --max-minutes 2 --poll 1
+FAKE_READ="pytest: 429 Too Many Requests 테스트 통과" expect_ok "run (task-002: 착수→구현→증빙→검토→통합, 화면의 429 문구는 무시)" H run milestone-001 --max-minutes 2 --poll 1
 has "run_result=milestone_ready" && ok "Milestone 승인 대기 도달" || ng "run 결과" "$LAST"
 expect_fail "확인 플래그 없는 Milestone 승인 거부" "confirm-user-approval" H approve milestone-001
 expect_ok "Milestone 승인" H approve milestone-001 --confirm-user-approval
@@ -244,6 +268,8 @@ check "자동 인계 문서" grep -q '^- 자동 교체: yes' "$P/.harness/handov
 check "Worker가 예비 Provider로 교체" grep -q "^primary_worker: claude" "$P/.harness/tasks/task-003.yaml"
 [[ "$(cat "$FAKE"/agents/hh-task-005-*-w1.args)" == *"--model gpt-test-premium"* ]] && ok "승인된 premium 모델 사용" || ng "premium 모델 인수"
 check "task-004는 충돌 해소 뒤 진행" test "$(st task-004)" = awaiting_approval
+expect_ok "run --in-pane" H run milestone-002 --in-pane
+check "별도 Pane은 끝나면 스스로 닫힘" grep -q 'herdr pane close' "$FAKE/pane-run"
 check "임시 파일이 남지 않음" bash -c "test -z \"\$(find '$P' -name '.harness-tmp.*')\""
 
 echo "== 6. 상태 판정 단위 검사 =="
@@ -256,6 +282,11 @@ A='{"agent_status":"idle","revision":3,"state_change_seq":5}'
 [[ "$(N 0 '{"agent_status":"idle"}' 1 agent_prompt_stalled)" == stalled ]] && ok "stalled" || ng "stalled"
 [[ "$(N 0 '{"agent_status":"weird"}')" == unknown ]] && ok "모르는 상태 → unknown" || ng "unknown"
 check "Task ID의 sk- 는 Secret 아님" bash -c "source '$REPO/lib/core.sh'; ! has_secret <<<'task-sk-political-lri-trend'"
+check "SPEC 문장 'Password: 8자 이상'은 Secret 아님" bash -c "source '$REPO/lib/core.sh'; ! has_secret <<<'- Password: 8자 이상'"
+check "코드 'api_key = os.getenv(...)'는 Secret 아님" bash -c "source '$REPO/lib/core.sh'; ! has_secret <<<'api_key = os.getenv(\"KEY\")'"
+for sec in "password: hunter22" "password: 'hunter2abc'" "api_key='sk_live_abcdefgh'" 'DB_PASSWORD=P@ssw0rd!23' 'token=abcdefghij;'; do
+  check "Secret으로 잡음: $sec" bash -c 'source "$1/lib/core.sh"; has_secret <<<"$2"' _ "$REPO" "$sec"
+done
 
 echo "== 7. 원격 모드 (가짜 ssh) =="
 P2="$WORK/proj2"; RSRC="$WORK/remote-src"; mkdir -p "$RSRC"; touch "$WORK/key"
@@ -269,9 +300,17 @@ write_task task-001 milestone-001 r.txt "test -f r.txt"
 sed -i 's/^- 상태: draft/- 상태: approved/' "$P/.harness/SPEC.md"; commit_all "remote tasks"
 H approve-plan milestone-001 --confirm-user-approval >/dev/null
 expect_ok "원격 모드 착수 (작업 공간 분리 없이 순서대로)" H transition task-001 active
+env -u HARNESS_SKIP_MOUNT_CHECK bash "$P/.harness/bin/harness.sh" dispatch task-001 worker >"$WORK/m.out" 2>&1 </dev/null
+grep -q '마운트되어 있지 않습니다' "$WORK/m.out" && ok "마운트가 풀린 원격은 dispatch 거부" || ng "마운트 확인" "$(cat "$WORK/m.out")"
 expect_ok "원격 모드 dispatch (코드 = 마운트 경로)" H dispatch task-001 worker
 expect_ok "원격 모드 제출 (AC를 원격에서 실행)" H transition task-001 submitted
 check "AC 실행 위치가 원격" grep -q '실행 위치: 원격' "$P/.harness/attempts/task-001-attempt-1.harness.md"
+write_task task-002 milestone-001 r2.txt "test -f r2.txt"; commit_all "remote task-002"
+H approve-plan milestone-001 --confirm-user-approval >/dev/null
+expect_fail "원격 모드는 통합 전 Task가 있으면 다음 Task 착수 거부" "하나씩" H transition task-002 active
+H transition task-001 reviewing >/dev/null; FAKE_VERDICT=CHANGES_REQUESTED H dispatch task-001 reviewer >/dev/null
+H transition task-001 changes_requested >/dev/null; H transition task-001 ready >/dev/null
+expect_fail "재작업 대기(ready) Task도 자리를 차지" "하나씩" H transition task-002 active
 P="$P_SAVE"
 
 echo "== 8. 업그레이드 =="

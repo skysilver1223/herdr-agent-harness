@@ -88,15 +88,17 @@ cmd_models() {
   fi
 }
 
-# 출력에서 알려진 한도 경고 문구만 찾는다. 못 찾았다고 여유가 있다는 뜻은 아니다.
-quota_signal() {
-  local pct
-  pct="$(grep -Eio '[0-9]+% of your (weekly|daily|five.hour|5.hour) limit' <<<"$1" | grep -Eo '^[0-9]+' | sort -n | head -n 1 || true)"
-  if [[ -n "$pct" ]]; then printf '한도 경고 (남은 %s%% 부근)' "$pct"; return 0; fi
-  if grep -Eqi 'usage limit reached|rate.?limit (exceeded|reached)|quota.?exceeded|429 too many requests|out of credits' <<<"$1"; then
-    printf '한도 소진 문구'; return 0
-  fi
-  return 1
+# 출력에서 알려진 한도 문구만 찾는다. 화면에는 테스트 출력·배너도 섞이므로 이것만으로 판단하지 않는다
+# (run은 Agent가 비정상으로 멈췄을 때만 소진으로 본다). 못 찾았다고 여유가 있다는 뜻도 아니다.
+quota_exhausted() {
+  grep -Eqi 'usage limit reached|rate.?limit (exceeded|reached)|quota.?exceeded|429 too many requests|out of credits' <<<"$1" || return 1
+  printf '한도 소진 문구'
+}
+quota_warning() {  # "N% of your weekly limit"는 사용량이다 → 남은 비율로 바꿔 알린다(정보용)
+  local used
+  used="$(grep -Eio '[0-9]+% of your (weekly|daily|five.hour|5.hour) limit' <<<"$1" | grep -Eo '^[0-9]+' | sort -n | tail -n 1 || true)"
+  [[ -n "$used" ]] || return 1
+  printf '한도 경고 (사용 %s%% · 남은 약 %s%%)' "$used" "$(( used > 100 ? 0 : 100 - used ))"
 }
 
 # 능동 확인. agy는 --print로 바로, claude·codex는 떠 있는 Agent에 /status를 보내 읽는다.
@@ -125,7 +127,11 @@ cmd_quota_check() {
       [[ -n "$name" ]] || die "dispatch 기록이 없습니다: $task $role"
       herdr agent prompt "$name" "/status" --wait --timeout 30000 >/dev/null 2>&1 || true
       hcap herdr agent read "$name" --source recent-unwrapped --lines 80; out="$OUT"
-      if detail="$(quota_signal "$out")"; then status=low; else detail="알려진 경고 문구 없음 (형식이 다를 수 있음)"; fi ;;
+      if detail="$(quota_exhausted "$out")"; then status=low
+      elif detail="$(quota_warning "$out")"; then
+        pct="$(grep -Eo '남은 약 [0-9]+' <<<"$detail" | grep -Eo '[0-9]+')"
+        if (( pct < low )); then status=low; else status=ok; fi
+      else detail="알려진 경고 문구 없음 (형식이 다를 수 있음)"; fi ;;
   esac
   printf 'quota_check: provider=%s status=%s detail=%s\n' "$provider" "$status" "$detail"
   [[ "$status" != low ]] || exit 1

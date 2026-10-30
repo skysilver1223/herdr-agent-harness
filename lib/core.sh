@@ -39,8 +39,17 @@ write_atomic() {
 # Prompt·기록으로 나가기 전 마지막 그물. Provider 토큰 접두사는 단어 경계에서만 본다
 # (task-sk-... 같은 평범한 ID를 키로 오인하면 dispatch가 영구히 막힌다).
 has_secret() {
+  # 값으로 보이는 토큰만 잡는다: 따옴표(선택) 뒤 8자 이상, 끝은 공백·따옴표·;·,·줄끝.
+  # 그래서 "Password: 8자 이상" 같은 문장과 os.getenv(…) 같은 코드는 통과하고,
+  # 'hunter2abc', P@ssw0rd!23, abcdefghij; 같은 값은 잡는다. 작은따옴표는 $'\x27'로 넣는다
+  # (grep ERE는 \047 같은 8진 표기를 해석하지 않는다).
+  local q=$'\x27' v='[!#%&*+./0-9:=?@A-Z^_a-z|~-]'
   LC_ALL=C grep -Eqi \
-    'AKIA[0-9A-Z]{8,}|BEGIN[[:space:]]+(RSA |EC |DSA |OPENSSH )?PRIVATE KEY|(password|passwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)[[:space:]]*[:=][[:space:]]*[^[:space:]]|authorization[[:space:]]*:[[:space:]]*(bearer|basic)[[:space:]]|(^|[^A-Za-z0-9_-])(gh[pousr]_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.)' \
+    -e 'AKIA[0-9A-Z]{8,}' \
+    -e 'BEGIN[[:space:]]+(RSA |EC |DSA |OPENSSH )?PRIVATE KEY' \
+    -e "(password|passwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)[[:space:]]*[:=][[:space:]]*[\"$q]?$v{8,}([\"$q\`;,]|[[:space:]]|\$)" \
+    -e 'authorization[[:space:]]*:[[:space:]]*(bearer|basic)[[:space:]]' \
+    -e '(^|[^A-Za-z0-9_-])(gh[pousr]_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.)' \
     "$@"
 }
 
@@ -71,7 +80,7 @@ ylist() {  # FILE KEY → 'KEY: [a, b]' 항목을 한 줄씩. 블록 목록(- a)
   local v item
   local -a items=()
   v="$(yget "$1" "$2")"
-  if [[ -z "$v" ]] && grep -A1 "^$2:" "$1" | tail -n 1 | grep -q '^[[:space:]]*-'; then
+  if [[ -z "$v" ]] && awk -v k="$2:" 'f && !/^[[:space:]]*(#|$)/ { r = /^[[:space:]]*-/ ? 0 : 1; d = 1; exit } index($0, k) == 1 { f = 1 } END { exit d ? r : 1 }' "$1"; then
     die "$2는 [a, b] 한 줄 형식으로 쓴다 (블록 목록 미지원): $1"
   fi
   [[ -z "$v" || "$v" == \[*\] ]] || die "$2는 [a, b] 형식이어야 합니다: $1"
@@ -299,7 +308,7 @@ code_dir() {
 
 remote_enabled() {
   [[ -f "$ROOT/.harness/remote.yaml" ]] &&
-    awk '$0 == "remote:" { r = 1; next } /^[^[:space:]#]/ { r = 0 } r && /^  enabled:[[:space:]]*true([[:space:]]|$)/ { f = 1 } END { exit !f }' "$ROOT/.harness/remote.yaml"
+    awk '$0 == "remote:" { r = 1; next } /^[^[:space:]#]/ { r = 0 } r && /^  enabled:[[:space:]]*["\047]?true["\047]?([[:space:]]|#|$)/ { f = 1 } END { exit !f }' "$ROOT/.harness/remote.yaml"
 }
 
 worktree_enabled() {

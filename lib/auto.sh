@@ -77,39 +77,50 @@ on_agent_failure() {  # TASK ROLE REASON DETAIL
   else hold "$1" "$2 $3 ${4:-} — 교체 규칙이 없어 사용자 승인 필요 (project.yaml failover)"; fi
 }
 
+quota_of() { sed -n 's/^quota_signal=//p' <<<"$OUT"; }   # 마지막 하위 명령 출력의 한도 소진 문구
+
+# Agent가 비정상으로 멈췄을 때만 원인을 고른다. 정상 종료 화면의 429·rate limit 문구(테스트 출력 등)는 보지 않는다.
+agent_failed() {  # TASK ROLE DETAIL
+  local q
+  q="$(quota_of)"
+  if [[ -n "$q" ]]; then on_agent_failure "$1" "$2" quota_exhausted "$q"; else on_agent_failure "$1" "$2" agent_error "$3"; fi
+}
+
+dispatch_role() {  # TASK ROLE — 게이트 거부는 보류, Agent 기동·전달 실패는 교체 규칙
+  local res
+  if run_child dispatch "$1" "$2"; then STEP_PROGRESS=1; STEP_RUNNING=1; return 0; fi
+  res="$(sed -n 's/^dispatch_result=//p' <<<"$OUT")"
+  if [[ -z "$res" ]]; then hold "$1" "$(last_line)"; else agent_failed "$1" "$2" "$res"; fi
+  return 0
+}
+
 step_worker() {
   local t="$1" meta res report n
   meta="$(meta_file "$t" worker)"
-  if [[ ! -f "$meta" ]] || grep -q '^closed=' "$meta"; then
-    if run_child dispatch "$t" worker; then
-      STEP_PROGRESS=1; STEP_RUNNING=1
-      if grep -q '^quota_signal=' <<<"$OUT"; then on_agent_failure "$t" worker quota_exhausted "$(sed -n 's/^quota_signal=//p' <<<"$OUT")"; fi
-    else
-      res="$(sed -n 's/^dispatch_result=//p' <<<"$OUT")"
-      if [[ -z "$res" ]]; then hold "$t" "$(last_line)"; else on_agent_failure "$t" worker agent_error "$res"; fi
-    fi
-    return 0
-  fi
+  if [[ ! -f "$meta" ]] || grep -q '^closed=' "$meta"; then dispatch_role "$t" worker; return 0; fi
   run_child observe "$t" worker || { hold "$t" "$(last_line)"; return 0; }
   res="$(sed -n 's/^observe_result=//p' <<<"$OUT")"
-  if grep -q '^quota_signal=' <<<"$OUT"; then on_agent_failure "$t" worker quota_exhausted "$(sed -n 's/^quota_signal=//p' <<<"$OUT")"; return 0; fi
   case "$res" in
     running) STEP_RUNNING=1 ;;
     settled)
-      run_child close "$t" worker || { hold "$t" "$(last_line)"; return 0; }
       n="$(last_attempt "$t")"; report="$(att_report "$t" "$n")"
-      if [[ ! -s "$report" ]]; then hold "$t" "Worker가 보고서 없이 끝났습니다 (막힘 여부를 로그로 확인: $(rel "$(meta_get "$meta" log)"))"; return 0; fi
-      if grep -q '결과: BLOCKED' "$report"; then hold "$t" "Worker가 BLOCKED를 보고했습니다: $(rel "$report")"; return 0; fi
+      if [[ ! -s "$report" ]]; then
+        if [[ -n "$(quota_of)" ]]; then agent_failed "$t" worker "보고서 없이 종료"; return 0; fi
+        hold "$t" "Worker가 보고서 없이 끝났습니다 — Pane·로그($(rel "$(meta_get "$meta" log)")) 확인 후 close $t worker → 다시 run"; return 0
+      fi
+      if grep -q '결과: BLOCKED' "$report"; then hold "$t" "Worker가 BLOCKED를 보고했습니다: $(rel "$report") — 답을 정한 뒤 close $t worker → dispatch --extra-prompt"; return 0; fi
+      run_child close "$t" worker || { hold "$t" "$(last_line)"; return 0; }
       STEP_PROGRESS=1
       if run_child transition "$t" submitted; then
         run_child transition "$t" reviewing || { hold "$t" "$(last_line)"; return 0; }
-        if run_child dispatch "$t" reviewer; then STEP_RUNNING=1
-        else on_agent_failure "$t" reviewer agent_error "$(sed -n 's/^dispatch_result=//p' <<<"$OUT")"; fi
+        dispatch_role "$t" reviewer
       elif ! grep -Eq 'AC 검증 실패|AC 결과가 빠졌습니다' <<<"$OUT"; then
         hold "$t" "$(last_line)"
       fi ;;   # AC 실패는 증빙이 남았고 다음 순회에서 새 attempt를 띄운다(상한은 dispatch가 강제)
-    blocked) hold "$t" "Worker가 입력을 기다립니다 (blocked) — Pane에서 확인" ;;
-    agent_lost) on_agent_failure "$t" worker agent_error agent_lost ;;
+    blocked)
+      if [[ -n "$(quota_of)" ]]; then agent_failed "$t" worker blocked
+      else hold "$t" "Worker가 입력을 기다립니다 (blocked) — Pane에서 확인"; fi ;;
+    agent_lost) agent_failed "$t" worker agent_lost ;;
     *) hold "$t" "Worker 상태 $res — 확인 필요" ;;
   esac
   return 0
@@ -117,20 +128,21 @@ step_worker() {
 
 apply_verdict() {
   local t="$1" r v n
-  r="$(last_review "$t")"; v="$(review_verdict "$(rev_file "$t" "$r")")"
+  r="$(last_review "$t")"; v="$(review_verdict "$(rev_file "$t" "$r")")"; n="$(last_attempt "$t")"
   case "$v" in
     APPROVED)
-      if run_child transition "$t" awaiting_approval; then STEP_PROGRESS=1
-      elif grep -Eq '^- 통합: (CONFLICT|FAIL)' "$(rev_record "$t" "$r")"; then
-        run_child transition "$t" changes_requested && STEP_PROGRESS=1 || hold "$t" "$(last_line)"
-      else
-        n="$(last_attempt "$t")"
-        if (( $(reviews_for_attempt "$t" "$n") < 2 )); then
-          run_child dispatch "$t" reviewer && { STEP_PROGRESS=1; STEP_RUNNING=1; } || hold "$t" "$(last_line)"
-        else hold "$t" "Review가 게이트를 통과하지 못했습니다: $(last_line)"; fi
-      fi ;;
+      if run_child transition "$t" awaiting_approval; then STEP_PROGRESS=1; return 0; fi
+      case "$(rec_last "$(rev_record "$t" "$r")" 통합)" in
+        CONFLICT*|FAIL*) run_child transition "$t" changes_requested && STEP_PROGRESS=1 || hold "$t" "$(last_line)" ;;
+        BLOCKED*) hold "$t" "통합 보류 — $(rec_last "$(rev_record "$t" "$r")" 통합)" ;;
+        *)  # Review가 게이트를 통과하지 못했다(AC 대조 누락 등) — 한 번 더 검토받는다.
+          if (( $(reviews_for_attempt "$t" "$n") < 2 )); then dispatch_role "$t" reviewer
+          else hold "$t" "Review가 게이트를 통과하지 못했습니다: $(last_line)"; fi ;;
+      esac ;;
     CHANGES_REQUESTED) run_child transition "$t" changes_requested && STEP_PROGRESS=1 || hold "$t" "$(last_line)" ;;
-    *) hold "$t" "Review 판정을 읽을 수 없습니다: $(rel "$(rev_file "$t" "$r")")" ;;
+    *)
+      if (( $(reviews_for_attempt "$t" "$n") < 2 )); then dispatch_role "$t" reviewer
+      else hold "$t" "Review 판정을 읽을 수 없습니다: $(rel "$(rev_file "$t" "$r")")"; fi ;;
   esac
   return 0
 }
@@ -141,22 +153,22 @@ step_reviewer() {
   if [[ ! -f "$meta" ]] || grep -q '^closed=' "$meta"; then
     r="$(last_review "$t")"; n="$(last_attempt "$t")"
     # 끝난 Review가 최신 attempt 대상이면 판정을 반영하고, 아니면 Reviewer를 띄운다.
-    if (( r > 0 )) && [[ "$(rec_last "$(rev_record "$t" "$r")" 결과)" == settled && "$(review_target "$(rev_file "$t" "$r")")" == "$n" ]]; then
+    if (( r > 0 )) && [[ "$(rec_last "$(rev_record "$t" "$r")" 결과)" == settled && "$(rec_get "$(rev_record "$t" "$r")" '검토 대상')" == "attempt $n "* ]]; then
       apply_verdict "$t"; return 0
     fi
     if (( $(reviews_for_attempt "$t" "$n") >= 2 )); then hold "$t" "Reviewer가 두 번 판정을 남기지 못했습니다"; return 0; fi
-    if run_child dispatch "$t" reviewer; then STEP_PROGRESS=1; STEP_RUNNING=1
-    else on_agent_failure "$t" reviewer agent_error "$(sed -n 's/^dispatch_result=//p' <<<"$OUT")"; fi
+    dispatch_role "$t" reviewer
     return 0
   fi
   run_child observe "$t" reviewer || { hold "$t" "$(last_line)"; return 0; }
   res="$(sed -n 's/^observe_result=//p' <<<"$OUT")"
-  if grep -q '^quota_signal=' <<<"$OUT"; then on_agent_failure "$t" reviewer quota_exhausted "$(sed -n 's/^quota_signal=//p' <<<"$OUT")"; return 0; fi
   case "$res" in
     running) STEP_RUNNING=1 ;;
     settled) run_child close "$t" reviewer || { hold "$t" "$(last_line)"; return 0; }; apply_verdict "$t" ;;
-    blocked) hold "$t" "Reviewer가 입력을 기다립니다 (blocked)" ;;
-    agent_lost) on_agent_failure "$t" reviewer agent_error agent_lost ;;
+    blocked)
+      if [[ -n "$(quota_of)" ]]; then agent_failed "$t" reviewer blocked
+      else hold "$t" "Reviewer가 입력을 기다립니다 (blocked)"; fi ;;
+    agent_lost) agent_failed "$t" reviewer agent_lost ;;
     *) hold "$t" "Reviewer 상태 $res — 확인 필요" ;;
   esac
   return 0
@@ -207,7 +219,8 @@ cmd_run() {
     hcap herdr pane split --current --direction down --cwd "$ROOT" --no-focus
     (( RC == 0 )) || die "herdr pane split 실패: $OUT"
     t="$(jfield "$OUT" pane_id)"
-    herdr pane run "$t" "$(printf '%q ' bash "$HARNESS_BIN" -C "$ROOT" run "$m" --max-minutes "$max_min" --poll "$poll")" >/dev/null ||
+    # 정상 종료하면 Pane을 스스로 닫는다(결과는 status·run 로그·결과 파일에). 실패하면 메시지를 볼 수 있게 남긴다.
+    herdr pane run "$t" "$(printf '%q ' bash "$HARNESS_BIN" -C "$ROOT" run "$m" --max-minutes "$max_min" --poll "$poll")&& herdr pane close $(printf '%q' "$t")" >/dev/null ||
       die "Pane $t에서 run을 시작하지 못했습니다."
     info "자동 진행을 Pane $t에서 시작했습니다. 확인: status · 로그: .harness/runtime/run-$m.log"
     return 0

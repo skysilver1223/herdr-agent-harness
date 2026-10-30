@@ -154,6 +154,10 @@ cmd_dispatch() {
   [[ "${HERDR_ENV:-}" == 1 ]] || die "dispatch는 Herdr Pane 안(HERDR_ENV=1)에서 실행한다."
   cwd="$(task_cwd "$task")"
   [[ -d "$cwd" ]] || die "작업 디렉터리가 없습니다: $cwd (worktree는 transition active가 만든다)"
+  # WSL 재시작 뒤에는 SSHFS 마운트가 풀리고 빈 폴더만 남는다. 거기서 일하면 결과가 로컬에만 생긴다.
+  if remote_enabled && [[ -z "${HARNESS_SKIP_MOUNT_CHECK:-}" ]] && ! mountpoint -q "$cwd" 2>/dev/null; then
+    die "원격 소스가 마운트되어 있지 않습니다: $cwd (remote mount 후 다시 실행)"
+  fi
 
   # 살아 있는 이전 Agent의 추적 정보를 덮어쓰면 그 Pane은 고아가 된다.
   meta="$(meta_file "$task" "$role")"
@@ -207,7 +211,7 @@ cwd=$cwd
 log=$log
 EOF
 
-  local result resent=no msg cleanup signal
+  local result resent=no msg cleanup signal warning
   msg="Harness Context Packet을 읽고 그 지시대로 이 Task만 수행하라: $packet"
   : >"$log"
   if ! start_agent "$name" "$provider" "$pane" "$tmo" ${args[@]+"${args[@]}"}; then
@@ -241,23 +245,26 @@ EOF
     append_log "$log" "agent get" "$T_GOUT"
     append_log "$log" "agent read" "$T_ROUT"
   fi
-  signal="$(quota_signal "${T_POUT:-}"$'\n'"${T_ROUT:-}" || true)"
+  signal="$(quota_exhausted "${T_POUT:-}"$'\n'"${T_ROUT:-}" || true)"
+  warning="$(quota_warning "${T_ROUT:-}" || true)"
   {
     printf '\n## dispatch %s\n\n- 결과: %s\n- 프롬프트 재전송: %s\n- 원문 로그(Git 제외): %s\n' \
       "$(now)" "$result" "$resent" "$(rel "$log")"
     [[ -z "$signal" ]] || printf -- '- 쿼터 신호: %s\n' "$signal"
+    [[ -z "$warning" ]] || printf -- '- 쿼터 경고: %s\n' "$warning"
     [[ "$result" != settled ]] || record_changes "$cwd"
   } >>"$record"
-  printf '%s\n' "$result" >"$ROOT/.harness/runtime/$task-$role.last"
+  printf '%s|%s\n' "$result" "$signal" >"$ROOT/.harness/runtime/$task-$role.last"
   printf 'dispatch_result=%s\n' "$result"
   [[ -z "$signal" ]] || printf 'quota_signal=%s\n' "$signal"
+  [[ -z "$warning" ]] || printf 'quota_warning=%s\n' "$warning"
   printf '증빙: %s\n' "$(rel "$record")"
   case "$result" in running|settled|blocked) return 0 ;; esac
   exit 1   # 예상한 실패 결과 — 오류 위치를 찍지 않고 종료 코드만 돌려준다
 }
 
 cmd_observe() {
-  local task="${1:-}" role=worker wait_ms="" meta name record cwd log result last signal
+  local task="${1:-}" role=worker wait_ms="" meta name record cwd log result last signal warning
   [[ -n "$task" ]] || die "사용법: observe TASK [worker|reviewer] [--wait MS]"
   shift
   if [[ "${1:-}" == worker || "${1:-}" == reviewer ]]; then role="$1"; shift; fi
@@ -277,20 +284,23 @@ cmd_observe() {
   hcap herdr agent get "$name"; local gs=$RC gout="$OUT"
   hcap herdr agent read "$name" --source recent-unwrapped --lines 200
   result="$(normalize "$gs" "$gout")"
-  signal="$(quota_signal "$OUT" || true)"
+  signal="$(quota_exhausted "$OUT" || true)"
+  warning="$(quota_warning "$OUT" || true)"
   last="$(cat "$ROOT/.harness/runtime/$task-$role.last" 2>/dev/null || true)"
   # 반복 관측이 Git 기록을 부풀리지 않게, 결과가 바뀌었을 때만 남긴다.
-  if [[ "$result" != "$last" || -n "$signal" ]]; then
+  if [[ "$result|$signal" != "$last" ]]; then
     append_log "$log" "observe ($result)" "$gout"$'\n\n'"$OUT"
     {
       printf '\n## observe %s\n\n- 결과: %s\n' "$(now)" "$result"
       [[ -z "$signal" ]] || printf -- '- 쿼터 신호: %s\n' "$signal"
+      [[ -z "$warning" ]] || printf -- '- 쿼터 경고: %s\n' "$warning"
       [[ "$result" != settled ]] || record_changes "$cwd"
     } >>"$record"
-    printf '%s\n' "$result" >"$ROOT/.harness/runtime/$task-$role.last"
+    printf '%s|%s\n' "$result" "$signal" >"$ROOT/.harness/runtime/$task-$role.last"
   fi
   printf 'observe_result=%s\n' "$result"
   [[ -z "$signal" ]] || printf 'quota_signal=%s\n' "$signal"
+  [[ -z "$warning" ]] || printf 'quota_warning=%s\n' "$warning"
 }
 
 cmd_close() {
