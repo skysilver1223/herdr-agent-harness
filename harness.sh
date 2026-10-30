@@ -36,6 +36,7 @@ herdr-harness — Herdr에서 여러 에이전트를 증빙·교차 검토로 �
   approve-plan MILESTONE --confirm-user-approval   계획(Task·등급·AC) 승인, draft → ready
   run MILESTONE [--in-pane] [--max-minutes N]      사람 결정이 필요할 때까지 자동 진행
   approve MILESTONE --confirm-user-approval        Milestone 완료 승인 → 보관·태그
+  reject TASK --reason "사유" --confirm-user-approval  승인 대기 결과 반려 → 사유를 받아 재작업
   prune MILESTONE                                  보관함을 요약만 남기고 정리 (원본은 git 태그)
 
 한 단계씩 (run이 내부에서 쓰는 명령):
@@ -85,6 +86,7 @@ main() {
     approve-plan) cmd_approve_plan "$@" ;;
     run) cmd_run "$@" ;;
     approve) cmd_approve "$@" ;;
+    reject) cmd_reject "$@" ;;
     prune) cmd_prune "$@" ;;
     transition) cmd_transition "$@" ;;
     dispatch) cmd_dispatch "$@" ;;

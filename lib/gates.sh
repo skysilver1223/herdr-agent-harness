@@ -1,7 +1,7 @@
 # herdr-harness: 상태 전이와 게이트 — 계획 승인, 증빙(AC 실행), 교차 검토, 통합, Milestone 승인.
 # harness.sh가 source한다. 단독 실행하지 않는다.
 
-TRANSITIONS=" draft>ready ready>active active>submitted active>blocked active>handover_required blocked>active submitted>reviewing reviewing>changes_requested reviewing>awaiting_approval changes_requested>ready handover_required>ready awaiting_approval>completed "
+TRANSITIONS=" draft>ready ready>active active>submitted active>blocked active>handover_required blocked>active submitted>reviewing reviewing>changes_requested reviewing>awaiting_approval changes_requested>ready handover_required>ready awaiting_approval>completed awaiting_approval>changes_requested "
 
 # 상태를 바꾸는 명령은 Harness가 띄운 Agent 안에서 실행할 수 없다. dispatch가 Pane에
 # HARNESS_AGENT를 심고, herdr pane current --current(터미널 기준)도 대조한다.
@@ -151,8 +151,16 @@ gate_active() {
 
   if worktree_enabled; then
     wt="$ROOT/.harness/worktrees/$task"; branch="hh/$task"; code="$(code_dir)"
+    if [[ -e "$wt" ]] && ! is_task_worktree "$wt"; then
+      die "작업 공간 폴더가 git worktree가 아닙니다(이전 정리 실패): $wt — 내용을 확인해 지운 뒤 다시 착수한다."
+    fi
     if [[ ! -d "$wt" ]]; then
       mkdir -p "$ROOT/.harness/worktrees"
+      git -C "$code" worktree prune >/dev/null 2>&1 || true
+      # 이미 본 브랜치에 통합된 브랜치(사용자 반려 뒤 재작업)는 현재 본 브랜치로 옮겨 이어서 작업한다.
+      if git -C "$code" merge-base --is-ancestor "$branch" HEAD 2>/dev/null; then
+        git -C "$code" branch -f "$branch" HEAD >/dev/null
+      fi
       if git -C "$code" rev-parse --verify -q "refs/heads/$branch" >/dev/null; then
         hcap git -C "$code" worktree add -q "$wt" "$branch"
       else
@@ -230,7 +238,8 @@ integrate() {  # TASK RECORD
   code="$(code_dir)"; wt="$ROOT/.harness/worktrees/$task"
   integ_stop() { INTEG="$1"; printf -- '- 통합: %s (%s)\n' "$1" "$2" >>"$record"; }
   main="$(git -C "$code" symbolic-ref --short HEAD 2>/dev/null)" || { integ_stop BLOCKED "본 저장소가 브랜치에 있지 않음"; return 0; }
-  [[ -d "$wt" ]] || { integ_stop BLOCKED "작업 공간 없음: $wt"; return 0; }
+  # 폴더만 남은 껍데기에서 git을 돌리면 본 저장소를 되돌리게 된다. 진짜 worktree일 때만 진행한다.
+  is_task_worktree "$wt" || { integ_stop BLOCKED "작업 공간이 없거나 git worktree가 아님: $wt"; return 0; }
   # 본 브랜치에는 검증된 commit만 들어간다. 검증 뒤 생긴 commit은 아무도 검증하지 않았다.
   verified="$(rec_last "$(att_record "$task" "$(last_attempt "$task")")" '검증 commit' | cut -d' ' -f1)"
   [[ -n "$verified" ]] || { integ_stop BLOCKED "검증 commit 기록이 없음"; return 0; }
@@ -264,7 +273,8 @@ integrate() {  # TASK RECORD
     return 0
   fi
   printf -- '- 통합: OK %s → %s\n' "$(git -C "$code" rev-parse HEAD)" "$main" >>"$record"
-  git -C "$code" worktree remove --force "$wt" >/dev/null 2>&1 || true
+  git -C "$code" worktree remove --force "$wt" >/dev/null 2>&1 ||
+    warn "작업 공간을 지우지 못했습니다: $wt — 남은 파일을 정리한다(통합은 끝났다)."
   return 0
 }
 
@@ -273,6 +283,13 @@ gate_review() {  # changes_requested·awaiting_approval 공통: dispatch된 최�
   r="$(last_review "$task")"
   (( r > 0 )) || die "dispatch된 Review가 없습니다. Reviewer는 dispatch로만 기동한다."
   file="$(rev_file "$task" "$r")"; record="$(rev_record "$task" "$r")"
+  if [[ "$to" == changes_requested && "$(yget "$tf" status)" == awaiting_approval ]]; then
+    local rej
+    rej="$(latest_rejection "$task")"
+    [[ -n "$rej" && "$(rec_get "$rej" '대상 Review')" == ".harness/reviews/$task-review-$r.md" ]] ||
+      die "승인 대기 Task는 사용자 반려 기록이 있어야 되돌릴 수 있습니다 (reject $task --reason \"사유\" --confirm-user-approval)."
+    return 0
+  fi
   if [[ "$to" == changes_requested && "$(rec_last "$record" 통합)" =~ ^(CONFLICT|FAIL) ]]; then return 0; fi
   ! grep -q '^- 기동 실패:' "$record" || die "review $r는 Agent 기동에 실패한 기록입니다."
   [[ "$(rec_last "$record" 결과)" == settled ]] || die "review $r의 Reviewer가 작업을 마친 기록(settled)이 없습니다."
@@ -424,6 +441,51 @@ EOF
   archive_milestone "$m" "${tasks[@]}"
 }
 
+latest_rejection() {  # TASK → 최신 사용자 반려 기록 경로 (없으면 빈 값)
+  local k
+  k="$(last_n "$ROOT/.harness/decisions" "$1-rejection-" .md)"
+  (( k == 0 )) || printf '%s/.harness/decisions/%s-rejection-%s.md' "$ROOT" "$1" "$k"
+}
+
+# 사용자가 승인 대기 결과를 반려한다. 사유는 다음 Worker·Reviewer 지시서에 그대로 들어가고,
+# 재작업 상한은 반려 시점부터 새로 센다.
+cmd_reject() {
+  local task="${1:-}" reason="" confirm=0 tf st r k
+  [[ -n "$task" ]] || die "사용법: reject TASK --reason \"사유\" --confirm-user-approval"
+  shift
+  while (( $# )); do
+    case "$1" in
+      --reason) [[ -n "${2:-}" ]] || die "--reason에 사유가 필요합니다."; reason="$2"; shift 2 ;;
+      --confirm-user-approval) confirm=1; shift ;;
+      *) die "알 수 없는 reject 옵션: $1" ;;
+    esac
+  done
+  (( confirm )) || die "사용자가 반려를 명시했을 때만 --confirm-user-approval과 함께 호출한다."
+  [[ -n "$reason" ]] || die "--reason \"사유\"가 필요합니다 (다음 Worker가 받는다)."
+  ! has_secret <<<"$reason" || die "사유에 Secret 의심 패턴이 있습니다."
+  require_human reject
+  tf="$(task_file "$task")"; st="$(yget "$tf" status)"
+  [[ "$st" == awaiting_approval ]] || die "$task는 승인 대기(awaiting_approval)가 아닙니다 ($st)."
+  r="$(last_review "$task")"
+  k=$(( $(last_n "$ROOT/.harness/decisions" "$task-rejection-" .md) + 1 ))
+  write_atomic "$ROOT/.harness/decisions/$task-rejection-$k.md" <<EOF
+# 사용자 반려: $task #$k
+
+- 반려: yes
+- 시각: $(now)
+- 시각(epoch): $(date +%s)
+- 대상 Review: .harness/reviews/$task-review-$r.md
+- 반려 시 attempt: $(last_attempt "$task")
+- 명시 확인: --confirm-user-approval
+
+## 사유
+
+$reason
+EOF
+  do_transition "$task" changes_requested
+  info "반려 기록: .harness/decisions/$task-rejection-$k.md — run으로 재작업을 이어 간다."
+}
+
 # 승인된 Milestone을 보관함으로 옮긴다. 진행 중인 것만 앞에 남겨 지시서·상태 확인이
 # 작업 기간과 무관하게 가볍게 유지된다. 원본은 git 태그로 언제든 되살릴 수 있다.
 archive_milestone() {
@@ -438,7 +500,8 @@ archive_milestone() {
     [[ -z "$f" || ! -f "$ROOT/$f" ]] || mv -- "$ROOT/$f" "$dst/intents/"
     mv -- "$ROOT/.harness/tasks/$id.yaml" "$dst/tasks/"
     for f in "$ROOT"/.harness/attempts/"$id"-attempt-* "$ROOT"/.harness/reviews/"$id"-review-* \
-             "$ROOT"/.harness/handovers/"$id"-handover-* "$ROOT"/.harness/decisions/"$id"-decision-*; do
+             "$ROOT"/.harness/handovers/"$id"-handover-* "$ROOT"/.harness/decisions/"$id"-decision-* \
+             "$ROOT"/.harness/decisions/"$id"-rejection-*; do
       [[ -e "$f" ]] || continue
       mv -- "$f" "$dst/${f#"$ROOT/.harness/"}"
     done

@@ -40,14 +40,15 @@ write_atomic() {
 # (task-sk-... 같은 평범한 ID를 키로 오인하면 dispatch가 영구히 막힌다).
 has_secret() {
   # 값으로 보이는 토큰만 잡는다: 따옴표(선택) 뒤 8자 이상, 끝은 공백·따옴표·;·,·줄끝.
-  # 그래서 "Password: 8자 이상" 같은 문장과 os.getenv(…) 같은 코드는 통과하고,
-  # 'hunter2abc', P@ssw0rd!23, abcdefghij; 같은 값은 잡는다. 작은따옴표는 $'\x27'로 넣는다
+  # 첫 글자는 $·괄호·<·{ 로 시작하지 않아야 한다(${VAR}, <placeholder>, os.getenv(…), Optional[str]은 통과).
+  # 그래서 "Password: 8자 이상" 같은 문장과 코드는 통과하고, 'hunter2abc', P@ssw0rd!23, Xk9#mP2$vLq8,
+  # "password": "…"(JSON), `…`(백틱) 같은 값은 잡는다. 작은따옴표는 $'\x27'로 넣는다
   # (grep ERE는 \047 같은 8진 표기를 해석하지 않는다).
-  local q=$'\x27' v='[!#%&*+./0-9:=?@A-Z^_a-z|~-]'
+  local q=$'\x27' v='[!#%&*+./0-9:=?@A-Z^_a-z|~-]' w='[!#%&*+./0-9:=?@A-Z^_a-z|~$<>{}\\-]'
   LC_ALL=C grep -Eqi \
     -e 'AKIA[0-9A-Z]{8,}' \
     -e 'BEGIN[[:space:]]+(RSA |EC |DSA |OPENSSH )?PRIVATE KEY' \
-    -e "(password|passwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)[[:space:]]*[:=][[:space:]]*[\"$q]?$v{8,}([\"$q\`;,]|[[:space:]]|\$)" \
+    -e "(password|passwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)[\"$q]?[[:space:]]*[:=][[:space:]]*[\"$q\`]?$v$w{7,}([\"$q\`;,]|[[:space:]]|\$)" \
     -e 'authorization[[:space:]]*:[[:space:]]*(bearer|basic)[[:space:]]' \
     -e '(^|[^A-Za-z0-9_-])(gh[pousr]_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.)' \
     "$@"
@@ -314,6 +315,10 @@ remote_enabled() {
 worktree_enabled() {
   [[ "$(pget isolation worktree true)" == true ]] && ! remote_enabled &&
     git -C "$(code_dir)" rev-parse --verify -q HEAD >/dev/null 2>&1
+}
+
+is_task_worktree() {  # DIR → 그 폴더 자체가 git worktree인가
+  [[ -f "$1/.git" ]] && [[ "$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" -ef "$1" ]]
 }
 
 task_cwd() {  # TASK → Worker·AC가 일하는 디렉터리

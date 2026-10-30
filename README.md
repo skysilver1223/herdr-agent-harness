@@ -49,6 +49,7 @@ Herdr 첫 Pane에서 Orchestrator 에이전트(기본 claude)를 실행하고 `A
 요청 → BACKLOG → [사용자] SPEC 승인 → 계획(Milestone·Task·등급) → [사용자] 계획 승인
      → run: 착수 → 구현 → 증빙 → 교차 검토 → 통합 (실패 시 재작업, 최대 3회)
      → [사용자] Milestone 완료 승인 → 보관·태그·이력 → 다음 Milestone
+       (반려하면 사유와 함께 재작업 → 다시 승인 대기)
 ```
 
 | 사용자 결정 | 명령 (Orchestrator가 사용자의 명시 승인 뒤 실행) |
@@ -56,6 +57,7 @@ Herdr 첫 Pane에서 Orchestrator 에이전트(기본 claude)를 실행하고 `A
 | 구현 방향 | `.harness/SPEC.md`의 `- 상태: approved` |
 | 계획 | `approve-plan <milestone> --confirm-user-approval` — Task·등급·AC 지문을 기록하고 착수 허가 |
 | 완료·배포 | `approve <milestone> --confirm-user-approval` — 완료 처리, 보관, git 태그 |
+| 반려 | `reject <task> --reason "사유" --confirm-user-approval` — 사유를 기록하고 수정 요청으로. 다음 Worker·Reviewer가 사유를 받고, 재작업 상한은 새로 센다 |
 | 에이전트 교체 | 기본은 사용자 승인. `project.yaml`의 `failover`에 규칙(`auto`)이 있으면 그대로 자동 교체 |
 
 ## 신뢰성 — 스크립트가 강제하는 것
@@ -93,7 +95,7 @@ Herdr 첫 Pane에서 Orchestrator 에이전트(기본 claude)를 실행하고 `A
 | `metrics` | 에이전트·등급별 시도·AC 통과·첫 시도 통과, Reviewer별 승인·반려 (진행 중 / 전체) |
 | `validate` | 읽기 전용 일괄 검사 |
 | `run <m> [--in-pane] [--max-minutes N]` | 사람 결정이 필요할 때까지 자동 진행. 한 Task가 막혀도 나머지는 계속 진행합니다 |
-| `approve-plan <m>` / `approve <m>` | 사용자 결정 기록 (`--confirm-user-approval` 필수) |
+| `approve-plan <m>` / `approve <m>` / `reject <task> --reason ...` | 사용자 결정 기록 (`--confirm-user-approval` 필수) |
 | `prune <m>` | 보관함을 요약만 남기고 정리 (원본은 git 태그 `<m>-approved`) |
 | `models [--refresh]` | 등급별 모델 매핑. `--refresh`는 agy·codex의 실제 모델 목록과 대조 |
 | `quota-check TASK [ROLE]` / `quota-check --provider agy` | 쿼터 확인 |

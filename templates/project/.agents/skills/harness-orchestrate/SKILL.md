@@ -49,12 +49,17 @@ description: 승인된 Milestone을 harness.sh run으로 자동 진행하고, �
 - Milestone의 모든 Task가 `awaiting_approval`이면 사용자에게 보고한다: Task별 변경 요약, 최종 AC 증빙, Review 판정, 남은 위험.
 - 사용자가 **그 Milestone의 완료를 명시적으로 승인한 경우에만** `H approve <milestone> --confirm-user-approval`.
   보관함·요약·git 태그·HISTORY는 자동으로 남는다.
+- 사용자가 특정 Task의 결과를 **반려**하면, 사용자의 말을 그대로 사유로 적어 다음 순서로 진행한다.
+  1. `H reject <task> --reason "<사유>" --confirm-user-approval`
+  2. `H run <milestone>`
+  - 사유는 다음 Worker·Reviewer 지시서에 들어간다. 재작업 상한은 반려 시점부터 새로 센다.
+  - 계약(AC) 자체를 바꿔야 하는 반려면 harness-plan → `approve-plan`을 먼저 한다.
 - 배포·외부 반영은 별도로 사용자 승인을 받는다.
 
 ## 금지
 - Agent를 직접 띄우지 않는다(증빙이 끊긴다). 한 Task용 추가 지시는 파일로 `--extra-prompt`.
 - Task YAML의 status, `decisions/`, `*.harness.md`를 손으로 고치지 않는다.
-- 사용자 승인을 추론하지 않는다. "좋아 보여"는 완료 승인이 아니다. Milestone을 지목한 명시 승인만 인정한다.
+- 사용자 승인·반려를 추론하지 않는다. "좋아 보여"는 완료 승인이 아니다. Milestone을 지목한 명시 승인, Task를 지목한 명시 반려만 인정한다.
 - 교체 규칙이 `ask`인데 Provider를 바꾸지 않는다.
 
 ## 보고

@@ -221,17 +221,27 @@ check "검증 뒤 commit·변경(400건)은 버리고 기록" bash -c "grep -q '
 check "본 브랜치에는 검증된 내용만" bash -c "grep -qx ok '$P/out.txt' && test ! -e '$P/junk1.txt' && ! git -C '$P' log --format=%s | grep -q '몰래'"
 check "본 브랜치에 결과 반영" test -f "$P/out.txt"
 check "통합 기록 + 작업 공간 정리" bash -c "grep -q '^- 통합: OK' '$P/.harness/reviews/task-001-review-2.harness.md' && test ! -d '$P/.harness/worktrees/task-001'"
+check "worktree가 아닌 폴더는 작업 공간으로 인정하지 않음" bash -c "mkdir -p '$WORK/fakewt' && source '$REPO/lib/core.sh' && ! is_task_worktree '$WORK/fakewt' && ! is_task_worktree '$P'"
 H close task-001 reviewer >/dev/null
 
 echo "== 4. 자동 진행 · Milestone 승인 · 보관 =="
 FAKE_READ="pytest: 429 Too Many Requests 테스트 통과" expect_ok "run (task-002: 착수→구현→증빙→검토→통합, 화면의 429 문구는 무시)" H run milestone-001 --max-minutes 2 --poll 1
 has "run_result=milestone_ready" && ok "Milestone 승인 대기 도달" || ng "run 결과" "$LAST"
+expect_fail "반려 기록 없이 승인 대기를 되돌릴 수 없음" "반려 기록" H transition task-002 changes_requested
+expect_fail "확인 플래그 없는 반려 거부" "confirm-user-approval" H reject task-002 --reason "two.txt 형식을 다시 확인"
+expect_ok "사용자 반려" H reject task-002 --reason "two.txt 형식을 다시 확인" --confirm-user-approval
+check "반려 → 수정 요청" test "$(st task-002)" = changes_requested
+expect_ok "반려 후 자동 재작업 (작업 공간을 본 브랜치 기준으로 다시 만듦)" H run milestone-001 --max-minutes 2 --poll 1
+has "run_result=milestone_ready" && ok "재작업 뒤 다시 승인 대기" || ng "반려 후 run" "$LAST"
+check "Worker 지시서에 반려 사유" grep -q 'two.txt 형식을 다시 확인' "$P/.harness/runtime/task-002-worker.context.md"
+check "Reviewer 지시서에 반려 사유 확인 지시" grep -q '사용자 반려 사유 — 해소됐는지' "$P/.harness/runtime/task-002-reviewer.context.md"
 expect_fail "확인 플래그 없는 Milestone 승인 거부" "confirm-user-approval" H approve milestone-001
 expect_ok "Milestone 승인" H approve milestone-001 --confirm-user-approval
 check "보관함 요약" test -f "$P/.harness/archive/milestone-001/SUMMARY.md"
 check "Task 파일 이동" test ! -e "$P/.harness/tasks/task-001.yaml" -a -f "$P/.harness/archive/milestone-001/tasks/task-001.yaml"
 check "이력 한 줄" grep -q 'milestone-001' "$P/.harness/HISTORY.md"
 check "git 태그" git -C "$P" rev-parse --verify -q refs/tags/milestone-001-approved
+check "반려 기록도 보관" test -f "$P/.harness/archive/milestone-001/decisions/task-002-rejection-1.md"
 expect_ok "status" H status
 has "최근 완료" && has "milestone-001" && ok "status에 이력" || ng "status 이력" "$LAST"
 expect_ok "metrics" H metrics
@@ -269,7 +279,7 @@ check "Worker가 예비 Provider로 교체" grep -q "^primary_worker: claude" "$
 [[ "$(cat "$FAKE"/agents/hh-task-005-*-w1.args)" == *"--model gpt-test-premium"* ]] && ok "승인된 premium 모델 사용" || ng "premium 모델 인수"
 check "task-004는 충돌 해소 뒤 진행" test "$(st task-004)" = awaiting_approval
 expect_ok "run --in-pane" H run milestone-002 --in-pane
-check "별도 Pane은 끝나면 스스로 닫힘" grep -q 'herdr pane close' "$FAKE/pane-run"
+check "별도 Pane은 Milestone 승인 대기에서만 스스로 닫힘" grep -q "milestone_ready.*herdr pane close" "$FAKE/pane-run"
 check "임시 파일이 남지 않음" bash -c "test -z \"\$(find '$P' -name '.harness-tmp.*')\""
 
 echo "== 6. 상태 판정 단위 검사 =="
@@ -284,7 +294,11 @@ A='{"agent_status":"idle","revision":3,"state_change_seq":5}'
 check "Task ID의 sk- 는 Secret 아님" bash -c "source '$REPO/lib/core.sh'; ! has_secret <<<'task-sk-political-lri-trend'"
 check "SPEC 문장 'Password: 8자 이상'은 Secret 아님" bash -c "source '$REPO/lib/core.sh'; ! has_secret <<<'- Password: 8자 이상'"
 check "코드 'api_key = os.getenv(...)'는 Secret 아님" bash -c "source '$REPO/lib/core.sh'; ! has_secret <<<'api_key = os.getenv(\"KEY\")'"
-for sec in "password: hunter22" "password: 'hunter2abc'" "api_key='sk_live_abcdefgh'" 'DB_PASSWORD=P@ssw0rd!23' 'token=abcdefghij;'; do
+for ok_text in 'password: ${DB_PASSWORD}' 'password: <your-password>' 'api_key: Optional[str]' 'token = os.environ["TOKEN"]'; do
+  check "Secret 아님: $ok_text" bash -c 'source "$1/lib/core.sh"; ! has_secret <<<"$2"' _ "$REPO" "$ok_text"
+done
+for sec in "password: hunter22" "password: 'hunter2abc'" "api_key='sk_live_abcdefgh'" 'DB_PASSWORD=P@ssw0rd!23' 'token=abcdefghij;' \
+           'DB_PASSWORD=Xk9#mP2$vLq8' '"password": "hunter2abc"' '{"api_key":"sk_live_abcdefghij"}' 'password=`hunter2abcde`'; do
   check "Secret으로 잡음: $sec" bash -c 'source "$1/lib/core.sh"; has_secret <<<"$2"' _ "$REPO" "$sec"
 done
 

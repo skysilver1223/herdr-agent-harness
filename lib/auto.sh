@@ -108,7 +108,7 @@ step_worker() {
         if [[ -n "$(quota_of)" ]]; then agent_failed "$t" worker "보고서 없이 종료"; return 0; fi
         hold "$t" "Worker가 보고서 없이 끝났습니다 — Pane·로그($(rel "$(meta_get "$meta" log)")) 확인 후 close $t worker → 다시 run"; return 0
       fi
-      if grep -q '결과: BLOCKED' "$report"; then hold "$t" "Worker가 BLOCKED를 보고했습니다: $(rel "$report") — 답을 정한 뒤 close $t worker → dispatch --extra-prompt"; return 0; fi
+      if grep -q '결과: BLOCKED' "$report"; then hold "$t" "Worker가 BLOCKED를 보고했습니다: $(rel "$report") — 답을 파일로 적고 close $t worker → dispatch $t worker --extra-prompt <파일>"; return 0; fi
       run_child close "$t" worker || { hold "$t" "$(last_line)"; return 0; }
       STEP_PROGRESS=1
       if run_child transition "$t" submitted; then
@@ -219,8 +219,8 @@ cmd_run() {
     hcap herdr pane split --current --direction down --cwd "$ROOT" --no-focus
     (( RC == 0 )) || die "herdr pane split 실패: $OUT"
     t="$(jfield "$OUT" pane_id)"
-    # 정상 종료하면 Pane을 스스로 닫는다(결과는 status·run 로그·결과 파일에). 실패하면 메시지를 볼 수 있게 남긴다.
-    herdr pane run "$t" "$(printf '%q ' bash "$HARNESS_BIN" -C "$ROOT" run "$m" --max-minutes "$max_min" --poll "$poll")&& herdr pane close $(printf '%q' "$t")" >/dev/null ||
+    # Milestone 승인 대기에 도달하면 Pane을 스스로 닫는다. 보류·시간 상한·실패면 사람이 볼 수 있게 남긴다.
+    herdr pane run "$t" "$(printf '%q ' bash "$HARNESS_BIN" -C "$ROOT" run "$m" --max-minutes "$max_min" --poll "$poll")&& grep -q ' milestone_ready\$' $(printf '%q' "$ROOT/.harness/runtime/run-$m.result") && herdr pane close $(printf '%q' "$t")" >/dev/null ||
       die "Pane $t에서 run을 시작하지 못했습니다."
     info "자동 진행을 Pane $t에서 시작했습니다. 확인: status · 로그: .harness/runtime/run-$m.log"
     return 0
@@ -263,17 +263,19 @@ cmd_run() {
   done
 
   run_log "run $m 종료: $result"
-  printf '\n## %s 자동 진행 결과: %s\n\n' "$m" "$result"
-  for t in "${tasks[@]}"; do
-    printf -- '- %s: %s%s\n' "$t" "$(yget "$ROOT/.harness/tasks/$t.yaml" status)" "${held[$t]:+ — ${held[$t]}}"
-  done
-  (( ${#waits[@]} == 0 )) || printf '\n착수 대기:\n%s\n' "$(printf -- '- %s\n' "${waits[@]}")"
-  case "$result" in
-    milestone_ready) printf '\n다음: 사용자가 결과를 확인하고 승인하면 approve %s --confirm-user-approval\n' "$m" ;;
-    user_needed) printf '\n다음: 위 보류 사유를 사용자와 해결한 뒤 run %s를 다시 실행한다.\n' "$m" ;;
-    time_limit) printf '\n다음: 진행 중인 Agent는 그대로 둔다. run %s를 다시 실행하면 이어서 진행한다.\n' "$m" ;;
-    stuck) printf '\n다음: 진행할 수 있는 Task가 없습니다. status로 원인을 확인한다.\n' ;;
-  esac
+  {
+    printf '\n## %s 자동 진행 결과: %s\n\n' "$m" "$result"
+    for t in "${tasks[@]}"; do
+      printf -- '- %s: %s%s\n' "$t" "$(yget "$ROOT/.harness/tasks/$t.yaml" status)" "${held[$t]:+ — ${held[$t]}}"
+    done
+    (( ${#waits[@]} == 0 )) || printf '\n착수 대기:\n%s\n' "$(printf -- '- %s\n' "${waits[@]}")"
+    case "$result" in
+      milestone_ready) printf '\n다음: 사용자가 결과를 확인하고 승인하면 approve %s --confirm-user-approval\n' "$m" ;;
+      user_needed) printf '\n다음: 위 보류 사유를 사용자와 해결한 뒤 run %s를 다시 실행한다.\n' "$m" ;;
+      time_limit) printf '\n다음: 진행 중인 Agent는 그대로 둔다. run %s를 다시 실행하면 이어서 진행한다.\n' "$m" ;;
+      stuck) printf '\n다음: 진행할 수 있는 Task가 없습니다. status로 원인을 확인한다.\n' ;;
+    esac
+  } | tee -a "$RUN_LOG"
   printf '%s %s\n' "$(now)" "$result" >"$ROOT/.harness/runtime/run-$m.result"
   printf 'run_result=%s\n' "$result"
 }

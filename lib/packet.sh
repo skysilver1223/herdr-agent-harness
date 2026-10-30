@@ -14,6 +14,23 @@ excerpt() {  # FILE [LINES] — 줄 수와 줄 길이를 함께 자른다
   return 0
 }
 
+# 아직 해소되지 않은(그 뒤에 APPROVED Review가 없는) 최신 사용자 반려 사유.
+rejection_note() {  # TASK ROLE
+  local f e r s
+  f="$(latest_rejection "$1")"
+  [[ -n "$f" ]] || return 0
+  e="$(rec_get "$f" '시각(epoch)')"
+  for (( r = $(last_review "$1"); r > 0; r-- )); do
+    s="$(rec_get "$(rev_record "$1" "$r")" '시작(epoch)')"
+    (( ${s:-0} > ${e:-0} )) || break
+    [[ "$(review_verdict "$(rev_file "$1" "$r")")" != APPROVED ]] || return 0
+  done
+  if [[ "$2" == worker ]]; then printf '\n## 사용자 반려 사유 — 가장 먼저 해결한다 (%s)\n\n' "$(rel "$f")"
+  else printf '\n## 사용자 반려 사유 — 해소됐는지 반드시 확인한다 (%s)\n\n' "$(rel "$f")"; fi
+  sed -n '/^## 사유/,$p' "$f" | sed 1d | head -n 40 | cut -c1-400
+  return 0
+}
+
 write_packet() {  # TASK ROLE N ATTEMPT CWD BASE OUT EXTRA → Secret 의심이면 1
   local task="$1" role="$2" n="$3" att="$4" cwd="$5" base="$6" out="$7" extra="$8"
   local tf intent tmp s p r ids conflict="" att_rec verified
@@ -73,6 +90,7 @@ write_packet() {  # TASK ROLE N ATTEMPT CWD BASE OUT EXTRA → Secret 의심이�
       printf '\n## 최신 Review %s (판정: %s) — 지적이 해소됐는지부터 본다\n\n' "$r" "$(review_verdict "$(rev_file "$task" "$r")")"
       excerpt "$(rev_file "$task" "$r")" 80
     fi
+    rejection_note "$task" "$role"
     if [[ -n "$extra" ]]; then printf '\n## 이 Task 추가 지시\n\n'; cat "$extra"; printf '\n'; fi
     printf '\n## 다음 한 단계\n\n'
     if [[ "$role" == worker ]]; then

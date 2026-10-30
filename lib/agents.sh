@@ -138,7 +138,11 @@ cmd_dispatch() {
     plan_check "$task"
     n=$(( $(last_attempt "$task") + 1 ))
     max_rework="$(pnum limits max_rework 3)"
-    (( n <= max_rework + 1 )) || die "$task의 재작업 상한(${max_rework}회)을 넘었습니다. 사용자 판단이 필요합니다."
+    # 사용자가 반려했다면 그 시점부터 다시 센다(반려 사유를 고칠 기회를 준다).
+    local since=0 rej
+    rej="$(latest_rejection "$task")"
+    [[ -z "$rej" ]] || since="$(rec_get "$rej" '반려 시 attempt')"
+    (( n - ${since:-0} <= max_rework + 1 )) || die "$task의 재작업 상한(${max_rework}회)을 넘었습니다. 사용자 판단이 필요합니다."
   else
     [[ "$status" == reviewing ]] || die "reviewer dispatch는 reviewing Task만 가능합니다 ($task: $status)."
     provider="$(yget "$tf" reviewer)"
@@ -154,6 +158,7 @@ cmd_dispatch() {
   [[ "${HERDR_ENV:-}" == 1 ]] || die "dispatch는 Herdr Pane 안(HERDR_ENV=1)에서 실행한다."
   cwd="$(task_cwd "$task")"
   [[ -d "$cwd" ]] || die "작업 디렉터리가 없습니다: $cwd (worktree는 transition active가 만든다)"
+  ! worktree_enabled || is_task_worktree "$cwd" || die "작업 디렉터리가 git worktree가 아닙니다: $cwd"
   # WSL 재시작 뒤에는 SSHFS 마운트가 풀리고 빈 폴더만 남는다. 거기서 일하면 결과가 로컬에만 생긴다.
   if remote_enabled && [[ -z "${HARNESS_SKIP_MOUNT_CHECK:-}" ]] && ! mountpoint -q "$cwd" 2>/dev/null; then
     die "원격 소스가 마운트되어 있지 않습니다: $cwd (remote mount 후 다시 실행)"
