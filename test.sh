@@ -91,7 +91,14 @@ n=0; for a in "$@"; do [[ "$a" != -n ]] || n=1; done
 (( n )) || cat >/dev/null   # 실제 ssh처럼 -n이 없으면 호출한 쪽의 표준 입력을 먹는다
 cmd="${!#}"; bash -c "$cmd"
 EOF
-chmod +x "$FAKE/bin/herdr" "$FAKE/bin/ssh"
+# 가짜 claude: doctor가 보는 --help의 권한 모드 목록만 흉내 낸다 (FAKE_CLAUDE_OLD면 auto를 모르는 옛 CLI)
+cat >"$FAKE/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == --help ]] || exit 0
+if [[ -n "${FAKE_CLAUDE_OLD:-}" ]]; then printf '  --permission-mode <mode>  Permission mode (choices: "acceptEdits",\n      "bypassPermissions", "default", "plan")\n\nCommands:\n  config  "auto" 설정과 무관한 다른 절\n'
+else printf '  --permission-mode <mode>  Permission mode (choices: "acceptEdits", "auto",\n      "bypassPermissions", "manual", "plan")\n'; fi
+EOF
+chmod +x "$FAKE/bin/herdr" "$FAKE/bin/ssh" "$FAKE/bin/claude"
 
 export FAKE_DIR="$FAKE" FAKE_HOOK="$FAKE/hook.sh" PATH="$FAKE/bin:$PATH" HERDR_ENV=1 HARNESS_NO_SLEEP=1 HARNESS_NO_PULL=1 HARNESS_SKIP_MOUNT_CHECK=1
 export GIT_CONFIG_GLOBAL="$WORK/gitconfig" GIT_CONFIG_NOSYSTEM=1
@@ -159,6 +166,16 @@ check "프로젝트 이름의 workspace" grep -qx proj "$FAKE/ws"
 expect_ok   "start 재실행 (있는 workspace로 이동)" H start
 check "기존 workspace로 이동" grep -qx w1 "$FAKE/ws-focused"
 expect_ok   "doctor" H doctor
+has "[OK]      claude --permission-mode auto" && ok "doctor: claude CLI가 auto 권한 모드를 지원" || ng "doctor claude 확인" "$LAST"
+FAKE_CLAUDE_OLD=1 expect_fail "doctor: auto 모드 프로젝트인데 claude CLI가 auto를 모르면 실패" "permission-mode auto를 모릅니다" H doctor
+FAKE_CLAUDE_OLD=1 expect_ok "doctor (프로젝트 밖): 옛 claude CLI는 경고만" bash -c "cd '$WORK' && bash '$REPO/harness.sh' doctor"
+has "[WARN]    claude CLI가 --permission-mode auto를 모릅니다" && ok "프로젝트 밖 경고" || ng "프로젝트 밖 경고" "$LAST"
+setp claude_auto "'--permission-mode acceptEdits'"
+FAKE_CLAUDE_OLD=1 expect_ok "doctor: auto 권한 모드를 쓰지 않는 인수면 옛 CLI도 통과" H doctor
+setp claude_auto "''"
+H provider off claude --reason "시험" >/dev/null
+FAKE_CLAUDE_OLD=1 expect_ok "doctor: 사용 불가로 표시한 claude는 따지지 않음" H doctor
+H provider on claude >/dev/null
 
 echo "== 2. 계획 승인과 계약 고정 =="
 write_task task-001 milestone-001 out.txt "test -f out.txt && grep -q ok out.txt"
@@ -169,6 +186,14 @@ sed -i 's/^- 상태: draft/- 상태: approved/' "$P/.harness/SPEC.md"; commit_al
 expect_fail "확인 플래그 없는 계획 승인 거부" "confirm-user-approval" H approve-plan milestone-001
 expect_ok   "계획 승인" H approve-plan milestone-001 --confirm-user-approval
 check "draft → ready" test "$(st task-001)" = ready
+expect_ok "선행 Task를 기다리는 ready Task는 정상 대기 (validate 통과)" H validate
+! has "선행 Task" && ok "선행 대기를 문제로 표시하지 않음" || ng "선행 대기 표시" "$LAST"
+write_task task-090 milestone-090 n.txt "true" "dependencies: [task-nope]"
+expect_ok "없는 선행 Task: draft면 TODO" H validate
+has "[TODO] task-090: 선행 Task가 없습니다 — task-nope" && ok "없는 선행 Task 안내 (draft)" || ng "없는 선행 TODO" "$LAST"
+sed -i 's/^status: draft/status: ready/' "$P/.harness/tasks/task-090.yaml"
+expect_fail "없는 선행 Task: 계획 뒤면 실패" "선행 Task가 없습니다 — task-nope" H validate
+rm -f "$P/.harness/tasks/task-090.yaml" "$P/.harness/intents/task-090-intent.md"
 cp "$P/.harness/tasks/task-001.yaml" "$WORK/t1a.bak"
 sed -i 's|command: test -f out.txt.*|command: true|' "$P/.harness/tasks/task-001.yaml"
 expect_fail "승인 뒤 AC를 바꾸면 착수 거부" "바뀌었습니다" H transition task-001 active
@@ -181,6 +206,33 @@ printf 'dependencies:\n  # 주석만\n\n' >"$WORK/block3.yaml"
 expect_ok "키 뒤에 주석만 있으면 빈 목록" bash -c "source '$REPO/lib/core.sh'; ylist '$WORK/block3.yaml' dependencies"
 expect_fail "선행 Task 미완료면 착수 거부" "선행" H transition task-002 active
 expect_fail "ready에서 worker dispatch 거부" "active" H dispatch task-001 worker
+
+# 선행 Task 검사는 따로 만든 프로젝트에서 (본 흐름의 Task·결정 기록을 건드리지 않게)
+P_SAVE="$P"; P="$WORK/projd"
+R init "$P" --goal deps >/dev/null; sed -i 's/^- 상태: draft/- 상태: approved/' "$P/.harness/SPEC.md"
+write_task task-a milestone-a a.txt "test -f a.txt"
+write_task task-b milestone-a b.txt "test -f b.txt" "dependencies: [task-a]"
+write_task task-c milestone-c c.txt "true" "dependencies: [task-d]"
+write_task task-d milestone-c d.txt "true" "dependencies: [task-c]"
+write_task task-e milestone-e e.txt "true" "dependencies: [task-e]"
+write_task task-f milestone-f f.txt "true" "dependencies: [TEMPLATE]"
+write_task task-g milestone-g g.txt "true" "dependencies: [task-a]"
+commit_all "deps"
+expect_ok "validate: 계획 전(draft)의 선행 문제는 TODO" H validate
+has "[TODO] task-c: 선행 Task가 순환합니다" && has "[TODO] task-e: 자기 자신을 선행 Task로 둠" && has "[TODO] task-f: 선행 Task가 없습니다 — TEMPLATE" && ok "순환·자기 자신·TEMPLATE 선행 안내" || ng "선행 문제 안내" "$LAST"
+[[ "$(grep -c 'task-e:' <<<"$LAST")" == 1 ]] && ok "자기 자신 선행은 한 번만 알림" || ng "자기 자신 선행 중복" "$LAST"
+expect_fail "순환하는 선행 관계는 계획 승인 거부" "선행 Task가 순환합니다" H approve-plan milestone-c --confirm-user-approval
+expect_fail "자기 자신을 선행으로 두면 계획 승인 거부" "자기 자신을 선행 Task로 둠" H approve-plan milestone-e --confirm-user-approval
+expect_fail "없는 선행(TEMPLATE)은 계획 승인 거부" "선행 Task가 없습니다 — TEMPLATE" H approve-plan milestone-f --confirm-user-approval
+expect_ok "다른 Milestone의 draft를 기다리는 Task도 계획 승인은 된다" H approve-plan milestone-g --confirm-user-approval
+expect_ok "validate: 선행이 아직 계획 전(draft)이면 TODO" H validate
+has "[TODO] task-g: 선행 Task가 아직 계획 승인 전(draft)입니다 — task-a" && ok "계획 전 선행을 기다림 안내" || ng "draft 선행 안내" "$LAST"
+expect_ok "선행 Milestone 계획 승인" H approve-plan milestone-a --confirm-user-approval
+expect_ok "validate: 선행을 기다리는 ready는 정상" H validate
+sed -i 's/^status: ready/status: active/' "$P/.harness/tasks/task-b.yaml"
+expect_fail "선행이 통합 상태가 아닌 active는 실패 (착수 뒤 반려 등)" "선행 Task가 통합 상태가 아닙니다 (착수 뒤 반려 등) — task-a" H validate
+git -C "$P" checkout -q -- .harness/tasks/task-b.yaml
+P="$P_SAVE"
 
 echo "== 3. 작업 공간 · 증빙 · 교차 검토 · 통합 =="
 expect_ok "착수 (worktree 생성)" H transition task-001 active
@@ -269,6 +321,11 @@ expect_ok "metrics" H metrics
 has "Worker" && ok "지표 표" || ng "지표 표" "$LAST"
 expect_ok "prune (요약만 남김)" H prune milestone-001
 check "원본은 태그로 복원 가능" git -C "$P" cat-file -e "milestone-001-approved:.harness/archive/milestone-001/tasks/task-001.yaml"
+check "정리한 보관함의 Task도 보관된 Task로 안다 (글롭 문자는 ID가 아님)" bash -c "source '$REPO/lib/core.sh'; ROOT='$P'; archived_task task-001 && ! archived_task 'task-00?' && ! archived_task codex && ! archived_task Worker && ! archived_task Task"
+write_task task-091 milestone-091 q.txt "true" "dependencies: [task-001]"
+expect_ok "정리한 보관함의 Task를 선행으로 둔 Task (validate)" H validate
+! has "task-091: 선행 Task가 없습니다" && ok "정리된 선행 Task를 오타로 보지 않음" || ng "정리된 선행 Task" "$LAST"
+rm -f "$P/.harness/tasks/task-091.yaml" "$P/.harness/intents/task-091-intent.md"
 
 echo "== 5. 병렬 상한 · 범위 충돌 · 등급 · 재작업 상한 · 자동 교체 =="
 setp codex_premium "'gpt-test-premium'"
@@ -390,6 +447,7 @@ expect_ok "run (같은 회사·다른 모델 검토로 끝까지)" H run milesto
 has "run_result=milestone_ready" && ok "승인 대기 도달" || ng "run 결과" "$LAST"
 check "검토 기록에 실제 검토 수준" grep -q '^- 검토 수준: cross_model (필요: cross_model)' "$P/.harness/reviews/task-001-review-1.harness.md"
 [[ "$(cat "$FAKE"/agents/hh-task-001-*-r1.args)" == *"--model opus"* && "$(cat "$FAKE"/agents/hh-task-001-*-w3.args)" == *"--model sonnet"* ]] && ok "Worker sonnet / Reviewer opus로 실행" || ng "모델 인수"
+[[ "$(cat "$FAKE"/agents/hh-task-001-*-w3.args)" == *"--permission-mode auto"* ]] && ok "claude auto 모드 기본 인수는 --permission-mode auto" || ng "claude auto 인수" "$(cat "$FAKE"/agents/hh-task-001-*-w3.args)"
 expect_ok "status" H status
 has "같은 회사 검토: task-001" && ok "승인 요청에 같은 회사 검토 표시" || ng "같은 회사 검토 표시" "$LAST"
 sed -i "s|^  level:.*|  level: 'same_model'|" "$P/.harness/project.yaml"
@@ -483,9 +541,11 @@ check "ID가 더 긴 다른 Task(task-003-1)의 기록은 함께 보관하지 �
 rm -f "$P/.harness/tasks/task-003-1.yaml" "$P/.harness/intents/task-003-1-intent.md" "$P/.harness/decisions/task-003-1-note.md"; commit_all "task-003-1 정리"
 
 echo "== 8. 업그레이드 =="
-expect_ok "저장소에서 업그레이드" R upgrade "$P"
 V="$(sed -n 's/^HARNESS_VERSION="\(.*\)"/\1/p' "$REPO/lib/core.sh")"
-has "$V → $V" && ok "버전 표시" || ng "버전 표시" "$LAST"
+sed -i 's/^HARNESS_VERSION=.*/HARNESS_VERSION="2.2.0"/' "$P/.harness/bin/lib/core.sh"; commit_all "옛 bin 흉내"
+expect_ok "저장소에서 업그레이드" R upgrade "$P"
+has "2.2.0 → $V" && ok "버전 표시" || ng "버전 표시" "$LAST"
+has "--permission-mode auto(Claude Code auto 모드)로 바뀌었습니다" && ok "업그레이드: claude auto 기본 인수 변경 안내" || ng "업그레이드 안내" "$LAST"
 commit_all "upgrade" 2>/dev/null || true
 echo "# local edit" >>"$P/.agents/skills/harness-work/SKILL.md"
 expect_fail "로컬 수정이 있으면 덮어쓰지 않음" "커밋되지 않은 변경" H upgrade
@@ -664,6 +724,13 @@ expect_fail "v2 프로젝트는 이전하지 않음" "이미 v2" R migrate "$P"
 printf '.harness/tasks/task-010.yaml\n.harness/intents/task-010-intent.md\n' >>"$V1/.git/info/exclude"
 expect_fail "Git이 추적하지 않는 열린 Task는 제자리에서 바꾸지 않음 (실패 때 되돌릴 수 없다)" "Git이 추적하지 않는 파일은 제자리에서" R migrate "$V1" "${MIG[@]}"
 rm -f "$V1/.harness/tasks/task-010.yaml" "$V1/.harness/intents/task-010-intent.md"; sed -i '/task-010/d' "$V1/.git/info/exclude"
+sed -i "s/^  approval_mode: 'bypass'/  approval_mode: 'auto'/; /^  agy_auto: /d" "$V1/.harness/policies/agent-policy.yaml"   # agy 인수 키가 없는 v1
+expect_fail "사전 점검: 실제로 바뀌는 Provider 인수를 보고서에 밝힘 (수정 중이라 차단)" "커밋되지 않은 변경" R migrate "$V1" "${MIG[@]}"
+has "claude: v1 기본값 --permission-mode acceptEdits → v2 기본값 --permission-mode auto" && has "agy: v1에서 인수 없음(확인창) → v2 내장 기본값 --mode accept-edits" && has "agy_auto: v1에서 인수 없이 확인창으로" && ok "auto 모드 인수 변화·인수 없던 Provider 안내" || ng "인수 변화 보고" "$LAST"
+sed -i "/^  approval_mode: /d" "$V1/.harness/policies/agent-policy.yaml"
+expect_fail "사전 점검: v1에 승인 모드가 없으면 ask로 (v1 동작 그대로)" "커밋되지 않은 변경" R migrate "$V1" "${MIG[@]}"
+has "| 도구 승인 모드 | ask | ask |" && ok "승인 모드 없음 → ask" || ng "승인 모드 기본값" "$LAST"
+git -C "$V1" checkout -q -- .harness/policies/agent-policy.yaml
 git -C "$V1" add -f .harness/evidence/raw/task-005-worker-attempt-1.md && git -C "$V1" commit -qm "원문 로그 하나를 강제로 추적"
 expect_fail "Git이 추적하는 v1 원문 로그는 미리 차단 (보관 위치는 Git 밖)" "Git이 추적하는 v1 원문 로그" R migrate "$V1" "${MIG[@]}"
 git -C "$V1" reset -q HEAD~1   # --mixed: 추적만 풀고 파일은 남긴다 (다시 무시 목록 대상)
@@ -692,17 +759,26 @@ rm -f "$MSGHOOK"
 # 강제 종료: hook에서 맨 위 migrate 프로세스만 SIGKILL (그 프로세스는 commit을 기다리는 중이라 trap을 돌릴 틈이 없다)
 cat >"$HOOK" <<'EOT'
 #!/bin/sh
-p=$PPID; top=""
+# 조상 프로세스를 /proc로 따라 올라가, 바로 위의 migrate 프로세스 묶음 중 가장 바깥 것만 죽인다.
+# 묶음 위에서 멈춘다: 바깥 셸의 명령 줄에 같은 글자가 있어도 건드리지 않는다. 찾은 경로는 진단용으로 남긴다.
+p=$PPID; top=""; walk=""
 while [ -n "$p" ] && [ "$p" -gt 1 ]; do
-  if tr '\000' ' ' <"/proc/$p/cmdline" 2>/dev/null | grep -q 'harness.sh migrate'; then top=$p; fi
-  p=$(ps -o ppid= -p "$p" | tr -d ' ')
+  c=$(tr '\000' ' ' <"/proc/$p/cmdline" 2>/dev/null)
+  walk="$walk $p[$(printf '%s' "$c" | cut -c1-50)]"
+  case "$c" in
+    *"/harness.sh migrate "*) top=$p ;;
+    *) [ -z "$top" ] || break ;;
+  esac
+  p=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$p/status" 2>/dev/null)
 done
+echo "top=$top walk=$walk" >>"$HOOKLOG"
 [ -z "$top" ] || kill -9 "$top"
 exit 1
 EOT
 cp "$HOOK" "$HOOK.kill"
-rc=0; R migrate "$V1" "${MIG[@]}" --complete task-004 --complete-reason "D-9" --apply --confirm-user-approval >/dev/null 2>&1 </dev/null || rc=$?
-(( rc == 137 )) && ok "이전 도중 강제 종료 (되돌릴 기회 없이 끊김)" || ng "강제 종료 재현 (rc=$rc)"
+export HOOKLOG="$WORK/hook.log"
+rc=0; R migrate "$V1" "${MIG[@]}" --complete task-004 --complete-reason "D-9" --apply --confirm-user-approval >"$WORK/crash.out" 2>&1 </dev/null || rc=$?
+(( rc == 137 )) && ok "이전 도중 강제 종료 (되돌릴 기회 없이 끊김)" || ng "강제 종료 재현 (rc=$rc)" "$(tail -n 3 "$WORK/crash.out"; tail -n 1 "$HOOKLOG" 2>/dev/null)"
 check "끊긴 이전: 복구 기록과 이전 브랜치가 남음" bash -c "test -f '$V1/.git/harness-migrate.journal' && [[ \$(git -C '$V1' branch --show-current) == harness-v2-migration ]]"
 expect_fail "끊긴 기록이 있으면 다른 실행은 되돌리기를 안내" "--rollback" R migrate "$V1" "${MIG[@]}"
 rm -f "$HOOK"
@@ -716,8 +792,9 @@ snap >"$WORK/s4"
 cmp -s "$WORK/s0" "$WORK/s4" && ok "--rollback 뒤 시작 상태와 같음 (끊긴 실행의 임시 파일도 정리)" || ng "--rollback 불완전" "$(diff "$WORK/s0" "$WORK/s4" | head -n 20)"
 # B: commit 뒤 끊겨 기록이 남은 채 이전 브랜치에 사용자 작업이 쌓인 경우
 sed 's/^exit 1$/exit 0/' "$HOOK.kill" >"$V1/.git/hooks/post-commit"; chmod +x "$V1/.git/hooks/post-commit"
-rc=0; R migrate "$V1" "${MIG[@]}" --complete task-004 --complete-reason "D-9" --apply --confirm-user-approval >/dev/null 2>&1 </dev/null || rc=$?
+rc=0; R migrate "$V1" "${MIG[@]}" --complete task-004 --complete-reason "D-9" --apply --confirm-user-approval >"$WORK/crash.out" 2>&1 </dev/null || rc=$?
 rm -f "$V1/.git/hooks/post-commit"
+(( rc == 137 )) || ng "commit 직후 강제 종료 재현 (rc=$rc)" "$(tail -n 3 "$WORK/crash.out"; tail -n 1 "$HOOKLOG" 2>/dev/null)"
 check "commit 직후 강제 종료: 기록과 이전 commit이 남음" bash -c "(( $rc == 137 )) && test -f '$V1/.git/harness-migrate.journal' && [[ \$(git -C '$V1' log -1 --format=%s) == 'harness: v1 → v2 이전'* ]]"
 git -C "$V1" commit --allow-empty -qm "사용자 작업 (끊긴 기록을 모른 채)"
 expect_fail "이전 브랜치에 사용자 commit이 쌓였으면 --rollback은 거부" "이전 뒤의 commit이 있어" R migrate "$V1" --rollback
@@ -735,6 +812,7 @@ check "남은 변경은 무관한 미추적 파일뿐" bash -c "[[ \"\$(git -C '
 Y="$V1/.harness/project.yaml"
 check "project.yaml: schema 2·검토 수준·v1 제한값·승인 모드" bash -c "grep -q \"^schema_version: '2'\" '$Y' && grep -q \"^  level: 'cross_model'\" '$Y' && grep -q '^  max_parallel_workers: 2   #' '$Y' && grep -q '^  ac_timeout_seconds: 300 ' '$Y' && grep -q '^  quota_low_pct: 30 ' '$Y' && grep -q \"^  approval_mode: 'bypass'\" '$Y'"
 check "project.yaml: 에이전트·모델 매핑·바꾼 인수" bash -c "grep -q '^  available: \[claude, codex, agy\]' '$Y' && grep -q \"^  claude_standard: 'sonnet'\" '$Y' && grep -q \"^  claude_light: 'sonnet'\" '$Y' && grep -q \"^  claude_premium: 'opus'\" '$Y' && grep -q 'network_access=true' '$Y'"
+check "v1이 넣던 기본 인수(claude acceptEdits)는 옮기지 않음 → v2 기본값" grep -q "^  claude_auto: ''" "$Y"
 check "검토 수준 결정 기록 (사용자 사유)" grep -q '^회사 정책: claude만$' "$V1/.harness/decisions/review-level-1.md"
 B="$V1/.harness/archive/v1-milestone-001"
 check "완료·완료 인정 Task 보관" bash -c "ls '$B/tasks' | tr '\n' ' ' | grep -qx 'task-001.yaml task-002.yaml task-003.yaml task-004.yaml '"

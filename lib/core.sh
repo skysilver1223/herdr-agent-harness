@@ -1,7 +1,7 @@
 # herdr-harness: 공통 함수 — 출력·임시 파일·Secret 검사·설정 읽기·경로·Acceptance Criteria.
 # harness.sh가 source한다. 단독 실행하지 않는다.
 
-HARNESS_VERSION="2.2.0"
+HARNESS_VERSION="2.2.1"
 shopt -s inherit_errexit 2>/dev/null || true   # harness.sh를 거치지 않고 source해도 같은 규칙(테스트 등)
 ROOT=""
 TMP_FILES=()
@@ -335,7 +335,21 @@ milestone_tasks() {  # MILESTONE → 그 Milestone의 Task ID
   return 0
 }
 
-archived_task() { compgen -G "$ROOT/.harness/archive/*/tasks/$1.yaml" >/dev/null; }
+# 보관된 Task인가. 정리(prune)한 보관함은 요약(SUMMARY.md) 표에만 남는다. ID 형식이 아니면 아니다(글롭 문자로 보관함을 훑지 않게).
+archived_task() {
+  local s
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+  if compgen -G "$ROOT/.harness/archive/*/tasks/$1.yaml" >/dev/null; then return 0; fi
+  for s in "$ROOT"/.harness/archive/*/SUMMARY.md; do
+    [[ -f "$s" ]] || continue
+    if awk -F'|' -v id="$1" '
+         /^\| Task \|/ { t = 1; next }           # Task 표 머리줄부터
+         t && !/^\|/ { t = 0 }                    # 표가 끝나면 그만 (지표 표의 첫 칸은 Task가 아니다)
+         t { g = $2; gsub(/^[ \t]+|[ \t]+$/, "", g); if (g == id) { f = 1; exit } }
+         END { exit !f }' "$s"; then return 0; fi
+  done
+  return 1
+}
 
 spec_approved() {
   [[ "$(awk -F': *' '/^- 상태:/ { print $2; exit }' "$ROOT/.harness/SPEC.md" 2>/dev/null | tr -d '\r[:space:]')" == approved ]]

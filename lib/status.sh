@@ -132,7 +132,7 @@ cmd_status() {
 }
 
 cmd_validate() {
-  local problems=0 todos=0 id tf st w r dep other open=0 active=0 s1 s2 max_open max_par intent row t deps scope_txt p
+  local problems=0 todos=0 id tf st w r dep why other open=0 active=0 s1 s2 max_open max_par intent row t deps scope_txt p
   local -A scopes=()
   ok()   { printf '[OK]   %s\n' "$*"; }
   bad()  { printf '[FAIL] %s\n' "$*"; problems=$((problems + 1)); }
@@ -194,10 +194,24 @@ cmd_validate() {
     fi
     deps="$(ylist "$tf" dependencies 2>/dev/null)" || deps=""
     scope_txt="$(ylist "$tf" write_scope 2>/dev/null)" || scope_txt=""
-    if [[ "$st" == ready || "$st" == active ]]; then
+    # 선행 Task를 기다리는 ready는 정상 대기다(계획 승인이 의존 Task까지 한꺼번에 ready로 올린다. 착수 게이트가 막는다).
+    # 문제는 착수될 수 없는 선행 관계(없는 ID·자기 자신·순환)와, 선행이 통합 상태가 아닌 active다.
+    if [[ "$st" != completed ]]; then
       while IFS= read -r dep; do
-        [[ -z "$dep" ]] || dep_done "$dep" || bad "$id: 선행 Task $dep가 아직 통합 전입니다"
+        [[ -n "$dep" ]] || continue
+        why="$(dep_problem "$id" "$dep")"
+        if [[ -n "$why" ]]; then
+          if [[ "$st" == draft ]]; then todo "$id: $why"; else bad "$id: $why"; fi
+        elif [[ "$st" == active ]] && ! dep_done "$dep"; then
+          bad "$id: 선행 Task가 통합 상태가 아닙니다 (착수 뒤 반려 등) — $dep"
+        elif [[ "$st" == ready && -f "$ROOT/.harness/tasks/$dep.yaml" && "$(yget "$ROOT/.harness/tasks/$dep.yaml" status 2>/dev/null)" == draft ]]; then
+          todo "$id: 선행 Task가 아직 계획 승인 전(draft)입니다 — $dep (그 Milestone을 승인해야 착수된다)"
+        fi
       done <<<"$deps"
+      if ! grep -qxF -- "$id" <<<"$deps" && dep_cycle "$id"; then   # 자기 자신 선행은 위에서 이미 알렸다
+        if [[ "$st" == draft ]]; then todo "$id: 선행 Task가 순환합니다 (서로 기다려 착수되지 않는다)"
+        else bad "$id: 선행 Task가 순환합니다 (서로 기다려 착수되지 않는다)"; fi
+      fi
     fi
     if [[ "$st" == active ]]; then
       active=$((active + 1))
@@ -233,6 +247,24 @@ cmd_doctor() {
   for c in $(providers) jq ssh sshfs; do
     if command -v "$c" >/dev/null 2>&1; then printf '[OK]      %s\n' "$c"; else printf '[OPTION]  %s 없음\n' "$c"; fi
   done
+  # auto 승인 모드의 claude 기본 인수는 Claude Code의 auto 권한 모드다. 오래된 CLI는 이 값을 몰라 기동에 실패한다.
+  # 프로젝트 안에서는 dispatch가 실제로 쓸 인수로 판단하고, 밖에서는 기본값을 쓴다고 본다.
+  if command -v claude >/dev/null 2>&1; then
+    local help uses=1 are='--permission-mode[= ]auto([[:space:]]|$)'
+    help="$(timeout 10 claude --help 2>/dev/null | awk '/--permission-mode </ { p = 1; print; next } p && (/^[ \t]*$/ || /^ *-/) { exit } p' || true)"
+    if [[ -n "$ROOT" ]]; then
+      uses=0
+      if [[ "$(pget agents approval_mode ask)" == auto ]] && providers | grep -qx claude && ! provider_off claude &&
+         [[ "$( (approval_args_raw claude auto) 2>/dev/null )" =~ $are ]]; then uses=1; fi
+    fi
+    if (( uses )); then
+      if [[ -z "$help" ]]; then printf '[WARN]    claude --help에서 권한 모드 목록을 읽지 못했습니다 (claude 실행 확인)\n'
+      elif [[ "$help" == *'"auto"'* ]]; then printf '[OK]      claude --permission-mode auto\n'
+      elif [[ -n "$ROOT" ]]; then
+        printf '[FAIL]    claude CLI가 --permission-mode auto를 모릅니다 (이 프로젝트의 auto 모드 인수) — claude 업데이트 또는 project.yaml agents.claude_auto 지정\n'; fail=1
+      else printf '[WARN]    claude CLI가 --permission-mode auto를 모릅니다 — auto 승인 모드로 claude를 쓰려면 claude 업데이트 또는 agents.claude_auto 지정\n'; fi
+    fi
+  fi
   if [[ "${HERDR_ENV:-}" == 1 ]]; then printf '[OK]      Herdr Pane 안\n'; else printf '[INFO]    Herdr Pane 밖 (dispatch·run은 Pane 안에서)\n'; fi
   (( fail == 0 )) || exit 1
 }

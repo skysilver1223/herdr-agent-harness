@@ -179,6 +179,35 @@ gate_active() {
   fi
 }
 
+# 선행 Task 문제 — 없는 ID(오타·대체·TEMPLATE), 자기 자신. 문제가 있으면 이유를 출력한다(빈 출력 = 없음).
+dep_problem() {  # TASK DEP
+  if [[ "$2" == "$1" ]]; then echo "자기 자신을 선행 Task로 둠"; return 0; fi
+  if [[ "$2" == TEMPLATE || ! -f "$ROOT/.harness/tasks/$2.yaml" ]] && ! archived_task "$2"; then
+    echo "선행 Task가 없습니다 — $2 (dependencies 확인)"
+  fi
+  return 0
+}
+
+# 진행 중 Task들의 선행 관계를 따라가 자기 자신으로 돌아오는가. 서로 기다리는 Task는 영원히 착수되지 않는다.
+dep_cycle() {  # TASK
+  local start="$1" cur nxt f
+  local -A seen=()
+  local -a queue=("$1")
+  while (( ${#queue[@]} )); do
+    cur="${queue[0]}"; queue=("${queue[@]:1}")
+    f="$ROOT/.harness/tasks/$cur.yaml"
+    [[ -f "$f" ]] || continue
+    [[ "$cur" == "$start" || "$(yget "$f" status 2>/dev/null)" != completed ]] || continue   # 끝난 Task는 막지 않는다
+    while IFS= read -r nxt; do
+      [[ -n "$nxt" ]] || continue
+      [[ "$nxt" != "$start" ]] || return 0
+      [[ -z "${seen[$nxt]:-}" ]] || continue
+      seen[$nxt]=1; queue+=("$nxt")
+    done < <( (ylist "$f" dependencies) 2>/dev/null || true)
+  done
+  return 1
+}
+
 worker_busy() {  # TASK → Worker Agent가 아직 working인가
   local m name
   m="$(meta_file "$1" worker)"
@@ -388,7 +417,7 @@ need_confirm() {
 }
 
 cmd_approve_plan() {
-  local m="${1:-}" id tf w r wt rt wm rm_ mm req planned basis rows="" tasks=()
+  local m="${1:-}" id tf w r wt rt wm rm_ mm req planned basis dep why rows="" tasks=()
   [[ -n "$m" ]] || die "사용법: approve-plan MILESTONE --confirm-user-approval"
   need_id "$m"; shift; need_confirm "$@"
   require_human approve-plan
@@ -401,6 +430,13 @@ cmd_approve_plan() {
     ac_load "$tf"; [[ -z "$AC_ERR" ]] || die "$id: $AC_ERR"
     [[ -f "$ROOT/$(yget "$tf" intent)" ]] || die "$id: intent 파일이 없습니다."
     ylist "$tf" write_scope >/dev/null; ylist "$tf" dependencies >/dev/null
+    # 착수할 수 없는 선행 관계는 승인하지 않는다 (승인 뒤에는 착수 게이트에서 영원히 기다린다)
+    while IFS= read -r dep; do
+      [[ -n "$dep" ]] || continue
+      why="$(dep_problem "$id" "$dep")"
+      [[ -z "$why" ]] || die "$id: $why"
+    done <<<"$(ylist "$tf" dependencies)"
+    grep -qxF -- "$id" <<<"$(ylist "$tf" dependencies)" || ! dep_cycle "$id" || die "$id: 선행 Task가 순환합니다 (서로 기다려 착수되지 않는다)"
     w="$(yget "$tf" primary_worker)"; r="$(yget "$tf" reviewer)"
     is_provider "$w" && is_provider "$r" || die "$id: Worker/Reviewer 배정 오류 ($w / $r)"
     wt="$(task_tier "$tf" worker)"; rt="$(task_tier "$tf" reviewer)"

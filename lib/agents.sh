@@ -11,7 +11,7 @@ approval_args_raw() {  # PROVIDER MODE → 공백 구분 인수
   v="$(pget agents "${p}_${mode}")"
   if [[ -z "$v" ]]; then
     case "$p:$mode" in
-      claude:auto)   v="--permission-mode acceptEdits" ;;
+      claude:auto)   v="--permission-mode auto" ;;   # acceptEdits는 편집만 자동 승인해 명령(AC 실행 등)마다 확인창에서 멈춘다
       claude:bypass) v="--permission-mode bypassPermissions" ;;
       codex:auto)    v="--ask-for-approval never --sandbox workspace-write" ;;
       codex:bypass)  v="--dangerously-bypass-approvals-and-sandbox" ;;

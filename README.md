@@ -40,7 +40,7 @@ Herdr 첫 Pane에서 Orchestrator 에이전트(기본 claude)를 실행하고 `A
 `init` 주요 옵션:
 - `--worker`·`--reviewer`·`--orchestrator`: 서로 다른 에이전트를 배정합니다. Worker와 Reviewer는 반드시 달라야 합니다.
 - `--fallback claude,agy`: 교체 순서
-- `--approval-mode ask|auto|bypass`: 도구 실행 승인 방식
+- `--approval-mode ask|auto|bypass`: 도구 실행 승인 방식. auto의 claude 기본 인수는 `--permission-mode auto`(Claude Code auto 모드)입니다. `acceptEdits`는 편집만 자동 승인해 AC 실행 같은 명령마다 확인창에서 멈춥니다. 오래된 claude CLI가 이 모드를 모르면 `doctor`가 알립니다. 조직 정책·요금제 등으로 auto 모드가 꺼져 있으면 Claude가 확인창으로 돌아가 Worker가 멈출 수 있습니다. 그때는 `agents.claude_auto`에 다른 인수를 지정하거나, 작업 공간이 격리돼 있으면 bypass를 씁니다
 - `--code-dir DIR`: 수정할 코드 저장소가 따로 있을 때
 
 ## 흐름

@@ -40,6 +40,7 @@ agents:
   # ask | auto | bypass — 도구 실행 승인만 바꾼다. 상태 전이와 사용자 결정은 그대로 사람 몫이다.
   approval_mode: '@@APPROVAL_MODE@@'
   # 모드별 Provider 인수. 비우면 내장 기본값(claude·codex·agy). 다른 에이전트는 여기에 추가한다.
+  # claude auto 기본값은 --permission-mode auto(Claude Code auto 모드). 오래된 claude CLI면 doctor가 알린다.
   # 예) opencode_auto: '--some-flag'   opencode_effort_flag: '--reasoning'
   claude_auto: ''
   claude_bypass: ''

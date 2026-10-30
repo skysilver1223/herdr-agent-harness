@@ -298,18 +298,41 @@ mg_models() {  # v1 agent-policy의 모델 설정 → v2 models (MG_MODEL, MG_DT
   case "$MG_DEFFORT" in ""|low|medium|high) ;; *) mg_warn "worker_default_effort($MG_DEFFORT)를 v2가 몰라 비워 둔다"; MG_DEFFORT="" ;; esac
 }
 
-mg_args() {  # v1 Provider 인수가 v2 내장 기본값과 다를 때만 옮긴다 (MG_ARGS)
-  local ap="$MG_DIR/.harness/policies/agent-policy.yaml" p mode v builtin
+mg_v1_args() {  # KEY → v1 생성기가 넣던 기본 인수 (사용자가 바꾼 값과 구분한다)
+  case "$1" in
+    claude_auto) echo '--permission-mode acceptEdits' ;; claude_bypass) echo '--permission-mode bypassPermissions' ;;
+    codex_auto) echo '--ask-for-approval never --sandbox workspace-write' ;; codex_bypass) echo '--dangerously-bypass-approvals-and-sandbox' ;;
+    agy_auto) echo '--mode accept-edits' ;; agy_bypass) echo '--dangerously-skip-permissions' ;;
+  esac
+}
+
+# v1 Provider 인수 → v2. 사용자가 바꾼 값(v2 내장 기본값과도, v1이 넣던 기본값과도 다른 값)만 옮긴다 (MG_ARGS).
+# 실제로 쓰일 인수가 바뀌는 경우는 보고서에 밝힌다 (MG_ARGNOTE) — 사용자가 승인하는 보고서에서 숨기지 않는다.
+mg_args() {
+  local ap="$MG_DIR/.harness/policies/agent-policy.yaml" p mode v builtin v1d
   for p in $MG_AVAIL; do
     for mode in auto bypass; do
       v="$(sget "$ap" agent_policy "${p}_${mode}")"
-      [[ -n "$v" ]] || continue
       builtin="$(approval_args_raw "$p" "$mode")"
+      v1d="$(mg_v1_args "${p}_$mode")"
+      if [[ -z "$v" ]]; then
+        # v1은 값이 비었거나 키가 없으면 인수를 붙이지 않았다(그 Provider는 확인창). v2는 비우면 내장 기본값을 쓴다 — 권한이 넓어진다.
+        if [[ "$mode" == "$MG_MODE" && -n "$builtin" ]]; then
+          MG_ARGNOTE+=("${p}: v1에서 인수 없음(확인창) → v2 내장 기본값 $builtin")
+          mg_todo "${p}_$mode: v1에서 인수 없이 확인창으로 쓰던 Provider입니다. v2는 비우면 내장 기본값($builtin)을 쓴다 — 확인창을 유지하려면 approval_mode를 ask로 두거나 agents.${p}_$mode를 지정한다"
+        fi
+        continue
+      fi
       [[ "$v" != "$builtin" ]] || continue
+      if [[ "$v" == "$v1d" ]]; then   # v1이 넣던 기본값: v2 기본값으로 바뀐다
+        [[ "$mode" != "$MG_MODE" ]] || MG_ARGNOTE+=("${p}: v1 기본값 $v → v2 기본값 $builtin")
+        continue
+      fi
       if [[ "$v" =~ ^[-A-Za-z0-9=_./\ ]*$ ]] && { [[ "$mode" != auto ]] || ! grep -Eqi 'dangerous|bypass|danger-full-access' <<<"$v"; }; then
-        MG_ARGS[${p}_$mode]="$v"
+        MG_ARGS[${p}_$mode]="$v"; MG_ARGNOTE+=("${p}_$mode: v1 값 유지 ($v)")
       else
         mg_warn "v1 Provider 인수를 v2가 받지 않아 옮기지 않음: ${p}_$mode = $v"
+        MG_ARGNOTE+=("${p}_$mode: v1 값($v)을 받지 않아 v2 내장 기본값 ${builtin:-(없음)}")
       fi
     done
   done
@@ -329,8 +352,8 @@ mg_survey() {
   MG_WORKER="$(sget "$pj" providers primary_worker codex)"
   MG_REVIEWER="$(sget "$pj" providers reviewer agy)"
   MG_FALLBACK="$(mg_list "$(sget "$pj" providers fallback_chain claude)")"
-  MG_MODE="$(sget "$ap" agent_policy approval_mode auto)"
-  case "$MG_MODE" in ask|auto|bypass) ;; *) mg_warn "v2가 모르는 approval_mode라 auto로 둔다: $MG_MODE"; MG_MODE=auto ;; esac
+  MG_MODE="$(sget "$ap" agent_policy approval_mode ask)"   # v1은 값이 없으면 ask(확인창)로 동작했다
+  case "$MG_MODE" in ask|auto|bypass) ;; *) mg_warn "v2가 모르는 approval_mode라 ask로 둔다: $MG_MODE"; MG_MODE=ask ;; esac
   MG_PAR="$(sget "$pj" limits max_parallel_workers 2)"
   MG_ACTIVE="$(sget "$pj" limits max_active_tasks 5)"
   MG_TIMEOUT="$(sget "$pp" execution acceptance_check_timeout_seconds 600)"
@@ -625,7 +648,7 @@ mg_plan() {
 }
 
 mg_preflight() {
-  local top line n live gd p ign=0 i d gv gmaj gmin
+  local top line n live gd p ign=0 i d gv gmaj gmin untracked=0
   local -a tr_dst=() ig_dst=() ig_src=()
   gv="$(git --version 2>/dev/null | awk '{print $3}')"
   IFS=. read -r gmaj gmin _ <<<"$gv"
@@ -663,10 +686,12 @@ mg_preflight() {
   line="$(git -C "$MG_DIR" status --porcelain --untracked-files=all -- .harness .agents .claude/skills "${MG_DOCS[@]}" .gitignore 2>/dev/null | grep '^??' || true)"
   n="$(grep -c . <<<"$line" || true)"
   (( n == 0 )) || mg_block "Harness 경로에 커밋되지 않은 새 파일 ${n}개 — 먼저 commit한다: $(head -n 3 <<<"$line" | cut -c4- | tr '\n' ' ')"
+  untracked=$n   # 커밋 전이면 아래 Git 추적 여부 검사는 같은 원인을 되풀이할 뿐이라 건너뛴다
   line="$(git -C "$MG_DIR" status --porcelain 2>/dev/null | grep '^??' | grep -vE '^\?\? "?(\.harness/|\.agents/|\.claude/|AGENTS\.md|CLAUDE\.md|GEMINI\.md|HARNESS_START\.md|\.gitignore)' || true)"
   n="$(grep -c . <<<"$line" || true)"
   (( n == 0 )) || mg_warn "이전과 무관한 미추적 파일·폴더 ${n}개는 그대로 둔다 (commit에 넣지 않는다)"
   # 제자리에서 바꾸는 파일(열린 Task·진입 문서·.gitignore)은 Git이 추적해야 실패 때 git으로 되돌린다.
+  (( untracked == 0 )) || { live="$(mg_live_agents)"; [[ -z "$live" ]] || mg_block "v1이 띄운 Agent가 아직 Herdr에 있습니다: $live — 작업을 마치고 Pane을 닫은 뒤 이전한다"; return 0; }
   for i in "${!MG_P_OP[@]}"; do
     case "${MG_P_OP[$i]}" in convert|append) ;; *) continue ;; esac
     [[ -n "${MG_TRACKED[${MG_P_SRC[$i]}]:-}" ]] ||
@@ -715,9 +740,9 @@ mg_config_rows() {
   mg_cfg "기본 배정 (Orchestrator / Worker / Reviewer / 예비)" "$MG_ORCH / $MG_WORKER / $MG_REVIEWER / $MG_FALLBACK" "그대로"
   mg_cfg "쓸 수 있는 에이전트" "(지정 없음)" "[${MG_AVAIL// /, }] — 기본 배정·예비·열린 Task가 쓰는 것"
   mg_cfg "도구 승인 모드" "$MG_MODE" "$MG_MODE"
-  args="v2 내장 기본값 (v1 값과 같음)"
-  (( ${#MG_ARGS[@]} == 0 )) || args="v1 값 유지: $(printf '%s ' "${!MG_ARGS[@]}")"
-  mg_cfg "Provider 인수" "policies/agent-policy.yaml" "$args"
+  args="v2 내장 기본값 (v1 기본값과 같음)"
+  if (( ${#MG_ARGNOTE[@]} )); then args="$(printf '%s · ' "${MG_ARGNOTE[@]}")"; args="${args% · }"; fi
+  mg_cfg "Provider 인수 ($MG_MODE 모드)" "policies/agent-policy.yaml" "$args"
   mg_cfg "동시 Worker" "$MG_PAR" "$MG_PAR (v1 값 유지 — v2 기본값은 5, 필요하면 limits.max_parallel_workers)"
   mg_cfg "열린 Task 상한" "max_active_tasks $MG_ACTIVE" "max_open_tasks $MG_OPENMAX (열린 Task $MG_OPEN개)"
   mg_cfg "AC 제한 시간" "${MG_TIMEOUT}초" "${MG_TIMEOUT}초"
@@ -1424,7 +1449,7 @@ mg_apply() {
 cmd_migrate() {
   local dir="" apply=0 confirm=0 rollback=0 undo=0 sv
   MG_LEVEL=cross_provider MG_REASON="" MG_COMPLETE="" MG_CREASON="" MG_DONE=0 MG_JOURNAL="" MG_VALIDATE=""
-  MG_BLOCK=(); MG_WARN=(); MG_TODO=(); MG_IDS=(); MG_SAME=(); MG_CFG=(); MG_PROTECT=(); MG_RMDIRS=(); MG_AGENTS_DOC=AGENTS.md
+  MG_BLOCK=(); MG_WARN=(); MG_TODO=(); MG_IDS=(); MG_SAME=(); MG_CFG=(); MG_PROTECT=(); MG_RMDIRS=(); MG_AGENTS_DOC=AGENTS.md; MG_ARGNOTE=()
   declare -gA MG_ST=() MG_MS=() MG_TITLE=() MG_W=() MG_R=() MG_ACT=() MG_CLASS=() MG_BDIR=() MG_GRADE=() MG_GNOTE=() \
     MG_NOTE=() MG_KNOWN=() MG_BCOUNT=() MG_MODEL=() MG_ARGS=() MG_WANT=() MG_KEPTREF=() MG_BROKEN=() MG_MSET=() \
     MG_TRACKED=() MG_MOUNTED=()

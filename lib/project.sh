@@ -127,6 +127,11 @@ upgrade_one() {  # DIR — 저장소의 harness.sh로 실행된다
     set_field "$ROOT/.harness/project.yaml" harness_source "$(yaml_q "$HARNESS_HOME")"
   fi
   info "$ROOT: ${old:-?} → $HARNESS_VERSION"
+  # 2.2.1에서 claude의 auto 기본 인수가 바뀌었다. 기본값을 쓰던 프로젝트에는 한 번 알린다.
+  if [[ -n "$old" && "$old" != 2.2.1 && "$(printf '%s\n' "$old" 2.2.1 | sort -V | head -n 1)" == "$old" &&
+        "$R_MODE" == auto && -z "$(pget agents claude_auto)" ]] && providers | grep -qx claude; then
+    info "claude의 auto 모드 기본 인수가 --permission-mode acceptEdits → --permission-mode auto(Claude Code auto 모드)로 바뀌었습니다. 조직 정책 등으로 auto 모드를 못 쓰면 agents.claude_auto를 지정한다 (doctor로 확인)."
+  fi
   git -C "$ROOT" status --short -- .agents .claude .harness/bin .harness/project.yaml 2>/dev/null || true
   info "변경을 확인(git diff)한 뒤 commit한다. AGENTS.md·템플릿은 프로젝트 고유 내용이 있을 수 있어 바꾸지 않는다."
 }
