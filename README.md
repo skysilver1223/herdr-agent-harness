@@ -31,7 +31,7 @@ git clone <이 저장소> ~/herdr-agent-harness
   --profile network-device            # generic | python-timeseries | network-device
 cd ~/Projects/my-app
 .harness/bin/harness.sh doctor        # 의존성 확인
-.harness/bin/harness.sh start         # 이 프로젝트로 Herdr 세션 시작
+.harness/bin/harness.sh start         # Herdr 밖: 프로젝트 세션 시작 / Herdr 안: 현재 세션에 프로젝트 workspace
 ```
 
 Herdr 첫 Pane에서 Orchestrator 에이전트(기본 claude)를 실행하고 `AGENTS.md`의 "시작" 프롬프트를 입력합니다.

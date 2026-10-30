@@ -51,6 +51,9 @@ case "$1 $2" in
     echo '{"result":{"status":"ok"}}' ;;
   "agent read") echo "${FAKE_READ:-작업 완료}" ;;
   "agent wait"|"agent list") echo '{"result":{"agents":[]}}' ;;
+  "workspace list") if [[ -f "$F/ws" ]]; then printf '{"result":{"workspaces":[{"label":"%s","workspace_id":"w1"}]}}\n' "$(cat "$F/ws")"; else echo '{"result":{"workspaces":[]}}'; fi ;;
+  "workspace create") while (( $# )); do [[ "$1" != --label ]] || echo "$2" >"$F/ws"; shift; done; echo '{"result":{"workspace":{"workspace_id":"w1"}}}' ;;
+  "workspace focus") echo "$3" >"$F/ws-focused" ;;
   *) echo "fake herdr: 모르는 호출 $*" >&2; exit 2 ;;
 esac
 EOF
@@ -137,6 +140,10 @@ check "Claude Skill 링크" test -L "$P/.claude/skills/harness-work"
 check "기준 commit" git -C "$P" rev-parse --verify -q HEAD
 expect_fail "init: 비어 있지 않은 경로 거부" "비어 있지 않은" R init "$P" --goal g
 expect_ok   "validate (초기)" H validate
+expect_ok   "start (Herdr 안: 중첩 대신 현재 세션에 workspace 생성)" H start
+check "프로젝트 이름의 workspace" grep -qx proj "$FAKE/ws"
+expect_ok   "start 재실행 (있는 workspace로 이동)" H start
+check "기존 workspace로 이동" grep -qx w1 "$FAKE/ws-focused"
 expect_ok   "doctor" H doctor
 
 echo "== 2. 계획 승인과 계약 고정 =="

@@ -139,9 +139,30 @@ cmd_upgrade() {  # [DIR...] — 프로젝트 사본에서 부르면 harness_sour
   for d in "$@"; do upgrade_one "$d"; done
 }
 
+# Herdr 밖이면 이 프로젝트 이름의 세션을 연다. 이미 Herdr 안이면 중첩 실행이 막혀 있으므로
+# 지금 세션에 프로젝트 workspace를 만든다(같은 이름이 있으면 그쪽으로 이동).
 cmd_start() {
+  local name ws list
   command -v herdr >/dev/null 2>&1 || die "herdr 명령이 없습니다."
+  name="$(pget project name)"
   cd "$ROOT"
-  printf '첫 Pane에서 %s를 실행하고 AGENTS.md의 "시작" 프롬프트를 입력한다.\n' "$(pget providers orchestrator)"
-  exec herdr --session "$(pget project name)"
+  if [[ "${HERDR_ENV:-}" != 1 ]]; then
+    printf '첫 Pane에서 %s를 실행하고 AGENTS.md의 "시작" 프롬프트를 입력한다.\n' "$(pget providers orchestrator)"
+    exec herdr --session "$name"
+  fi
+  list="$(herdr workspace list 2>/dev/null || true)"
+  if command -v jq >/dev/null 2>&1; then
+    ws="$(jq -r --arg n "$name" '.result.workspaces[]? | select(.label == $n) | .workspace_id' <<<"$list" 2>/dev/null | head -n 1 || true)"
+  else
+    ws="$(tr -d '\n' <<<"$list" | grep -o "\"label\":\"$name\"[^}]*\"workspace_id\":\"[^\"]*\"" | head -n 1 | sed 's/.*"workspace_id":"//; s/"$//' || true)"
+  fi
+  if [[ -n "$ws" ]]; then
+    herdr workspace focus "$ws" >/dev/null || die "workspace $ws로 이동하지 못했습니다."
+    info "이미 열린 workspace '$name'($ws)로 이동했습니다."
+  else
+    hcap herdr workspace create --cwd "$ROOT" --label "$name" --focus
+    (( RC == 0 )) || die "workspace를 만들지 못했습니다: $OUT"
+    info "현재 Herdr 세션에 workspace '$name'을 만들었습니다 (작업 디렉터리: $ROOT)."
+  fi
+  printf '그 workspace의 Pane에서 %s를 실행하고 AGENTS.md의 "시작" 프롬프트를 입력한다.\n' "$(pget providers orchestrator)"
 }
