@@ -593,6 +593,14 @@ echo "== 11. v1 이전(migrate) · 재검증(verify) =="
 V1="$WORK/v1proj"; RS1="$WORK/v1-remote-src"
 mkdir -p "$V1" "$RS1"
 w() { mkdir -p "$(dirname "$V1/$1")"; cat >"$V1/$1"; }
+OW="$(bash -c 'source "$1/lib/core.sh"; source "$1/lib/migrate.sh"; declare -gA MG_KNOWN=([task-1]=done [task-1-a]=open [x.y]=done)
+  for b in task-1-a-attempt-1.md task-1-attempt-2.md task-1.yaml task-10-attempt-1.md x.y-z.md notask.md; do mg_owner "$b"; printf "%s=%s " "$b" "$MG_OWNER"; done' _ "$REPO")"
+[[ "$OW" == "task-1-a-attempt-1.md=task-1-a task-1-attempt-2.md=task-1 task-1.yaml=task-1 task-10-attempt-1.md= x.y-z.md=x.y notask.md= " ]] && ok "기록 주인: 가장 긴 Task ID 접두사 (해시 조회)" || ng "기록 주인 찾기" "$OW"
+RT="$(bash -c 'source "$1/lib/core.sh"; source "$1/lib/migrate.sh"; declare -gA MG_KNOWN=([audit-7]=done)
+  for b in task-1-worker.meta task-1-reviewer-extra.md task-1-worker-attempt-1-outside-watch.tsv .status-x audit-7-reviewer.md task-9-context-worker.md \
+           audit-7-context-worker.md supa-read.env queue-ui-rework.sh task-x-review.sh chain-a.log task-x.md start-reviewer.sh codex-worker.env deploy.lock -worker.md; do
+    if mg_v1_runtime "$b"; then printf "v1:%s " "$b"; else printf "user:%s " "$b"; fi; done' _ "$REPO")"
+[[ "$RT" == "v1:task-1-worker.meta v1:task-1-reviewer-extra.md v1:task-1-worker-attempt-1-outside-watch.tsv v1:.status-x v1:audit-7-reviewer.md v1:task-9-context-worker.md v1:audit-7-context-worker.md user:supa-read.env user:queue-ui-rework.sh user:task-x-review.sh user:chain-a.log user:task-x.md user:start-reviewer.sh user:codex-worker.env user:deploy.lock user:-worker.md " ]] && ok "runtime 파일 구분: v1 추적·로그(Task 이름) vs 사용자 파일" || ng "runtime 파일 구분" "$RT"
 v1_task() {  # ID STATUS MILESTONE WORKER REVIEWER — 나머지 필드(목록·AC)는 표준 입력
   { printf "schema_version: '1.0'\ntask_id: %s\nmilestone_id: %s\ntitle: \"%s 제목\"\nobjective: 목적\n" "$1" "$3" "$1"
     printf "intent: .harness/intents/%s-intent.md\nstatus: %s\nprimary_worker: %s\nreviewer: %s\nfallback_chain: [claude, agy]\n" "$1" "$2" "$4" "$5"
@@ -712,6 +720,9 @@ printf 'task_id=task-004\nrole=worker\nagent_name=hh-task-004-w-1\npane_id=p_900
 printf 'closed\n' | w .harness/runtime/task-004-worker.closed
 printf 'task_id=task-005\nrole=worker\nagent_name=hh-task-005-w-1\npane_id=p_901\n' | w .harness/runtime/task-005-worker.meta
 printf 'packet\n' | w .harness/runtime/task-005-context-worker.md
+printf 'SUPA_URL=https://example.invalid\n' | w .harness/runtime/supa-read.env   # 사용자가 둔 런타임 파일 — 문서가 이 경로를 가리킨다 (그대로 남아야 한다)
+printf '#!/bin/sh\nherdr-harness transition . task-001 active\n' | w .harness/runtime/chain-run.sh   # v1 시절 스크립트
+printf 'deep\n' | w .harness/evidence/raw/a/b/c/d/e/f/g/deep.txt   # 깊은 원문 로그 폴더: 옮긴 뒤 빈 폴더가 모두 정리되고 되돌릴 때 다시 생겨야 한다
 for d in remote .harness/remote-mount .harness/worktrees/wt1 .harness/runtime/locked; do printf 'sentinel %s\n' "$d" | w "$d/sentinel"; done
 printf 'ok\n' >"$RS1/a.txt"; touch "$RS1/b.txt" "$RS1/d.txt" "$RS1/d2.txt"
 git -C "$V1" init -q && git -C "$V1" add -A && git -C "$V1" commit -qm "v1 기준선"
@@ -738,6 +749,7 @@ expect_ok "사전 점검 (검토 수준 결정 포함)" R migrate "$V1" "${MIG[@
 has "적용할 수 있습니다" && has "| 부분 | 마지막 실행(attempt 2): command 3개 중 1개 통과, 미실행 AC-002 AC-003" && ok "보고서: v1 원격 결함 기록은 부분 증빙" || ng "보고서: 증빙 등급" "$LAST"
 has "| task-002 |" && has "| 완전 |" && has "| 사람 확인만 | 실행해 확인하는 command AC 없음 (형식적 명령 AC-002은 증빙이 아님)" && ok "보고서: 완전·사람 확인 등급" || ng "보고서: 등급" "$LAST"
 has "draft — v2에서 다시 증빙 (완료 인정 안 함)" && has "이전과 무관한 미추적" && has "codex_auto" && ok "보고서: 제출 Task는 draft, 미추적 파일 안내, v1 인수 유지" || ng "보고서: 처리" "$LAST"
+has "runtime에 그대로 두는 사용자 파일: 2개 (chain-run.sh supa-read.env)" && has "runtime의 v1 시절 스크립트가 herdr-harness를 부릅니다: chain-run.sh" && ok "보고서: runtime 사용자 파일은 그대로, v1 시절 스크립트 경고" || ng "보고서: runtime 사용자 파일" "$LAST"
 snap >"$WORK/s1"
 cmp -s "$WORK/s0" "$WORK/s1" && ok "사전 점검은 아무것도 바꾸지 않음" || ng "사전 점검이 무언가를 바꿈" "$(diff "$WORK/s0" "$WORK/s1" | head)"
 echo x >>"$V1/AGENTS.md"
@@ -745,6 +757,7 @@ expect_fail "커밋되지 않은 추적 파일 변경이 있으면 차단" "커�
 git -C "$V1" checkout -q -- AGENTS.md
 touch "$V1/.harness/intents/new.md"
 expect_fail "Harness 경로의 미추적 파일은 차단" "Harness 경로에 커밋되지 않은 새 파일" R migrate "$V1" "${MIG[@]}"
+has "파일 계획은 위 차단 조건을 정리한 뒤" && ! has "그대로 두는 파일:" && ok "저장소 상태로 막히면 계획(분류·참조 검사)을 건너뛰고 바로 알림" || ng "차단 때 계획 생략" "$LAST"
 rm -f "$V1/.harness/intents/new.md"
 printf 'status=idle\nrev=1\nseq=1\npane=p_901\nkind=claude\n' >"$FAKE/agents/hh-task-005-w-1"
 expect_fail "v1 Agent가 Herdr에 남아 있으면 차단" "hh-task-005-w-1" R migrate "$V1" "${MIG[@]}"
@@ -752,6 +765,9 @@ rm -f "$FAKE/agents/hh-task-005-w-1"
 expect_fail "완료 인정은 제출·검토 중 Task만" "완료 인정(--complete)은" R migrate "$V1" "${MIG[@]}" --complete task-006 --complete-reason x
 expect_fail "완료 인정에는 사유가 필요" "--complete-reason" R migrate "$V1" "${MIG[@]}" --complete task-004
 expect_fail "적용은 사용자 확인 필요" "confirm-user-approval" R migrate "$V1" "${MIG[@]}" --apply
+FG="$WORK/failgrep"; mkdir -p "$FG"   # 참조 검사의 grep만 오류로 끝나게 한다 (메모리 부족으로 죽은 경우와 같다)
+printf '#!/bin/sh\ncase " $* " in *" -Z "*) exit 2 ;; esac\nexec %s "$@"\n' "$(command -v grep)" >"$FG/grep"; chmod +x "$FG/grep"
+expect_fail "참조 검사가 끝나지 못하면 막음 (참조가 없다고 넘기지 않음)" "참조 검사를 끝내지 못했습니다" env PATH="$FG:$PATH" bash "$REPO/harness.sh" migrate "$V1" "${MIG[@]}"
 chmod 000 "$V1/.harness/waves"
 expect_fail "읽을 수 없는 폴더가 있으면 차단 (빠짐없이 옮길 수 없음)" "읽을 수 없는" R migrate "$V1" "${MIG[@]}"
 chmod 755 "$V1/.harness/waves"
@@ -818,9 +834,11 @@ rc=0; R migrate "$V1" "${MIG[@]}" --complete task-004 --complete-reason "D-9" --
 check "끊긴 이전: 복구 기록과 이전 브랜치가 남음" bash -c "test -f '$V1/.git/harness-migrate.journal' && [[ \$(git -C '$V1' branch --show-current) == harness-v2-migration ]]"
 expect_fail "끊긴 기록이 있으면 다른 실행은 되돌리기를 안내" "--rollback" R migrate "$V1" "${MIG[@]}"
 rm -f "$HOOK"
+printf 'mv\037.ha' >>"$V1/.git/harness-migrate.journal"   # 기록 중 끊겨 줄바꿈 없이 끝난 마지막 줄 (디스크 부족 등) — 실행되지 않은 줄이다
 check "v2 validate도 끊긴 이전을 알림" bash -c "! bash '$V1/.harness/bin/harness.sh' validate >/dev/null 2>&1; bash '$V1/.harness/bin/harness.sh' validate 2>&1 | grep -q '끝나지 않은 v1 이전'"
 touch "$V1/.git/index.lock" "$V1/.harness/tasks/.harness-tmp.left"   # 다른 git 작업이 잠금을 쥔 상태, 끊긴 실행이 남긴 임시 파일
 expect_fail "잠금 때문에 Git 되돌리기가 끝나지 않으면 기록을 남기고 안내" "잠금이 풀린 뒤 다시" R migrate "$V1" --rollback
+has "기록의 마지막 줄이 끝나지 않아 버립니다" && ok "끝나지 않은 마지막 기록 줄은 버리고 되돌림 (영구히 막히지 않음)" || ng "잘린 기록 줄" "$LAST"
 check "실패한 되돌리기는 기록을 남김" test -f "$V1/.git/harness-migrate.journal"
 rm -f "$V1/.git/index.lock"
 expect_ok "다시 --rollback (여러 번 실행해도 원본을 지우지 않음)" R migrate "$V1" --rollback
@@ -839,10 +857,36 @@ git -C "$V1" reset -q --hard HEAD~1
 expect_ok "사용자 작업을 정리한 뒤 --rollback (commit 뒤 끊긴 이전)" R migrate "$V1" --rollback
 snap >"$WORK/s4b"
 cmp -s "$WORK/s0" "$WORK/s4b" && ok "commit 뒤 끊긴 이전도 시작 상태로" || ng "commit 뒤 --rollback 불완전" "$(diff "$WORK/s0" "$WORK/s4b" | head -n 20)"
+# Ctrl-C(SIGINT): hook이 맨 위 migrate 프로세스에 SIGINT를 보낸다 — commit이 끝난 뒤 trap이 130으로 끝내고 원상복구한다
+sed 's/kill -9/kill -INT/; s/^exit 1$/exit 0/' "$HOOK.kill" >"$V1/.git/hooks/pre-commit"; chmod +x "$V1/.git/hooks/pre-commit"
+rc=0; R migrate "$V1" "${MIG[@]}" --complete task-004 --complete-reason "D-9" --apply --confirm-user-approval >"$WORK/int.out" 2>&1 </dev/null || rc=$?
+rm -f "$V1/.git/hooks/pre-commit"
+(( rc == 130 )) && grep -q '(exit 130)' "$WORK/int.out" && grep -q '원상복구 완료' "$WORK/int.out" && ok "Ctrl-C(SIGINT) 중단 → 종료 코드 130으로 알리고 원상복구" || ng "SIGINT 중단 (rc=$rc)" "$(tail -n 5 "$WORK/int.out")"
+snap >"$WORK/s4c"
+cmp -s "$WORK/s0" "$WORK/s4c" && check "SIGINT 원상복구 뒤 기록 정리" test ! -e "$V1/.git/harness-migrate.journal" || ng "SIGINT 원상복구 불완전" "$(diff "$WORK/s0" "$WORK/s4c" | head -n 20)"
+# 옮기는 도중 맨 위 셸만 강제 종료(SIGKILL·메모리 부족): 남은 xargs·mv가 끝나기 전에는 --rollback이 거부해야 한다
+# (그 사이 되돌리면 뒤늦게 옮겨진 파일이 보관 폴더에 남는다). 끝난 뒤의 --rollback은 정확히 되돌린다.
+SLOW="$WORK/slowmv"; mkdir -p "$SLOW"
+printf '#!/bin/sh\nsleep 1\nexec %s "$@"\n' "$(command -v mv)" >"$SLOW/mv"; chmod +x "$SLOW/mv"
+env PATH="$SLOW:$PATH" bash "$REPO/harness.sh" migrate "$V1" "${MIG[@]}" --complete task-004 --complete-reason "D-9" --apply --confirm-user-approval >"$WORK/orph.out" 2>&1 </dev/null & MPID=$!
+for _ in $(seq 1 900); do grep -q '옮기기: 파일' "$WORK/orph.out" 2>/dev/null && break; sleep 0.1; done
+sleep 1; kill -9 "$MPID" 2>/dev/null; wait "$MPID" 2>/dev/null
+expect_fail "강제 종료 뒤 남은 mv가 돌고 있으면 --rollback은 거부 (뒤늦게 옮겨지는 파일을 잃지 않게)" "아직 돌고 있습니다" R migrate "$V1" --rollback
+for _ in $(seq 1 300); do flock -n "$V1/.git/harness-migrate.lock" true 2>/dev/null && break; sleep 0.2; done
+expect_ok "남은 mv가 끝난 뒤 --rollback" R migrate "$V1" --rollback
+snap >"$WORK/s4d"
+cmp -s "$WORK/s0" "$WORK/s4d" && ok "강제 종료 뒤 --rollback: 시작 상태와 같음 (Git 밖 파일 포함, 잠금 파일도 정리)" || ng "강제 종료 뒤 --rollback 불완전" "$(diff "$WORK/s0" "$WORK/s4d" | head -n 20)"
+check "잠금 파일을 남기지 않음" test ! -e "$V1/.git/harness-migrate.lock"
+# 출력 파이프가 끊김(| head, tee를 Ctrl-C로 끝냄 등): 141로 끝내고 원상복구한다
+R migrate "$V1" "${MIG[@]}" --complete task-004 --complete-reason "D-9" --apply --confirm-user-approval 2>"$WORK/pipe.err" </dev/null | head -c 1 >/dev/null; rc=${PIPESTATUS[0]}
+(( rc == 141 )) && grep -q '원상복구 완료' "$WORK/pipe.err" && ok "출력 파이프가 끊기면 141로 끝내고 원상복구" || ng "파이프 끊김 (rc=$rc)" "$(tail -n 5 "$WORK/pipe.err")"
+snap >"$WORK/s4e"
+cmp -s "$WORK/s0" "$WORK/s4e" && ok "파이프 끊김 원상복구 뒤 시작 상태와 같음" || ng "파이프 끊김 원상복구 불완전" "$(diff "$WORK/s0" "$WORK/s4e" | head -n 20)"
 rm -f "$TMPDIR"/harness-migrate.* "$HOOK.kill"   # 강제 종료로 정리할 기회가 없었던 임시 파일
 printf '#!/bin/sh\nsed -i "1s/^/[PROJ-1] /" "$1"\n' >"$MSGHOOK"; chmod +x "$MSGHOOK"   # 아래 적용·--undo는 제목이 바뀐 commit으로
-expect_ok "이전 적용 (검토 수준 예외 + 완료 인정)" R migrate "$V1" "${MIG[@]}" --complete task-004 --complete-reason "D-9: 사용자 완료 인정" --apply --confirm-user-approval
+expect_ok "이전 적용 (검토 수준 예외 + 완료 인정, 3개씩 나눠 옮기기)" env HARNESS_MIGRATE_CHUNK=3 bash "$REPO/harness.sh" migrate "$V1" "${MIG[@]}" --complete task-004 --complete-reason "D-9: 사용자 완료 인정" --apply --confirm-user-approval
 has "대조: " && has "손실 없음" && ok "옮긴 파일 대조 통과" || ng "대조" "$LAST"
+has "옮기는 중: 3/" && has "경고: runtime의 v1 시절 스크립트" && ok "여러 묶음으로 옮기며 진행 표시, 적용 화면에도 참고 사항" || ng "묶음 옮기기 진행 표시" "$LAST"
 check "새 브랜치에 commit 하나, 시작점 태그" bash -c "[[ \$(git -C '$V1' branch --show-current) == harness-v2-migration && \$(git -C '$V1' rev-list --count harness-v1-final..HEAD) == 1 ]]"
 check "남은 변경은 무관한 미추적 파일뿐" bash -c "[[ \"\$(git -C '$V1' status --porcelain)\" == '?? scratch.txt' ]]"
 Y="$V1/.harness/project.yaml"
@@ -869,6 +913,18 @@ check "v1 Skill·역할은 보관, v2 Skill 설치, 사용자 Skill 유지" bash
 check "v1 런타임 파일은 runtime/v1로 (Git 밖)" bash -c "test -f '$V1/.harness/runtime/v1/task-005-worker.meta' && test ! -e '$V1/.harness/runtime/task-005-worker.meta' && test -d '$V1/.harness/runtime/locked'"
 check "진입 문서는 덧붙이기만" bash -c "head -c \$(git -C '$V1' show harness-v1-final:AGENTS.md | wc -c) '$V1/AGENTS.md' | cmp -s - <(git -C '$V1' show harness-v1-final:AGENTS.md) && grep -qx '## Harness v2 운영 규칙' '$V1/AGENTS.md' && grep -qx '### 불변 규칙' '$V1/AGENTS.md' && grep -qx '## Harness v2' '$V1/GEMINI.md' && grep -q '^# Antigravity Entry' '$V1/GEMINI.md'"
 check ".gitignore 보강·이력" bash -c "grep -qxF '.harness/archive/*/evidence/raw/' '$V1/.gitignore' && grep -q '| v1-milestone-001 (v1에서 이전) | 4개 |' '$V1/.harness/HISTORY.md'"
+U="$V1/.harness/archive/v1/MANIFEST-untracked.txt"
+ulist_ok() {  # Git 밖 항목은 Git에 올리지 않는 목록에만, MANIFEST.txt에는 추적 파일만 (목록 해시는 MANIFEST.txt에)
+  local m="$V1/.harness/archive/v1/MANIFEST.txt"
+  [[ -f "$U" ]] && git -C "$V1" check-ignore -q .harness/archive/v1/MANIFEST-untracked.txt &&
+    [[ -z "$(git -C "$V1" ls-files .harness/archive/v1/MANIFEST-untracked.txt)" ]] &&
+    [[ "$(awk -F'\t' '!/^#/ && $4 == "-"' "$m" | wc -l)" == 0 ]] &&
+    grep -q "^# Git 밖 항목: [0-9]*개, sha256 $(sha256sum <"$U" | cut -c1-64) " "$m" &&
+    grep -q "$(printf '^move\t[0-9a-f]*\t[0-9]*\t-\t.harness/evidence/raw/a/b/c/d/e/f/g/deep.txt\t')" "$U"
+}
+check "Git 밖 항목 목록은 Git에 올리지 않음 (MANIFEST.txt에는 추적 파일만)" ulist_ok
+check "runtime 사용자 파일은 그대로, v1 추적 파일만 runtime/v1" bash -c "test -f '$V1/.harness/runtime/supa-read.env' && test -f '$V1/.harness/runtime/chain-run.sh' && test ! -e '$V1/.harness/runtime/v1/supa-read.env' && test -f '$V1/.harness/runtime/v1/task-004-worker.closed'"
+check "깊은 원문 로그 폴더도 옮긴 뒤 빈 폴더가 남지 않음" bash -c "test -f '$V1/.harness/archive/v1/evidence/raw/a/b/c/d/e/f/g/deep.txt' && test ! -e '$V1/.harness/evidence'"
 check "링크인 진입 문서는 고치지 않음 (CLAUDE.md → AGENTS.md, 절은 한 번)" bash -c "test -L '$V1/CLAUDE.md' && [[ \$(grep -cx '## Harness v2 운영 규칙' '$V1/AGENTS.md') == 1 ]]"
 check "v1 시작 안내(HARNESS_START.md)에 v2 안내만 덧붙임" bash -c "grep -q '^herdr-harness start .' '$V1/HARNESS_START.md' && grep -qx '## Harness v2' '$V1/HARNESS_START.md'"
 check "이름에 공백이 든 참조 기록도 원래 자리에 (사용자 git 설정과 무관)" bash -c "test -f '$V1/.harness/decisions/task-001-메모 공백.md' && grep -qF '원래 자리에 둔 기록 (다른 파일이 가리킴): .harness/decisions/task-001-메모 공백.md' '$B/SUMMARY.md'"
@@ -889,9 +945,9 @@ manifest_check() {  # MANIFEST의 모든 줄을 테스트가 직접 다시 대�
       *) got=x ;;
     esac
     [[ "$got" == "$sha" ]] || { echo "불일치: $op $src → $dst"; bad=1; }
-  done <"$V1/.harness/archive/v1/MANIFEST.txt"
+  done < <(cat "$V1/.harness/archive/v1/MANIFEST.txt" "$U")
   exp="$(sed -n 's|^[0-9a-f]\{64\}  \./||p' "$WORK/s0" | grep -E '^\.(harness|agents)/' | grep -vE '^\.harness/(worktrees|remote-mount)/|^\.harness/runtime/[^/]+/' | sort)"
-  act="$(awk -F'\t' '!/^#/ && $1 != "rmdir" && $5 ~ /^\.(harness|agents)\// { print $5 }' "$V1/.harness/archive/v1/MANIFEST.txt" | sort)"
+  act="$(cat "$V1/.harness/archive/v1/MANIFEST.txt" "$U" | awk -F'\t' '!/^#/ && $1 != "rmdir" && $5 ~ /^\.(harness|agents)\// { print $5 }' | sort)"
   [[ "$exp" == "$act" ]] || { echo "목록 누락·초과:"; diff <(echo "$exp") <(echo "$act") | head; bad=1; }
   return "$bad"
 }
@@ -907,6 +963,17 @@ expect_ok "이전 뒤 status" VH status
 check "MIGRATION.md에 이전 직후 검사 결과" grep -q '^validate: 통과' "$V1/.harness/archive/v1/MIGRATION.md"
 expect_fail "이전된 프로젝트는 다시 이전하지 않음" "이미 v2" R migrate "$V1"
 expect_fail "되돌리기(--undo)는 사용자 확인 필요" "confirm-user-approval" R migrate "$V1" --undo
+flock "$V1/.git/harness-migrate.lock" sleep 2 & LPID=$!
+for _ in $(seq 1 50); do ! flock -n "$V1/.git/harness-migrate.lock" true 2>/dev/null && break; sleep 0.1; done
+expect_fail "다른 이전 작업이 잠금을 쥐고 있으면 --undo는 거부" "아직 돌고 있습니다" R migrate "$V1" --undo --confirm-user-approval
+has "sleep 2" && ok "거부할 때 잠금을 쥔 프로세스를 보임" || ng "잠금을 쥔 프로세스 표시" "$LAST"
+kill "$LPID" 2>/dev/null; wait "$LPID" 2>/dev/null
+for _ in $(seq 1 100); do flock -n "$V1/.git/harness-migrate.lock" true 2>/dev/null && break; sleep 0.1; done   # flock의 자식(sleep)이 잠금을 이어받아 끝날 때까지
+mv "$U" "$WORK/ulist.bak"
+expect_fail "Git 밖 항목 목록이 없으면 --undo는 멈춤 (Git 밖 파일을 돌릴 수 없다)" "Git 밖 항목 목록이 없습니다" R migrate "$V1" --undo --confirm-user-approval
+cp "$WORK/ulist.bak" "$U"; printf 'x\n' >>"$U"
+expect_fail "바뀐 Git 밖 항목 목록으로는 되돌리지 않음" "sha256 불일치" R migrate "$V1" --undo --confirm-user-approval
+mv -f "$WORK/ulist.bak" "$U"
 expect_ok "병합 전 되돌리기 (--undo)" R migrate "$V1" --undo --confirm-user-approval
 snap >"$WORK/s5"
 cmp -s "$WORK/s0" "$WORK/s5" && ok "--undo 뒤 시작 상태와 같음 (Git 밖으로 옮긴 파일·지운 빈 폴더 포함, 제목이 바뀐 commit)" || ng "--undo 불완전" "$(diff "$WORK/s0" "$WORK/s5" | head -n 20)"
@@ -945,6 +1012,29 @@ expect_ok "Milestone 단위 재검증 (보관된 v1 Task 포함)" VH verify --mi
 has "통과 3 · 실패 0 · 제외 1" && ok "Milestone 재검증 요약" || ng "Milestone 재검증 요약" "$LAST"
 check "재검증은 상태를 바꾸지 않음" bash -c "grep -qx 'status: draft' '$T5' && test -f '$B/tasks/task-001.yaml' && grep -qx 'status: completed' '$B/tasks/task-001.yaml'"
 unlock
+
+# 경고 견본: AC 상대경로 · 프로젝트 밖 write_scope · 링크가 아닌 Skill 폴더 · 이 폴더에서 도는 프로세스 · Claude 예약 작업
+V1W="$WORK/v1warn"; mkdir -p "$V1W"
+ww() { mkdir -p "$(dirname "$V1W/$1")"; cat >"$V1W/$1"; }
+printf "schema_version: '1.0'\nproject:\n  name: 'warn'\n  goal: '경고 견본'\n  profile: 'generic'\n\nproviders:\n  orchestrator: 'claude'\n  primary_worker: 'claude'\n  reviewer: 'codex'\n  fallback_chain: [codex]\n" | ww .harness/project.yaml
+printf "schema_version: '1.0'\nagent_policy:\n  approval_mode: 'auto'\n" | ww .harness/policies/agent-policy.yaml
+printf '# State\n' | ww .harness/STATE.md
+{ printf "schema_version: '1.0'\ntask_id: task-w1\nmilestone_id: m-w\ntitle: 경고\nobjective: o\nintent: .harness/intents/task-w1-intent.md\nstatus: draft\nprimary_worker: claude\nreviewer: codex\nwrite_scope: ['/srv/other/out.txt']\ndependencies: []\nacceptance_criteria:\n"
+  ac AC-001 command "cd ../sibling && true"; } | ww .harness/tasks/task-w1.yaml
+printf '# Intent\n' | ww .harness/intents/task-w1-intent.md
+printf -- '---\nname: harness-plan\n---\n옛 Skill 사본\n' | ww .claude/skills/harness-plan/SKILL.md
+printf '.harness/runtime/\n.harness/worktrees/\n' | ww .gitignore
+git -C "$V1W" init -q && git -C "$V1W" add -A && git -C "$V1W" commit -qm "v1 경고 견본"
+( cd "$V1W" && exec sleep 60 ) & SPID=$!
+printf '{"sessionId":"s","pid":%s,"acquiredAt":1}\n' "$SPID" >"$V1W/.claude/scheduled_tasks.lock"
+expect_ok "사전 점검: 경고 견본" R migrate "$V1W"
+has "AC에 상위 폴더 상대경로(../)가 있는 열린 Task 1개(task-w1)" && ok "경고: AC 상대경로는 작업 공간 기준으로 바뀜 (이전 후 할 일)" || ng "AC 상대경로 경고" "$LAST"
+has "write_scope가 프로젝트 밖을 가리키는 열린 Task 1개(task-w1)" && ok "경고: 프로젝트 밖 write_scope" || ng "프로젝트 밖 write_scope 경고" "$LAST"
+has ".claude/skills/harness-plan가 링크가 아닌 폴더" && ok "경고: 링크가 아닌 Skill 폴더는 v2 Skill을 가림" || ng "Skill 폴더 경고" "$LAST"
+has "이 프로젝트 폴더에서 실행 중인 다른 프로세스 1개: $SPID(sleep 60)" && has "Claude 예약 작업 잠금이 살아 있습니다 (.claude/scheduled_tasks.lock, pid $SPID)" && ok "경고: 이 폴더에서 도는 프로세스·Claude 예약 작업" || ng "실행 중 프로세스 경고" "$LAST"
+kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null
+expect_fail "저장소·설치본의 harness.sh도 v1 프로젝트는 다루지 않음" "v1 프로젝트입니다" R -C "$V1W" status
+LAST="$(R -C "$V1W" doctor 2>&1 </dev/null)"; has "v1 프로젝트라 프로젝트 점검은 건너뜁니다" && ok "doctor: v1 프로젝트는 프로젝트 점검만 건너뜀" || ng "doctor v1" "$LAST"
 
 echo "== 12. 전역 명령(install) · 프로젝트 사본으로 넘기기 · 자동완성 =="
 HH="$WORK/home"; SH="$HH/.local/share/herdr-agent-harness"; GH="$HH/.local/bin/herdr-harness"

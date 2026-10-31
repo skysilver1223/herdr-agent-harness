@@ -86,6 +86,8 @@ resolve_root() {  # -C DIR > 이 스크립트가 <root>/.harness/bin/harness.sh�
   printf '%s' "$d"
 }
 
+v2_project() { [[ "$(yget "$1/.harness/project.yaml" schema_version 2>/dev/null || true)" == 2 ]]; }
+
 main() {
   local dir=""
   if [[ "${1:-}" == -C ]]; then
@@ -100,9 +102,14 @@ main() {
     upgrade) [[ -z "$dir" ]] || set -- "$dir" "$@"; cmd_upgrade "$@"; return 0 ;;
     migrate) cmd_migrate "$@"; return 0 ;;
     install) cmd_install "$@"; return 0 ;;
-    doctor) ROOT="$(resolve_root "$dir" 2>/dev/null)" || ROOT=""; cmd_doctor; return 0 ;;
+    doctor)
+      ROOT="$(resolve_root "$dir" 2>/dev/null)" || ROOT=""
+      if [[ -n "$ROOT" ]] && ! v2_project "$ROOT"; then warn "v1 프로젝트라 프로젝트 점검은 건너뜁니다: $ROOT (harness.sh migrate로 v2로 옮긴다)"; ROOT=""; fi
+      cmd_doctor; return 0 ;;
   esac
   ROOT="$(resolve_root "$dir")"
+  # 설치본·저장소의 harness.sh를 직접 불러도 v1 프로젝트는 다루지 않는다 (herdr-harness와 같은 판단)
+  v2_project "$ROOT" || die "v1 프로젝트입니다(schema $(yget "$ROOT/.harness/project.yaml" schema_version 2>/dev/null || echo '?')): $ROOT — 저장소의 harness.sh migrate '$ROOT'로 v2로 옮긴다."
   case "$cmd" in
     status) cmd_status ;;
     metrics) cmd_metrics ;;

@@ -14,13 +14,13 @@ metrics_table() {  # DIR... (진행 중 기록 폴더, 보관함 한 곳, 또는
     base="${f##*/}"; n="${base##*-attempt-}"; n="${n%.harness.md}"; base="${base%-attempt-*}"
     [[ "$n" != 1 || "$ac" != PASS ]] || w_first[$k]=$(( ${w_first[$k]:-0} + 1 ))
     (( 10#$n <= ${t_try[$base]:-0} )) || t_try[$base]=$((10#$n))
-  done < <(find "$@" -xdev \( -name runtime -o -name worktrees -o -name remote-mount \) -prune -o -name '*-attempt-*.harness.md' -print0 2>/dev/null || true)   # 기록 폴더가 아직 없을 수 있다
+  done < <(find "$@" -xdev \( -name runtime -o -name worktrees -o -name remote-mount -o -name evidence \) -prune -o -name '*-attempt-*.harness.md' -print0 2>/dev/null || true)   # 기록 폴더가 아직 없을 수 있다. evidence/는 v1 기록(이전한 원문 로그는 수십만 개)이라 들어가지 않는다
   while IFS= read -r -d '' f; do
     p="$(rec_get "$f" Provider)"; p="${p:-?}"
     v="$(review_verdict "${f%.harness.md}.md")"
     r_cnt[$p]=$(( ${r_cnt[$p]:-0} + 1 ))
     case "$v" in APPROVED) r_ok[$p]=$(( ${r_ok[$p]:-0} + 1 )) ;; CHANGES_REQUESTED) r_cr[$p]=$(( ${r_cr[$p]:-0} + 1 )) ;; esac
-  done < <(find "$@" -xdev \( -name runtime -o -name worktrees -o -name remote-mount \) -prune -o -name '*-review-*.harness.md' -print0 2>/dev/null || true)
+  done < <(find "$@" -xdev \( -name runtime -o -name worktrees -o -name remote-mount -o -name evidence \) -prune -o -name '*-review-*.harness.md' -print0 2>/dev/null || true)
   if (( ${#w_try[@]} == 0 && ${#r_cnt[@]} == 0 )); then printf '아직 기록이 없습니다.\n'; return 0; fi
   printf '| Worker | 등급 | 시도 | AC 통과 | AC 실패 | 첫 시도 통과 |\n|---|---|---|---|---|---|\n'
   for k in $(printf '%s\n' "${!w_try[@]}" | sort); do
