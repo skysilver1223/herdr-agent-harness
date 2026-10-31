@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# herdr-harness — 전역 명령. 저장소의 `harness.sh install`이 설치본(~/.local/share/herdr-agent-harness)을 만들고
+# ~/.local/bin/herdr-harness를 이 파일에 잇는다. 이 파일은 길만 안내한다:
+#   프로젝트 명령       → 그 프로젝트의 .harness/bin/harness.sh. 프로젝트마다 고정된 버전으로 실행되므로
+#                        사람과 에이전트가 같은 코드를 쓴다. 버전은 upgrade로만 바뀐다.
+#   init·upgrade·migrate·install·help → 설치본의 harness.sh (프로젝트를 만들거나 바꾸는 쪽)
+#   completion bash     → Bash 탭 완성 스크립트 출력 (~/.bashrc: source <(herdr-harness completion bash))
+set -Eeuo pipefail
+
+HH_HOME="$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")"
+
+die() { printf '오류: %s\n' "$*" >&2; exit 3; }
+own() { exec bash "$HH_HOME/harness.sh" "$@"; }
+
+project_root() {  # [DIR] → 프로젝트 루트. harness.sh resolve_root와 같은 규칙: -C DIR은 그 폴더만, 없으면 현재 위치부터 위로
+  local d
+  if [[ -n "$1" ]]; then d="$(realpath -m -- "$1")"
+  else
+    d="${PWD%%/.harness/worktrees/*}"   # Task 작업 공간 안이면 바깥 프로젝트 (작업 공간의 .harness는 브랜치 시점 사본)
+    while [[ "$d" != / && ! -f "$d/.harness/project.yaml" ]]; do d="$(dirname "$d")"; done
+  fi
+  [[ -f "$d/.harness/project.yaml" ]] || return 1
+  printf '%s' "$d"
+}
+
+main() {
+  local dir="" root bin schema
+  local -a args=("$@")
+  if [[ "${1:-}" == -C ]]; then
+    [[ -n "${2:-}" ]] || own "${args[@]}"   # 사용법 오류는 harness.sh가 알린다
+    dir="$2"; shift 2
+  fi
+  case "${1:-help}" in
+    completion)
+      [[ "${2:-}" == bash && $# -eq 2 ]] || die "사용법: completion bash  (지원하는 셸은 bash뿐입니다)"
+      cat "$HH_HOME/bin/completion.bash"
+      return 0 ;;
+    help|-h|--help|init|upgrade|migrate|install) own "${args[@]}" ;;
+  esac
+  # 프로젝트 밖이면 설치본이 처리한다: doctor는 프로젝트 없이 점검하고, 나머지는 프로젝트를 못 찾았다고 알린다.
+  root="$(project_root "$dir")" || own "${args[@]}"
+  bin="$root/.harness/bin/harness.sh"
+  if [[ ! -f "$bin" ]]; then
+    schema="$(sed -n "s/^schema_version:[[:space:]]*['\"]\{0,1\}\([^'\"[:space:]]*\).*/\1/p" "$root/.harness/project.yaml" | head -n 1)"
+    [[ "$schema" == 2 ]] || die "v1 프로젝트입니다(schema ${schema:-?}): $root — herdr-harness migrate '$root'로 v2로 옮긴다."
+    die "프로젝트에 .harness/bin/harness.sh가 없습니다: $root — herdr-harness upgrade '$root'로 다시 넣는다."
+  fi
+  exec bash "$bin" "${args[@]}"
+}
+
+main "$@"

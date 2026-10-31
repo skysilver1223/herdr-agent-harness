@@ -396,6 +396,37 @@ expect_ok "remote run" bash "$P2/.harness/bin/harness.sh" remote run 'echo remot
 has remote-ok && ok "원격 명령 출력" || ng "원격 명령 출력" "$LAST"
 LAST="$(printf 'a\nb\nc\n' | while read -r x; do bash "$P2/.harness/bin/harness.sh" remote run "echo got-$x" 2>&1; done)"
 has got-a && has got-b && has got-c && ok "반복문 안의 원격 명령이 남은 입력을 먹지 않음 (ssh -n)" || ng "원격 명령 표준 입력" "$LAST"
+# 마운트 옵션(mount_options): 실제 sshfs가 불리지 않게 가짜 sshfs·mountpoint를 이 검사에만 쓴다.
+SETUP=(remote setup --force --host buildhost --user dev --path "$RSRC" --mount "$RSRC" --ssh-key "$WORK/key" --vcs none --no-key)
+check "remote.yaml의 mount_options (기본 빈 값)" grep -qx "  mount_options: ''" "$P2/.harness/remote.yaml"
+expect_ok "remote setup --mount-options" bash "$P2/.harness/bin/harness.sh" "${SETUP[@]}" --mount-options follow_symlinks
+check "mount_options 기록" grep -qx "  mount_options: 'follow_symlinks'" "$P2/.harness/remote.yaml"
+expect_ok "remote setup --force (--mount-options 없이)" bash "$P2/.harness/bin/harness.sh" "${SETUP[@]}"
+check "주지 않은 mount_options는 기존 값 유지" grep -qx "  mount_options: 'follow_symlinks'" "$P2/.harness/remote.yaml"
+expect_fail "공백이 든 mount_options 거부" "mount_options" bash "$P2/.harness/bin/harness.sh" "${SETUP[@]}" --mount-options 'a b'
+check "거부 때 설정을 다시 쓰지 않음" grep -qx "  mount_options: 'follow_symlinks'" "$P2/.harness/remote.yaml"
+expect_ok "remote status" bash "$P2/.harness/bin/harness.sh" remote status
+has "마운트 옵션: follow_symlinks" && ok "remote status에 마운트 옵션" || ng "remote status 마운트 옵션" "$LAST"
+MNT="$WORK/mount-fake"; mkdir -p "$MNT"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >"%s"\n' "$WORK/sshfs.args" >"$MNT/sshfs"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$MNT/mountpoint"; chmod +x "$MNT/sshfs" "$MNT/mountpoint"
+expect_ok "remote mount (가짜 sshfs)" env PATH="$MNT:$PATH" bash "$P2/.harness/bin/harness.sh" remote mount
+check "sshfs에 기본 옵션과 mount_options(-o follow_symlinks)를 함께 넘김" \
+  awk 'p == "-o" && $0 == "follow_symlinks" { f = 1 } $0 == "reconnect" { r = 1 } { p = $0 } END { exit !(f && r) }' "$WORK/sshfs.args"
+rm -f "$WORK/sshfs.args"
+HH_REMOTE_MOUNT_OPTIONS='a b' expect_fail "형식이 틀린 mount_options면 마운트하지 않음" "mount_options" env PATH="$MNT:$PATH" bash "$P2/.harness/bin/harness.sh" remote mount
+check "그때 sshfs를 부르지 않음" test ! -e "$WORK/sshfs.args"
+HH_REMOTE_MOUNT_OPTIONS='a b' expect_ok "마운트 옵션 형식은 원격 실행을 막지 않음" bash "$P2/.harness/bin/harness.sh" remote run 'echo still-ok'
+expect_fail "명령을 실행하는 sshfs 옵션 거부 (setup, ssh_command)" "쓸 수 없는 옵션" bash "$P2/.harness/bin/harness.sh" "${SETUP[@]}" --mount-options 'follow_symlinks,ssh_command=/tmp/x'
+check "거부 때 설정을 다시 쓰지 않음 (허용 목록)" grep -qx "  mount_options: 'follow_symlinks'" "$P2/.harness/remote.yaml"
+for bad in ProxyCommand=/tmp/x LocalCommand=/tmp/x directport=2222 allow_other passive Follow_Symlinks; do
+  HH_REMOTE_MOUNT_OPTIONS="follow_symlinks,$bad" expect_fail "마운트 거부: $bad (허용 목록 밖, sshfs 옵션은 대소문자 그대로)" "쓸 수 없는 옵션" env PATH="$MNT:$PATH" bash "$P2/.harness/bin/harness.sh" remote mount
+done
+HH_REMOTE_MOUNT_OPTIONS='follow_symlinks,,cache=no' expect_fail "mount_options의 빈 항목은 따로 알림" "빈 항목" env PATH="$MNT:$PATH" bash "$P2/.harness/bin/harness.sh" remote mount
+HH_REMOTE_MOUNT_OPTIONS='follow_symlinks,' expect_fail "끝 쉼표의 빈 항목도 알림" "빈 항목" env PATH="$MNT:$PATH" bash "$P2/.harness/bin/harness.sh" remote mount
+check "거부한 옵션으로는 sshfs를 부르지 않음" test ! -e "$WORK/sshfs.args"
+HH_REMOTE_MOUNT_OPTIONS='follow_symlinks,cache=no,ServerAliveInterval=30' expect_ok "허용 목록 옵션 여러 개" env PATH="$MNT:$PATH" bash "$P2/.harness/bin/harness.sh" remote mount
+check "여러 옵션을 -o 하나로 넘김" awk 'p == "-o" && $0 == "follow_symlinks,cache=no,ServerAliveInterval=30" { f = 1 } { p = $0 } END { exit !f }' "$WORK/sshfs.args"
 P_SAVE="$P"; P="$P2"
 write_task task-001 milestone-001 r.txt "test -f r.txt"
 cat >>"$P/.harness/tasks/task-001.yaml" <<'EOT'
@@ -546,7 +577,12 @@ sed -i 's/^HARNESS_VERSION=.*/HARNESS_VERSION="2.2.0"/' "$P/.harness/bin/lib/cor
 expect_ok "저장소에서 업그레이드" R upgrade "$P"
 has "2.2.0 → $V" && ok "버전 표시" || ng "버전 표시" "$LAST"
 has "--permission-mode auto(Claude Code auto 모드)로 바뀌었습니다" && ok "업그레이드: claude auto 기본 인수 변경 안내" || ng "업그레이드 안내" "$LAST"
+! has "mount_options" && ok "원격 모드가 아니면 마운트 옵션 안내 없음" || ng "마운트 옵션 안내 (원격 아님)" "$LAST"
 commit_all "upgrade" 2>/dev/null || true
+sed -i 's/^HARNESS_VERSION=.*/HARNESS_VERSION="2.2.1"/' "$P2/.harness/bin/lib/core.sh"
+git -C "$P2" add -A && git -C "$P2" commit -qm "옛 bin 흉내"
+expect_ok "원격 모드 프로젝트 업그레이드" R upgrade "$P2"
+has "mount_options" && ok "업그레이드: 원격 모드 프로젝트에 마운트 옵션 안내" || ng "마운트 옵션 안내" "$LAST"
 echo "# local edit" >>"$P/.agents/skills/harness-work/SKILL.md"
 expect_fail "로컬 수정이 있으면 덮어쓰지 않음" "커밋되지 않은 변경" H upgrade
 git -C "$P" checkout -q -- .agents/skills/harness-work/SKILL.md
@@ -909,6 +945,202 @@ expect_ok "Milestone 단위 재검증 (보관된 v1 Task 포함)" VH verify --mi
 has "통과 3 · 실패 0 · 제외 1" && ok "Milestone 재검증 요약" || ng "Milestone 재검증 요약" "$LAST"
 check "재검증은 상태를 바꾸지 않음" bash -c "grep -qx 'status: draft' '$T5' && test -f '$B/tasks/task-001.yaml' && grep -qx 'status: completed' '$B/tasks/task-001.yaml'"
 unlock
+
+echo "== 12. 전역 명령(install) · 프로젝트 사본으로 넘기기 · 자동완성 =="
+HH="$WORK/home"; SH="$HH/.local/share/herdr-agent-harness"; GH="$HH/.local/bin/herdr-harness"
+mkdir -p "$HH"; printf '# 사용자 설정\nsource <(herdr-harness completion bash)\n' >"$HH/.bashrc"; cp "$HH/.bashrc" "$WORK/bashrc.orig"
+G() { local d="$1"; shift; ( cd "$d" && HOME="$HH" "$GH" "$@" ); }   # DIR에서 전역 명령 실행
+expect_ok "install (새로)" env HOME="$HH" bash "$REPO/harness.sh" install
+check "설치본: harness.sh · lib · bin · templates" bash -c "test -x '$SH/harness.sh' && test -f '$SH/lib/core.sh' && test -x '$SH/bin/herdr-harness' && test -f '$SH/bin/completion.bash' && test -d '$SH/templates/project/.harness'"
+check "~/.local/bin/herdr-harness → 설치본의 bin/herdr-harness" bash -c "[[ \$(readlink '$GH') == '$SH/bin/herdr-harness' ]]"
+has "기존 줄이 새 셸부터" && ok "~/.bashrc의 기존 자동완성 줄 안내" || ng "자동완성 안내" "$LAST"
+check "~/.bashrc는 건드리지 않음" cmp -s "$HH/.bashrc" "$WORK/bashrc.orig"
+expect_ok "다시 install (갱신)" env HOME="$HH" bash "$REPO/harness.sh" install
+check "갱신 뒤 임시 폴더를 남기지 않음" bash -c "[[ \$(ls -A '$HH/.local/share') == herdr-agent-harness ]]"
+expect_fail "설치본으로는 다시 install하지 않음" "저장소의 harness.sh로" G "$WORK" install
+expect_ok "herdr-harness help (프로젝트 밖)" G "$WORK" help
+has "herdr-harness completion bash" && ok "help에 전역 명령 안내" || ng "help 전역 명령" "$LAST"
+expect_fail "프로젝트 밖의 프로젝트 명령" "Harness 프로젝트를 찾지 못했습니다" G "$WORK" status
+expect_ok "프로젝트 밖 doctor (설치본)" G "$WORK" doctor
+P4="$WORK/proj4"
+expect_ok "herdr-harness init (설치본)" G "$WORK" init "$P4" --goal "전역 명령 시험"
+check "설치본으로 만든 프로젝트의 harness_source는 설치본" grep -qxF "harness_source: '$(realpath "$SH")'" "$P4/.harness/project.yaml"
+WT="$P4/.harness/worktrees/task-001"; git -C "$P4" worktree add -q -b hh/task-001 "$WT" && mkdir -p "$WT/src"   # 브랜치 시점 .harness 사본이 있는 Task 작업 공간
+cp "$P4/.harness/bin/harness.sh" "$WORK/p4-bin.sh"
+printf '#!/usr/bin/env bash\necho "PROJECT-COPY $*"\n' >"$P4/.harness/bin/harness.sh"
+mkdir -p "$P4/sub/deep"
+expect_ok "프로젝트 안: 그 프로젝트의 사본으로 넘김" G "$P4" status --x
+has "PROJECT-COPY status --x" && ok "인수를 그대로 넘김" || ng "프로젝트 사본으로 넘기기" "$LAST"
+expect_ok "하위 폴더에서도 프로젝트를 찾음" G "$P4/sub/deep" validate
+has "PROJECT-COPY validate" && ok "하위 폴더 → 프로젝트 사본" || ng "하위 폴더" "$LAST"
+expect_ok "-C DIR (프로젝트 밖에서)" G "$WORK" -C "$P4" metrics
+has "PROJECT-COPY -C $P4 metrics" && ok "-C DIR → 그 프로젝트의 사본" || ng "-C DIR" "$LAST"
+expect_ok "doctor (프로젝트 안)" G "$P4" doctor
+has "PROJECT-COPY doctor" && ok "프로젝트 안 doctor → 프로젝트 사본" || ng "doctor" "$LAST"
+expect_ok "help (프로젝트 안)" G "$P4" help
+! has "PROJECT-COPY" && has "herdr-harness —" && ok "help는 프로젝트 안에서도 설치본" || ng "help" "$LAST"
+expect_ok "Task 작업 공간 안에서" G "$WT/src" status
+has "PROJECT-COPY status" && ok "작업 공간 안 → 바깥 프로젝트의 사본 (작업 공간의 브랜치 시점 사본이 아님)" || ng "작업 공간 안" "$LAST"
+LAST="$(cd "$WT/src" && bash -c 'source "$1" >/dev/null 2>&1; resolve_root ""' _ "$REPO/harness.sh" 2>&1)"
+[[ "$LAST" == "$P4" ]] && ok "harness.sh도 작업 공간 안에서는 바깥 프로젝트를 찾음" || ng "resolve_root (작업 공간)" "$LAST"
+expect_fail "작업 공간에 체크아웃된 사본(브랜치 시점 bin)은 실행하지 않고 바깥 프로젝트를 안내" "바깥 프로젝트" bash "$WT/.harness/bin/harness.sh" status
+cp "$WORK/p4-bin.sh" "$P4/.harness/bin/harness.sh"
+sed -i 's/^HARNESS_VERSION=.*/HARNESS_VERSION="2.2.1"/' "$P4/.harness/bin/lib/core.sh"; git -C "$P4" commit -qam "옛 bin 흉내"
+expect_ok "herdr-harness upgrade (하위 폴더, DIR 없이)" G "$P4/sub/deep" upgrade
+has "2.2.1 → $V" && ok "설치본 버전으로 올림" || ng "전역 upgrade" "$LAST"
+git -C "$P4" add -A && git -C "$P4" commit -qm "upgrade"
+git init -q "$HH"   # 설치본이 다른 저장소(여기서는 홈) 안에 있어도 그 저장소를 pull하지 않는다
+expect_ok "프로젝트 사본의 upgrade → harness_source(설치본)" env -u HARNESS_NO_PULL bash "$P4/.harness/bin/harness.sh" upgrade
+! has "저장소 최신화" && ok "저장소 최상위가 아닌 harness_source는 pull하지 않음" || ng "설치본 pull" "$LAST"
+rm -rf "$HH/.git"
+expect_ok "upgrade -C DIR (저장소의 harness.sh)" R -C "$P4" upgrade
+check "저장소로 올리면 harness_source가 저장소" grep -qxF "harness_source: '$(realpath "$REPO")'" "$P4/.harness/project.yaml"
+has "harness_source: $(realpath "$SH") → $(realpath "$REPO")" && ok "harness_source가 바뀌면 알림" || ng "harness_source 알림" "$LAST"
+git -C "$P4" add -A && git -C "$P4" commit -qm "upgrade (저장소)"
+expect_fail "프로젝트 사본의 upgrade는 다른 프로젝트(-C)를 올리지 않음" "자기 프로젝트만" bash "$P4/.harness/bin/harness.sh" -C "$P2" upgrade
+sed -i 's/^HARNESS_VERSION=.*/HARNESS_VERSION="9.9.9"/' "$P4/.harness/bin/lib/core.sh"; git -C "$P4" commit -qam "더 새 bin 흉내"
+expect_fail "더 새 버전의 프로젝트는 내리지 않음" "내리지 않습니다" R upgrade "$P4"
+check "거부 때 bin 그대로" grep -qx 'HARNESS_VERSION="9.9.9"' "$P4/.harness/bin/lib/core.sh"
+sed -i "s/^HARNESS_VERSION=.*/HARNESS_VERSION=\"$V\"/" "$P4/.harness/bin/lib/core.sh"; git -C "$P4" commit -qam "되돌림"
+# harness_source가 저장소를 가리키는 링크여도 저장소 최상위로 보고 pull한다 (경로 문자열이 아니라 -ef로 판정)
+cp -R "$SH" "$WORK/srcrepo" && git -C "$WORK/srcrepo" init -q && git -C "$WORK/srcrepo" add -A && git -C "$WORK/srcrepo" commit -qm src
+ln -s "$WORK/srcrepo" "$WORK/srclink"
+sed -i "s|^harness_source:.*|harness_source: '$WORK/srclink'|" "$P4/.harness/project.yaml"; git -C "$P4" commit -qam "harness_source 링크"
+expect_ok "링크로 가리킨 저장소에서 upgrade" env -u HARNESS_NO_PULL bash "$P4/.harness/bin/harness.sh" upgrade
+has "저장소 최신화" && ok "링크 경로의 저장소도 최신화(pull) 시도" || ng "링크 경로 pull" "$LAST"
+git -C "$P4" add -A && git -C "$P4" commit -qm "upgrade (링크)"
+mkdir -p "$WORK/v1like/.harness" "$WORK/nobin/.harness"
+printf "schema_version: '1.0'\n" >"$WORK/v1like/.harness/project.yaml"
+printf "schema_version: '2'\n" >"$WORK/nobin/.harness/project.yaml"
+expect_fail "v1 프로젝트: migrate 안내" "migrate" G "$WORK/v1like" status
+expect_fail "bin이 없는 v2 프로젝트: upgrade 안내" "upgrade" G "$WORK/nobin" status
+expect_ok "completion bash" env HOME="$HH" "$GH" completion bash
+has "complete -F _herdr_harness_completions herdr-harness harness.sh" && ok "자동완성 스크립트 출력" || ng "completion 출력" "$LAST"
+expect_fail "completion은 bash만" "bash뿐" env HOME="$HH" "$GH" completion zsh
+
+# 설치 거부: v1 설치본(--replace-v1 필요), 모르는 폴더, 다른 프로그램을 가리키는 링크
+HV="$WORK/home-v1"; mkdir -p "$HV/.local/share/herdr-agent-harness/lib" "$HV/.local/bin"
+echo v1 >"$HV/.local/share/herdr-agent-harness/harness.sh"; echo x >"$HV/.local/share/herdr-agent-harness/lib/10-lib.sh"
+ln -s "$HV/.local/share/herdr-agent-harness/harness.sh" "$HV/.local/bin/herdr-harness"
+expect_fail "v1 설치본은 --replace-v1 없이 바꾸지 않음" "--replace-v1" env HOME="$HV" bash "$REPO/harness.sh" install
+check "거부 때 v1 설치본 그대로" grep -qx v1 "$HV/.local/share/herdr-agent-harness/harness.sh"
+expect_ok "install --replace-v1" env HOME="$HV" bash "$REPO/harness.sh" install --replace-v1
+check "v1 → v2 교체, 링크 갱신, 임시 폴더 없음" bash -c "test -f '$HV/.local/share/herdr-agent-harness/lib/core.sh' && test ! -e '$HV/.local/share/herdr-agent-harness/lib/10-lib.sh' && [[ \$(readlink '$HV/.local/bin/herdr-harness') == '$HV/.local/share/herdr-agent-harness/bin/herdr-harness' && \$(ls -A '$HV/.local/share') == herdr-agent-harness ]]"
+HO="$WORK/home-other"; mkdir -p "$HO/.local/share/herdr-agent-harness" "$HO/.local/bin"; echo mine >"$HO/.local/share/herdr-agent-harness/notes.txt"
+expect_fail "Harness 설치본이 아닌 폴더는 덮어쓰지 않음" "설치본이 아닌" env HOME="$HO" bash "$REPO/harness.sh" install
+check "모르는 폴더 그대로" grep -qx mine "$HO/.local/share/herdr-agent-harness/notes.txt"
+rm -rf "$HO/.local/share/herdr-agent-harness"; ln -s /bin/true "$HO/.local/bin/herdr-harness"
+expect_fail "다른 프로그램을 가리키는 링크는 건드리지 않음" "다른 곳을 가리킵니다" env HOME="$HO" bash "$REPO/harness.sh" install
+check "그때 설치본을 만들지 않음" bash -c "test ! -e '$HO/.local/share/herdr-agent-harness' && [[ \$(readlink '$HO/.local/bin/herdr-harness') == /bin/true ]]"
+# 저장소 clone(.git)·표식(INSTALLED) 없는 사본·읽을 수 없는 폴더는 설치본으로 보지 않는다 (지우면 안 되는 것)
+HC="$WORK/home-clone"; CL="$HC/.local/share/herdr-agent-harness"
+mkdir -p "$CL/bin" "$CL/lib" "$CL/.git"; touch "$CL/bin/herdr-harness" "$CL/lib/core.sh"; echo mine >"$CL/my-notes.txt"
+expect_fail "저장소 clone(.git)은 설치본으로 보지 않음" "설치본이 아닌" env HOME="$HC" bash "$REPO/harness.sh" install
+rm -rf "$CL/.git"
+expect_fail "표식(INSTALLED) 없는 사본도 덮어쓰지 않음" "설치본이 아닌" env HOME="$HC" bash "$REPO/harness.sh" install
+chmod 0300 "$CL"
+expect_fail "읽을 수 없는 폴더는 비었다고 보지 않음" "설치본이 아닌" env HOME="$HC" bash "$REPO/harness.sh" install
+chmod 0755 "$CL"
+check "거부한 폴더는 이름·내용 그대로" bash -c "grep -qx mine '$CL/my-notes.txt' && [[ \$(ls -A '$HC/.local/share') == herdr-agent-harness ]]"
+# 실패하면 원래대로: 쓸 수 없는 bin 폴더는 바꾸기 전에 거부하고, 링크를 바꾸다 실패하면 옛 설치본과 링크로 되돌린다
+HB="$WORK/home-b"; SHB="$HB/.local/share/herdr-agent-harness"
+expect_ok "install (되돌리기 시험용)" env HOME="$HB" bash "$REPO/harness.sh" install
+echo keep >"$SHB/SENTINEL"
+chmod 0555 "$HB/.local/bin"
+expect_fail "~/.local/bin에 쓸 수 없으면 바꾸지 않음" "쓸 수 없는 폴더" env HOME="$HB" bash "$REPO/harness.sh" install
+chmod 0755 "$HB/.local/bin"
+check "그때 기존 설치본 그대로" test -f "$SHB/SENTINEL"
+FMV="$WORK/fake-mv"; mkdir -p "$FMV"   # 링크 바꾸기(임시 링크 .herdr-harness.XXXX를 옮기는 mv)만 실패시킨다
+printf '#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" != */.herdr-harness.* ]] || exit 1; done\nexec %q "$@"\n' "$(command -v mv)" >"$FMV/mv"; chmod +x "$FMV/mv"
+expect_fail "링크를 바꾸다 실패" "링크를 바꾸지 못했습니다" env HOME="$HB" PATH="$FMV:$PATH" bash "$REPO/harness.sh" install
+has "원래대로 되돌렸습니다" && ok "설치 도중 실패 → 원래대로 되돌렸다고 알림" || ng "되돌리기 알림" "$LAST"
+check "되돌린 뒤: 옛 설치본·링크 그대로, 임시 폴더·임시 링크 없음" bash -c "test -f '$SHB/SENTINEL' && [[ \$(readlink '$HB/.local/bin/herdr-harness') == '$SHB/bin/herdr-harness' && \$(ls -A '$HB/.local/share') == herdr-agent-harness && \$(ls -A '$HB/.local/bin') == herdr-harness ]]"
+# rename을 마친 직후에 끊긴 경우: 상태 깃발이 아니라 파일 상태로 판단한다 (옮긴 뒤 실패를 알리는 가짜 mv로 흉내)
+FMV2="$WORK/fake-mv2"; mkdir -p "$FMV2"
+printf '#!/usr/bin/env bash\n%q "$@" || exit $?\nfor a in "$@"; do [[ "$a" != *"$FAKE_MV_AFTER"* ]] || exit 1; done\n' "$(command -v mv)" >"$FMV2/mv"; chmod +x "$FMV2/mv"
+FAKE_MV_AFTER=".herdr-harness-install." expect_fail "새 사본을 제자리에 둔 직후 끊김" "제자리에 두지 못했습니다" env HOME="$HB" PATH="$FMV2:$PATH" bash "$REPO/harness.sh" install
+check "→ 새 사본을 치우고 옛 설치본·링크로 되돌림" bash -c "test -f '$SHB/SENTINEL' && [[ \$(readlink '$HB/.local/bin/herdr-harness') == '$SHB/bin/herdr-harness' && \$(ls -A '$HB/.local/share') == herdr-agent-harness && \$(ls -A '$HB/.local/bin') == herdr-harness ]]"
+FAKE_MV_AFTER="/.herdr-harness." expect_fail "링크를 바꾼 직후 끊김" "링크를 바꾸지 못했습니다" env HOME="$HB" PATH="$FMV2:$PATH" bash "$REPO/harness.sh" install
+has "설치는 끝났습니다" && ok "→ 링크까지 바뀌었으면 설치가 끝난 것으로 봄" || ng "링크 직후 판단" "$LAST"
+check "→ 새 설치본·링크만 남고 옛 사본·임시 파일 없음" bash -c "test ! -e '$SHB/SENTINEL' && test -f '$SHB/INSTALLED' && [[ \$(readlink '$HB/.local/bin/herdr-harness') == '$SHB/bin/herdr-harness' && \$(ls -A '$HB/.local/share') == herdr-agent-harness && \$(ls -A '$HB/.local/bin') == herdr-harness ]]"
+FMV3="$WORK/fake-mv3"; mkdir -p "$FMV3"   # 링크를 바꾸기 직전에 설치 프로세스에 SIGTERM
+printf '#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" != */.herdr-harness.* ]] || { kill -TERM "$PPID"; sleep 1; exit 1; }; done\nexec %q "$@"\n' "$(command -v mv)" >"$FMV3/mv"; chmod +x "$FMV3/mv"
+echo keep >"$SHB/SENTINEL"
+expect_fail "설치 중 SIGTERM" "exit 143" env HOME="$HB" PATH="$FMV3:$PATH" bash "$REPO/harness.sh" install
+check "→ 원래대로 되돌리고 신호 종료 코드(143)를 알림" bash -c "test -f '$SHB/SENTINEL' && [[ \$(ls -A '$HB/.local/share') == herdr-agent-harness && \$(ls -A '$HB/.local/bin') == herdr-harness ]]"
+HX="$WORK/home-xdg"
+expect_ok "XDG_DATA_HOME이 있으면 그 아래에 설치 (v1과 같은 자리)" env HOME="$HX" XDG_DATA_HOME="$HX/xdg" bash "$REPO/harness.sh" install
+check "XDG 설치본과 링크" bash -c "test -f '$HX/xdg/herdr-agent-harness/INSTALLED' && [[ \$(readlink '$HX/.local/bin/herdr-harness') == '$HX/xdg/herdr-agent-harness/bin/herdr-harness' ]]"
+HXR="$WORK/home-xdg-rel"
+expect_ok "상대 경로 XDG_DATA_HOME은 무시 (XDG 명세)" bash -c "cd '$WORK' && HOME='$HXR' XDG_DATA_HOME=reldata bash '$REPO/harness.sh' install"
+check "→ ~/.local/share에 설치, 현재 폴더에는 만들지 않음" bash -c "test -f '$HXR/.local/share/herdr-agent-harness/INSTALLED' && test ! -e '$WORK/reldata' && [[ \$(readlink '$HXR/.local/bin/herdr-harness') == '$HXR/.local/share/herdr-agent-harness/bin/herdr-harness' ]]"
+
+# 자동완성: 실제 완성 함수를 COMP_WORDS로 불러 후보를 본다 (기본은 설명 끔, P4 안에서)
+C() {
+  ( cd "${CDIR:-$P4}" && HERDR_HARNESS_COMPLETION_DESCRIPTIONS="${CDESC:-0}" COLUMNS=80 bash -c '
+      source "$1"; shift; COMP_WORDS=("$@"); COMP_CWORD=$(( $# - 1 ))
+      _herdr_harness_completions; (( ${#COMPREPLY[@]} == 0 )) || printf "%s\n" "${COMPREPLY[@]}"' _ "$REPO/bin/completion.bash" "$@" )
+}
+P_SAVE="$P"; P="$P4"
+write_task task-001 milestone-001 a.txt "true"
+write_task task-002 milestone-002 b.txt "true" "status: ready"
+mkdir -p "$P4/.harness/archive/m-old/tasks"; printf '# m-old\n' >"$P4/.harness/archive/m-old/SUMMARY.md"
+printf 'task_id: task-009\nmilestone_id: m-old\ntitle: 옛 Task\nstatus: completed\n' >"$P4/.harness/archive/m-old/tasks/task-009.yaml"
+P="$P_SAVE"
+LAST="$(C herdr-harness st)"; [[ "$LAST" == $'status\nstart' ]] && ok "자동완성: 명령 (접두사)" || ng "명령 후보" "$LAST"
+LAST="$(CDESC=1 C herdr-harness st)"
+[[ "$LAST" == "status "*" : 진행 상황"*$'\n'"start "*" : Herdr"* ]] && ok "후보가 여럿이면 '후보 : 설명'을 한 줄씩" || ng "설명 후보" "$LAST"
+LAST="$(CDESC=1 C herdr-harness stat)"; [[ "$LAST" == status ]] && ok "하나로 좁혀지면 설명 없이 후보만" || ng "단일 후보" "$LAST"
+LAST="$(COMP_TYPE=37 CDESC=1 C herdr-harness st)"; [[ "$LAST" == $'status\nstart' ]] && ok "menu-complete(COMP_TYPE 37, 어느 키든)에서는 설명 없이" || ng "menu-complete 설명" "$LAST"
+LAST="$(COMP_TYPE=42 CDESC=1 C herdr-harness st)"; [[ "$LAST" == $'status\nstart' ]] && ok "insert-completions(M-*, 42)에서도 설명 없이" || ng "insert-completions 설명" "$LAST"
+LAST="$(C herdr-harness co)"; [[ "$LAST" == completion ]] && ok "전역 명령은 completion 후보" || ng "completion 후보" "$LAST"
+LAST="$(C .harness/bin/harness.sh co)"; [[ -z "$LAST" ]] && ok "harness.sh에는 completion 후보 없음" || ng "harness.sh completion 후보" "$LAST"
+LAST="$(C herdr-harness dispatch "")"; [[ "$LAST" == $'task-001\ntask-002' ]] && ok "Task 후보 (보관된 Task 제외)" || ng "Task 후보" "$LAST"
+LAST="$(CDESC=1 C herdr-harness dispatch "")"; has "draft · task-001 제목" && has "ready · task-002 제목" && ok "Task 후보에 상태 · 제목" || ng "Task 설명" "$LAST"
+LAST="$(C herdr-harness transition task-001 "")"; [[ "$LAST" == ready ]] && ok "전이 후보: draft → ready" || ng "전이 후보 draft" "$LAST"
+LAST="$(C herdr-harness transition task-002 "")"; [[ "$LAST" == active ]] && ok "전이 후보: ready → active" || ng "전이 후보 ready" "$LAST"
+LAST="$(C herdr-harness approve-plan "")"; [[ "$LAST" == $'milestone-001\nmilestone-002' ]] && ok "Milestone 후보" || ng "Milestone 후보" "$LAST"
+LAST="$(C herdr-harness dispatch task-001 "")"; [[ "$LAST" == $'worker\nreviewer' ]] && ok "역할 후보" || ng "역할 후보" "$LAST"
+LAST="$(C herdr-harness dispatch task-001 worker --)"; [[ "$LAST" == $'--timeout\n--extra-prompt' ]] && ok "dispatch 옵션 후보" || ng "dispatch 옵션" "$LAST"
+sed -i 's/^  available: .*/  available: [claude, codex, agy, my-agent]/' "$P4/.harness/project.yaml"   # 기본값과 다른 목록이어야 읽었는지 안다
+LAST="$(C herdr-harness provider off "")"; [[ "$LAST" == $'claude\ncodex\nagy\nmy-agent' ]] && ok "Provider 후보 (project.yaml)" || ng "Provider 후보" "$LAST"
+LAST="$(C herdr-harness verify "")"; has task-009 && has task-001 && ok "verify는 보관된 Task도 후보" || ng "verify 후보" "$LAST"
+LAST="$(C herdr-harness verify --milestone "")"; has m-old && has milestone-001 && ok "verify --milestone은 보관된 Milestone도" || ng "verify --milestone 후보" "$LAST"
+LAST="$(C herdr-harness prune "")"; [[ "$LAST" == m-old ]] && ok "prune은 보관된 Milestone만" || ng "prune 후보" "$LAST"
+LAST="$(C herdr-harness remote setup --mount-o)"; [[ "$LAST" == --mount-options ]] && ok "remote setup --mount-options 후보" || ng "remote setup 옵션" "$LAST"
+LAST="$(CDIR="$WORK" C herdr-harness -C "$P4" dispatch "")"; [[ "$LAST" == $'task-001\ntask-002' ]] && ok "-C DIR의 프로젝트에서 후보" || ng "-C DIR 후보" "$LAST"
+LAST="$(CDIR="$P4/sub/deep" C herdr-harness close "")"; [[ "$LAST" == $'task-001\ntask-002' ]] && ok "하위 폴더에서도 프로젝트의 후보" || ng "하위 폴더 후보" "$LAST"
+LAST="$(CDIR="$WORK" C herdr-harness dispatch "")"; [[ -z "$LAST" ]] && ok "프로젝트 밖이면 Task 후보 없음" || ng "프로젝트 밖 후보" "$LAST"
+LAST="$(CDIR="$WT/src" C herdr-harness dispatch "")"; [[ "$LAST" == $'task-001\ntask-002' ]] && ok "작업 공간 안에서는 바깥 프로젝트의 후보" || ng "작업 공간 후보" "$LAST"
+ln -s "$P4" "$WORK/p 4"
+LAST="$(CDIR="$WORK" C herdr-harness -C 'p\ 4' dispatch "")"; [[ "$LAST" == $'task-001\ntask-002' ]] && ok "-C 경로의 백슬래시를 풂" || ng "-C 백슬래시" "$LAST"
+LAST="$(CDIR="$WORK" C herdr-harness -C '"p 4"' dispatch "")"; [[ "$LAST" == $'task-001\ntask-002' ]] && ok "-C 경로의 따옴표를 풂" || ng "-C 따옴표" "$LAST"
+LAST="$(HH_P4="$P4" CDIR="$WORK" C herdr-harness -C '$HH_P4' dispatch "")"; [[ "$LAST" == $'task-001\ntask-002' ]] && ok "-C 경로의 \$변수를 풂 (명령 치환은 하지 않음)" || ng "-C 변수" "$LAST"
+P_SAVE="$P"; P="$P4"
+write_task task-003 milestone-001 c.txt "true" "title: '이슈 #12 수정'"
+write_task task-004 milestone-001 d.txt "true" "status: completed"
+P="$P_SAVE"
+LAST="$(CDESC=1 C herdr-harness dispatch task-00)"; has "draft · 이슈 #12 수정" && ok "따옴표 안의 #은 제목 (주석으로 자르지 않음)" || ng "따옴표 안 #" "$LAST"
+LAST="$(C herdr-harness transition task-004 "")"; [[ -z "$LAST" ]] && ok "갈 수 있는 상태가 없으면(completed) 전이 후보 없음" || ng "completed 전이 후보" "$LAST"
+PA="$WORK/archive/p5"; mkdir -p "$PA/.harness/tasks"; printf 'providers:\n  available: [claude]\n' >"$PA/.harness/project.yaml"
+printf 'title: 하나\nstatus: active\n' >"$PA/.harness/tasks/t-1.yaml"; printf 'title: 둘\nstatus: ready\n' >"$PA/.harness/tasks/t-2.yaml"
+LAST="$(CDIR="$PA" CDESC=1 C herdr-harness dispatch "")"; has "active · 하나" && ! has "보관됨" && ok "보관 여부는 프로젝트 안 경로로 판정 (프로젝트가 archive/ 아래여도)" || ng "archive 경로" "$LAST"
+for i in $(seq 3 45); do printf 'title: t\nstatus: ready\n' >"$PA/.harness/tasks/t-$i.yaml"; done
+LAST="$(CDIR="$PA" CDESC=1 C herdr-harness dispatch "")"; [[ "$LAST" != *" : "* && "$(wc -l <<<"$LAST")" == 45 ]] && ok "후보가 많으면(40개 넘음) 설명 없이" || ng "많은 후보" "$(head -n 3 <<<"$LAST")"
+# 자동완성 목록이 harness.sh와 어긋나지 않는지 대조한다 (명령 · 전이표 · 상태 · remote 하위 명령 · 옵션)
+CB="$REPO/bin/completion.bash"
+names() { bash -c 'source "$1"; eval "for p in \"\${$2[@]}\"; do echo \"\${p%%::*}\"; done"' _ "$CB" "$1" | sort -u; }
+labels() { sed -n "/^$2() {/,/^}/p" "$1" | grep -oE '^    [a-z|-]+\)' | tr -d ' )' | tr '|' '\n' | grep -vxE -- '-h|--help' | sort -u; }
+want="$( { labels "$REPO/harness.sh" main; echo completion; } | sort -u)"; got="$(names _HERDR_HARNESS_COMMANDS)"
+[[ "$got" == "$want" ]] && ok "자동완성 명령 = harness.sh 명령 + completion" || ng "명령 목록 불일치" "$(diff <(echo "$want") <(echo "$got"))"
+t1="$(sed -n 's/^TRANSITIONS="\(.*\)"$/\1/p' "$REPO/lib/gates.sh")"; t2="$(sed -n 's/^_HERDR_HARNESS_TRANSITIONS="\(.*\)"$/\1/p' "$CB")"
+[[ -n "$t1" && "$t1" == "$t2" ]] && ok "자동완성 전이표 = gates.sh TRANSITIONS" || ng "전이표 불일치" "$t1 | $t2"
+[[ "$(tr ' >' '\n\n' <<<"$t1" | sed '/^$/d' | sort -u)" == "$(names _HERDR_HARNESS_STATES)" ]] && ok "자동완성 상태 = 전이표의 상태" || ng "상태 목록 불일치"
+want="$(labels "$REPO/lib/remote.sh" cmd_remote)"; got="$(names _HERDR_HARNESS_REMOTE)"
+[[ "$got" == "$want" ]] && ok "자동완성 remote 하위 명령 = cmd_remote" || ng "remote 하위 명령 불일치" "$(diff <(echo "$want") <(echo "$got"))"
+want="$( { R help; R -C "$P4" remote help; } 2>&1 | grep -oE -- '--[a-z][a-z0-9-]*' | sort -u)"
+got="$(grep -oE -- '"--[a-z][a-z0-9-]*::' "$CB" | tr -d '":' | sort -u)"
+[[ -n "$want" && "$got" == "$want" ]] && ok "자동완성 옵션 = 사용법(help)에 적힌 옵션" || ng "옵션 불일치" "$(diff <(echo "$want") <(echo "$got"))"
 
 printf '\n결과: PASS %s / FAIL %s\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

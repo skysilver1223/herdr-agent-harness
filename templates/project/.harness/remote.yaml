@@ -7,5 +7,7 @@ remote:
   user: ''
   path: ''
   mount_path: ''
+  # sshfs에 더할 -o 옵션(쉼표로 구분, 선택). 원격의 절대경로 심볼릭 링크를 따라가려면 'follow_symlinks'
+  mount_options: ''
   ssh_key: '~/.ssh/herdr_remote_ed25519'
   vcs: 'git'

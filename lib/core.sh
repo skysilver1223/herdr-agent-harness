@@ -1,7 +1,7 @@
 # herdr-harness: 공통 함수 — 출력·임시 파일·Secret 검사·설정 읽기·경로·Acceptance Criteria.
 # harness.sh가 source한다. 단독 실행하지 않는다.
 
-HARNESS_VERSION="2.2.1"
+HARNESS_VERSION="2.3.0"
 shopt -s inherit_errexit 2>/dev/null || true   # harness.sh를 거치지 않고 source해도 같은 규칙(테스트 등)
 ROOT=""
 TMP_FILES=()

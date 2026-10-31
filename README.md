@@ -10,6 +10,7 @@ Pane에서 병렬로 운영하는 하네스입니다.
 
 설치가 필요 없습니다. 프로젝트를 만들면 스크립트가 프로젝트 안(`.harness/bin/`)에 복사되므로,
 bash·git·herdr만 있으면 그 프로젝트는 어디서든 동작합니다.
+어디서나 짧게 부르고 탭 자동완성을 쓰려면 전역 명령 `herdr-harness`를 설치합니다(선택, [아래](#전역-명령과-자동완성-선택)).
 
 ## 요구 사항
 
@@ -36,6 +37,7 @@ cd ~/Projects/my-app
 
 Herdr 첫 Pane에서 Orchestrator 에이전트(기본 claude)를 실행하고 `AGENTS.md`의 "시작" 프롬프트를 입력합니다.
 이후는 에이전트가 Skill을 따라 진행하고, 사람의 결정이 필요할 때만 묻습니다.
+전역 명령을 설치했다면 `~/herdr-agent-harness/harness.sh`·`.harness/bin/harness.sh` 대신 `herdr-harness`라고 써도 됩니다.
 
 `init` 주요 옵션:
 - `--worker`·`--reviewer`·`--orchestrator`: 서로 다른 에이전트를 배정합니다. Worker와 Reviewer는 반드시 달라야 합니다.
@@ -120,7 +122,7 @@ harness.sh init DIR --goal "..." --worker claude --reviewer claude --review-leve
 
 ## 명령
 
-프로젝트 안에서는 `.harness/bin/harness.sh <명령>`을 씁니다. 다른 위치에서는 `-C DIR`을 붙입니다.
+프로젝트 안에서는 `.harness/bin/harness.sh <명령>`(전역 명령을 설치했으면 `herdr-harness <명령>`)을 씁니다. 다른 위치에서는 `-C DIR`을 붙입니다.
 
 | 명령 | 설명 |
 |---|---|
@@ -139,7 +141,39 @@ harness.sh init DIR --goal "..." --worker claude --reviewer claude --review-leve
 | `remote <하위 명령>` | 원격 모드 (아래) |
 | `upgrade` | 최신 스크립트·Skill로 갱신 (아래) |
 | `migrate` | v1 프로젝트를 v2로 이전 (저장소의 harness.sh, 아래) |
+| `install [--replace-v1]` | 전역 명령 `herdr-harness` 설치 (저장소의 harness.sh, 아래). 탭 자동완성은 `~/.bashrc` 한 줄 |
 | `doctor` `start` `help` | 점검, Herdr 세션 시작, 도움말 |
+
+## 전역 명령과 자동완성 (선택)
+
+```bash
+~/herdr-agent-harness/harness.sh install                 # ~/.local/bin/herdr-harness
+~/herdr-agent-harness/harness.sh install --replace-v1    # v1 설치본이 있던 자리면
+grep -q 'herdr-harness completion bash' ~/.bashrc || echo 'source <(herdr-harness completion bash)' >> ~/.bashrc   # 탭 자동완성
+```
+
+- 저장소의 사본을 설치본(`~/.local/share/herdr-agent-harness/`, `XDG_DATA_HOME`이 있으면 그 아래 — v1과 같은 자리)에 두고 `~/.local/bin/herdr-harness`를 잇습니다. `~/.bashrc`는 건드리지 않습니다.
+- 프로젝트 안(하위 폴더 포함)이나 `-C DIR`에서는 그 프로젝트의 `.harness/bin/harness.sh`로 넘깁니다.
+  - 에이전트와 같은 버전으로 실행됩니다. 버전은 `upgrade`로만 바뀝니다.
+  - Task 작업 공간(`.harness/worktrees/T`) 안에서는 바깥 프로젝트로 넘깁니다. 작업 공간의 `.harness`는 브랜치 시점 사본이라 상태가 옛것입니다.
+  - v1 프로젝트면 `migrate`를, `.harness/bin/`이 없으면 `upgrade`를 안내하고 멈춥니다.
+- `init`·`upgrade`·`migrate`·`help`는 설치본이 실행합니다. 설치본으로 만들거나 올린 프로젝트는 설치본을 `harness_source`로 기록하고, 바뀔 때 알립니다.
+- 사본을 쓰므로 저장소의 브랜치나 작업 중인 수정이 곧바로 모든 프로젝트의 명령에 섞이지 않습니다. 저장소를 고친 뒤에는 `install`을 다시 실행합니다.
+- `upgrade`는 버전을 내리지 않습니다. 프로젝트가 설치본보다 새 버전이면(저장소로 올린 경우) 멈추고, `install`을 다시 하라고 안내합니다.
+- 자동완성 후보:
+  - 명령·하위 명령·옵션
+  - 현재 프로젝트의 Task(상태·제목 표시)·Milestone·Provider
+  - `transition`에서는 지금 상태에서 갈 수 있는 상태만
+- 후보가 여럿이면 설명을 한 줄씩 보여 줍니다. 그 밖의 경우:
+  - 후보를 명령줄에 바로 넣는 완성(menu-complete, M-\*)이나 후보가 40개를 넘으면 설명 없이 냅니다.
+  - `HERDR_HARNESS_COMPLETION_DESCRIPTIONS=0`이면 늘 끕니다.
+  - `.harness/bin/harness.sh`를 칠 때도 동작합니다.
+- 다음 경우에는 바꾸지 않고 멈춥니다.
+  - v1 설치본 자리: `--replace-v1`이 필요합니다(v1에 직접 고친 내용은 사라짐)
+  - Harness 설치본이 아닌 폴더: 저장소 clone, 표식(`INSTALLED`) 없는 사본, 읽을 수 없는 폴더
+  - 다른 프로그램을 가리키는 `herdr-harness` 링크
+  - 쓸 수 없는 `~/.local/bin`
+- 새 사본을 옆에 만들고 링크까지 바꾼 뒤에야 옛 사본을 지웁니다. 도중에 실패하거나 끊기면 원래 설치본과 링크로 되돌립니다.
 
 ## 모델 등급과 쿼터
 
@@ -191,6 +225,11 @@ models:
 - 원격 명령(ssh)은 호출한 쪽의 표준 입력을 읽지 않습니다(`-n`). 반복문 안에서 불러도 다음 입력을 먹지 않습니다. v1은 이 결함 때문에 원격 모드에서 첫 번째 AC만 실행됐습니다.
 - 비밀번호는 파일에 저장하지 않습니다. 키 등록 때 한 번만 `HH_REMOTE_PASSWORD`로 넘깁니다.
 - 설정 정본은 `.harness/remote.yaml`입니다.
+- `mount_options`로 sshfs에 `-o` 옵션을 더합니다(쉼표로 구분, `remote setup --mount-options`로도 지정).
+  - 예: 원격의 절대경로 심볼릭 링크가 로컬에서 끊겨 보이면 `mount_options: 'follow_symlinks'`
+  - 허용 목록의 옵션만 받습니다: 심볼릭 링크(`follow_symlinks`·`transform_symlinks`), `idmap`·`uid`·`gid`·`umask`, cache 계열, `compression`, `reconnect`, `Port`, `ServerAlive*`, `ConnectTimeout` 등.
+  - `ssh_command`·`ProxyCommand`처럼 명령을 실행하거나 `directport`·`allow_other`처럼 보안을 낮추는 옵션은 거부합니다.
+  - 바꾼 뒤에는 `remote unmount` → `remote mount`로 다시 마운트합니다.
 
 ## 장기 운영
 
@@ -208,10 +247,12 @@ models:
 ## 업데이트·패치
 
 ```bash
-.harness/bin/harness.sh upgrade                     # 프로젝트 안에서: 저장소 pull 후 bin·Skill 갱신
+.harness/bin/harness.sh upgrade                     # 프로젝트 안에서: harness_source(저장소면 pull) 기준으로 bin·Skill 갱신
 ~/herdr-agent-harness/harness.sh upgrade ~/Projects/a ~/Projects/b   # 여러 프로젝트를 한 번에
+herdr-harness upgrade                               # 전역 명령: 설치본 버전으로 (프로젝트 안, DIR 없이)
 ```
 
+- 전역 명령을 쓰면 순서는 저장소 갱신 → `~/herdr-agent-harness/harness.sh install` → 프로젝트마다 `herdr-harness upgrade`입니다.
 - 버전 변화(`2.0.0 → 2.x`)와 바뀐 파일을 보여 줍니다. `git diff`로 확인한 뒤 commit합니다.
 - 프로젝트에서 bin이나 Skill을 직접 고쳤고 아직 commit하지 않았다면 덮어쓰지 않습니다. 그런 수정은 저장소에 반영합니다.
 - 갱신하지 않는 파일: `AGENTS.md`, SPEC, 템플릿처럼 프로젝트 고유 내용이 있는 파일
@@ -229,9 +270,11 @@ lib/models.sh       모델 등급·생각 깊이, 쿼터 확인
 lib/auto.sh         자동 진행(run), 교체 규칙
 lib/remote.sh       원격 모드
 lib/status.sh       status · metrics · validate · doctor
-lib/project.sh      init · upgrade · start
+lib/project.sh      init · upgrade · start · install
 lib/verify.sh       재검증 (verify)
 lib/migrate.sh      v1 프로젝트 이전 (migrate)
+bin/herdr-harness   전역 명령 (install이 설치, 프로젝트 안에서는 그 프로젝트의 사본으로 넘김)
+bin/completion.bash Bash 탭 자동완성 (herdr-harness completion bash)
 templates/project/  프로젝트 골격: AGENTS.md, Skill 6개, project.yaml, SPEC·MILESTONES·BACKLOG, Task·Intent 템플릿
 test.sh             자체 테스트 (가짜 herdr·ssh, 임시 폴더에서 실행 후 삭제)
 ```
@@ -248,8 +291,12 @@ test.sh             자체 테스트 (가짜 herdr·ssh, 임시 폴더에서 실
 - 자동 진행(기동 실패 → 자동 교체 포함)
 - Milestone 승인·보관·정리
 - 병렬 상한·범위 충돌·premium 승인·재작업 상한
-- 원격 모드
-- 업그레이드
+- 원격 모드(마운트 옵션·허용 목록 포함, 가짜 sshfs)
+- 업그레이드(버전을 내리지 않음, 링크로 가리킨 저장소의 pull 포함)
+- 전역 명령 (아래 항목을 모두 확인):
+  - 설치·갱신·거부 조건, 실패 시 되돌리기
+  - 프로젝트 사본으로 넘기기(작업 공간 안 포함)
+  - 자동완성 후보, 그리고 자동완성 목록(명령·옵션·상태)이 harness.sh와 맞는지 대조
 - 재검증, v1 이전 (아래 항목을 모두 확인):
   - 사전 점검이 아무것도 바꾸지 않음
   - 차단 조건
@@ -303,9 +350,11 @@ v1(`~/.local/share/herdr-agent-harness`, `herdr-harness` 명령)으로 만든 �
 - **이전 뒤 할 일**은 `.harness/archive/v1/MIGRATION.md`에 정리됩니다. 주로 다음 두 가지입니다.
   - `verify --legacy`: 증빙이 불완전한 v1 완료 Task를 다시 검증합니다.
   - Milestone별 `approve-plan`
-- v1을 지우려면:
-  - `rm -rf ~/.local/share/herdr-agent-harness ~/.local/bin/herdr-harness`
-  - `~/.bashrc`에서 `herdr-harness bash completion` 블록을 삭제
+- v1의 `herdr-harness` 명령은 `install --replace-v1`이 v2 전역 명령으로 바꿉니다. `~/.bashrc`의 `source <(herdr-harness completion bash)` 줄은 그대로 두면 v2 자동완성을 불러옵니다.
+- 전역 명령 없이 쓰려면:
+  - `rm -rf ~/.local/share/herdr-agent-harness ~/.local/bin/herdr-harness` (`XDG_DATA_HOME`을 쓰면 `$XDG_DATA_HOME/herdr-agent-harness`)
+  - `~/.bashrc`에서 `source <(herdr-harness completion bash)` 줄(v1 install이 넣었다면 `herdr-harness bash completion` 표시가 붙은 블록)을 삭제
+  - 설치본으로 만들거나 올린 프로젝트는 `harness_source`가 설치본입니다. 지운 뒤에는 저장소의 harness.sh로 한 번 `upgrade`해 `harness_source`를 저장소로 되돌립니다. 그래야 프로젝트 안의 `upgrade`가 멈추지 않습니다.
 
 ## 라이선스
 

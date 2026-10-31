@@ -61,6 +61,33 @@ _remote_validate_endpoint() {
   done
 }
 
+# mount_options는 sshfs의 -o 값 하나로 넘긴다(쉼표로 여러 개). 예: 원격의 절대경로 심볼릭 링크가 로컬에서 끊겨
+# 보이면 follow_symlinks. 허용 목록의 옵션만 받는다: ssh_command·ProxyCommand·LocalCommand처럼 명령을 실행하거나
+# directport·allow_other처럼 보안을 낮추는 옵션이 remote.yaml로 들어오지 않게 한다(_remote_validate_endpoint와 같은 이유).
+# 마운트·setup 때만 검사한다(원격 실행은 막지 않는다).
+_remote_validate_mount_options() {
+  local opt key
+  local -a opts=()
+  [[ -n "$REMOTE_MOUNT_OPTIONS" ]] || return 0
+  [[ "$REMOTE_MOUNT_OPTIONS" =~ ^[A-Za-z0-9_][A-Za-z0-9_=.,:/@+~%-]*$ ]] ||
+    die "mount_options는 sshfs -o 옵션을 공백 없이 쉼표로 이은 값입니다(예: follow_symlinks): $REMOTE_MOUNT_OPTIONS"
+  [[ "$REMOTE_MOUNT_OPTIONS" != *, ]] || die "mount_options에 빈 항목이 있습니다(끝 쉼표): $REMOTE_MOUNT_OPTIONS"   # read -a는 끝의 빈 필드를 버린다
+  IFS=, read -r -a opts <<<"$REMOTE_MOUNT_OPTIONS"
+  for opt in "${opts[@]}"; do
+    key="${opt%%=*}"
+    [[ -n "$key" ]] || die "mount_options에 빈 항목이 있습니다(쉼표가 겹침): $REMOTE_MOUNT_OPTIONS"
+    # ssh에 넘어가는 옵션은 ssh처럼 대소문자를 가리지 않는다. sshfs·FUSE 옵션은 대소문자를 가린다.
+    case "${key,,}" in port|serveraliveinterval|serveralivecountmax|connecttimeout|tcpkeepalive|compression) continue ;; esac
+    case "$key" in
+      follow_symlinks|transform_symlinks|idmap|uid|gid|umask|default_permissions|ro|rw|noatime|nonempty) ;;
+      reconnect|delay_connect|max_conns|workaround|no_check_root|max_read|max_write|big_writes) ;;
+      no_readahead|sync_readdir|sshfs_sync|direct_io|kernel_cache|auto_cache|entry_timeout|attr_timeout|negative_timeout) ;;
+      cache|dir_cache|cache_*|dcache_*) ;;
+      *) die "mount_options에 쓸 수 없는 옵션입니다: $key — 명령을 실행하거나 보안을 낮출 수 있는 옵션은 받지 않는다(sshfs 옵션은 소문자 그대로). 쓸 수 있는 것: follow_symlinks, transform_symlinks, idmap·uid·gid·umask, cache 계열, compression, reconnect, Port, ServerAlive*, ConnectTimeout 등 (lib/remote.sh)" ;;
+    esac
+  done
+}
+
 _remote_quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 
 # 설정 + 환경변수 override → REMOTE_*. 반환 1 = 설정 없음, 2 = enabled: false.
@@ -77,6 +104,7 @@ _remote_load() {
   REMOTE_SSH_KEY="${HH_REMOTE_SSH_KEY:-$(_remote_field "$file" ssh_key)}"
   REMOTE_SSH_KEY_RAW="$REMOTE_SSH_KEY"
   REMOTE_VCS="${HH_REMOTE_VCS:-$(_remote_field "$file" vcs)}"
+  REMOTE_MOUNT_OPTIONS="${HH_REMOTE_MOUNT_OPTIONS:-$(_remote_field "$file" mount_options)}"
   [[ -n "$REMOTE_MOUNT_PATH" ]] || REMOTE_MOUNT_PATH="$ROOT/.harness/remote-mount"
   [[ -n "$REMOTE_SSH_KEY" ]] || REMOTE_SSH_KEY="$HOME/.ssh/herdr_remote_ed25519"
   [[ -n "$REMOTE_VCS" ]] || REMOTE_VCS=git
@@ -211,6 +239,8 @@ remote:
   path: $(yaml_q "$REMOTE_PATH")
   # SSHFS 마운트 경로(로컬). 원격 모드에서는 이곳이 코드 디렉터리다.
   mount_path: $(yaml_q "$REMOTE_MOUNT_PATH")
+  # sshfs에 더할 -o 옵션(쉼표로 구분, 선택). 원격의 절대경로 심볼릭 링크를 따라가려면 'follow_symlinks'
+  mount_options: $(yaml_q "$REMOTE_MOUNT_OPTIONS")
   # bootstrap-key가 만드는 전용 키. 파일이 있으면 항상 키 인증을 쓴다.
   ssh_key: $(yaml_q "$REMOTE_SSH_KEY_RAW")
   # remote vcs가 원격에서 실행할 명령: git | svn | none
@@ -219,14 +249,15 @@ EOF
 }
 
 remote_setup() {
-  local host="" user="" path="" mount="" ssh_key="" vcs="" force=0 skip_key=0 file
-  local d_host="" d_user="" d_path="" d_mount="" d_key="" d_vcs="" enabled=""
+  local host="" user="" path="" mount="" ssh_key="" vcs="" mopts="" mopts_set=0 force=0 skip_key=0 file
+  local d_host="" d_user="" d_path="" d_mount="" d_key="" d_vcs="" d_mopts="" enabled=""
   while (( $# )); do
     case "$1" in
       --host|--user|--path|--mount|--ssh-key|--vcs)
         [[ $# -ge 2 ]] || die "$1 값이 필요합니다."
         case "$1" in --host) host="$2" ;; --user) user="$2" ;; --path) path="$2" ;; --mount) mount="$2" ;; --ssh-key) ssh_key="$2" ;; --vcs) vcs="$2" ;; esac
         shift 2 ;;
+      --mount-options) [[ $# -ge 2 ]] || die "$1 값이 필요합니다 (지우려면 '')."; mopts="$2"; mopts_set=1; shift 2 ;;
       --force) force=1; shift ;;
       --no-key) skip_key=1; shift ;;
       *) die "알 수 없는 remote setup 옵션: $1" ;;
@@ -237,6 +268,7 @@ remote_setup() {
     enabled="$(_remote_field "$file" enabled)"
     d_host="$(_remote_field "$file" host)"; d_user="$(_remote_field "$file" user)"; d_path="$(_remote_field "$file" path)"
     d_mount="$(_remote_field "$file" mount_path)"; d_key="$(_remote_field "$file" ssh_key)"; d_vcs="$(_remote_field "$file" vcs)"
+    d_mopts="$(_remote_field "$file" mount_options)"
   fi
   if [[ "$enabled" == true && -n "$d_host" && -n "$d_user" && -n "$d_path" && $force -ne 1 ]]; then
     die "이미 원격 모드가 설정되어 있습니다: $(rel "$file") — 다시 쓰려면 --force, 키만 다시 등록하려면 remote bootstrap-key."
@@ -252,9 +284,11 @@ remote_setup() {
   [[ -n "$ssh_key" ]] || _remote_ask ssh_key "전용 SSH 키 경로" "$d_key"
   [[ -n "$vcs" ]] || _remote_ask vcs "원격 VCS (git|svn|none)" "$d_vcs"
   case "$vcs" in git|svn|none) ;; *) die "지원하지 않는 vcs 값입니다: $vcs" ;; esac
-  REMOTE_HOST="$host" REMOTE_USER="$user" REMOTE_PATH="$path" REMOTE_VCS="$vcs" REMOTE_SSH_KEY_RAW="$ssh_key"
+  (( mopts_set )) || mopts="$d_mopts"   # 묻지 않는 선택 값: 주지 않으면 기존 값을 지킨다
+  REMOTE_HOST="$host" REMOTE_USER="$user" REMOTE_PATH="$path" REMOTE_VCS="$vcs" REMOTE_SSH_KEY_RAW="$ssh_key" REMOTE_MOUNT_OPTIONS="$mopts"
   REMOTE_MOUNT_PATH="$(_remote_expand_tilde "$mount")"; REMOTE_SSH_KEY="$(_remote_expand_tilde "$ssh_key")"
   _remote_validate_endpoint
+  _remote_validate_mount_options
   REMOTE_TARGET="${REMOTE_USER}@${REMOTE_HOST}"
   _remote_write_config
   info "원격 설정 기록: $(rel "$file") (비밀번호는 저장하지 않는다)"
@@ -281,9 +315,11 @@ remote_mount() {
   _remote_check_local_tools
   _remote_has sshfs || die "sshfs가 필요합니다: sudo apt install -y sshfs"
   _remote_has mountpoint || die "mountpoint가 필요합니다: sudo apt install -y util-linux"
-  if _remote_is_mounted; then info "이미 마운트되어 있습니다: $REMOTE_MOUNT_PATH"; return 0; fi
+  _remote_validate_mount_options
+  if _remote_is_mounted; then info "이미 마운트되어 있습니다: $REMOTE_MOUNT_PATH (mount_options를 바꿨다면 remote unmount 뒤 다시 mount)"; return 0; fi
   mkdir -p "$REMOTE_MOUNT_PATH"
   local -a opts=(-o reconnect -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o idmap=user)
+  [[ -z "$REMOTE_MOUNT_OPTIONS" ]] || opts+=(-o "$REMOTE_MOUNT_OPTIONS")
   if [[ "$(_remote_auth_mode)" == key ]]; then
     sshfs "${REMOTE_TARGET}:${REMOTE_PATH}" "$REMOTE_MOUNT_PATH" "${opts[@]}" -o "IdentityFile=${REMOTE_SSH_KEY}"
   else
@@ -302,8 +338,8 @@ remote_unmount() {
 }
 
 remote_status() {
-  printf '원격 대상:   %s\n원격 경로:   %s\n마운트 경로: %s\nVCS:         %s\n인증 방식:   %s\n' \
-    "$REMOTE_TARGET" "$REMOTE_PATH" "$REMOTE_MOUNT_PATH" "$REMOTE_VCS" "$(_remote_auth_mode)"
+  printf '원격 대상:   %s\n원격 경로:   %s\n마운트 경로: %s\n마운트 옵션: %s\nVCS:         %s\n인증 방식:   %s\n' \
+    "$REMOTE_TARGET" "$REMOTE_PATH" "$REMOTE_MOUNT_PATH" "${REMOTE_MOUNT_OPTIONS:-(기본)}" "$REMOTE_VCS" "$(_remote_auth_mode)"
   if _remote_is_mounted; then printf '마운트:      연결됨\n'; else printf '마운트:      연결 안 됨\n'; fi
   if _remote_ssh "test -d $(_remote_quote "$REMOTE_PATH")" >/dev/null 2>&1; then printf 'SSH/경로:    정상\n'
   else printf 'SSH/경로:    확인 실패\n'; return 1; fi
@@ -351,7 +387,8 @@ remote_usage() {
 사용법: harness.sh remote <하위 명령>
 
   setup           최초 1회 — 호스트·계정·경로를 묻고 remote.yaml을 만든 뒤 SSH 키 등록
-                  옵션: --host --user --path --mount --ssh-key --vcs --force --no-key
+                  옵션: --host --user --path --mount --ssh-key --vcs --mount-options --force --no-key
+                  (--mount-options는 묻지 않는다. 허용 목록의 sshfs -o 값, 예: follow_symlinks — 주지 않으면 기존 값 유지)
   doctor          로컬 의존성 + SSH 연결 + 원격 경로·도구 + 마운트 일괄 진단
   deps            로컬 의존성과 인증 방식
   bootstrap-key   HH_REMOTE_PASSWORD로 1회 접속해 전용 SSH 키 등록
@@ -362,7 +399,8 @@ remote_usage() {
   shell           원격 프로젝트 디렉터리에서 대화형 셸
 
 비밀번호는 저장하지 않고 HH_REMOTE_PASSWORD로만 전달한다.
-환경변수 override: HH_REMOTE_HOST, HH_REMOTE_USER, HH_REMOTE_PATH, HH_REMOTE_MOUNT_PATH, HH_REMOTE_SSH_KEY, HH_REMOTE_VCS
+환경변수 override: HH_REMOTE_HOST, HH_REMOTE_USER, HH_REMOTE_PATH, HH_REMOTE_MOUNT_PATH, HH_REMOTE_SSH_KEY, HH_REMOTE_VCS,
+                   HH_REMOTE_MOUNT_OPTIONS
 EOF
 }
 

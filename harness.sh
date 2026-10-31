@@ -8,6 +8,7 @@
 #
 # 이 파일은 진입점이다. 기능은 옆 lib/*.sh에 나뉘어 있다. init이 이 파일과 lib/를 프로젝트의
 # .harness/bin/으로 복사하므로, 프로젝트는 bash·git·herdr만 있으면 설치 없이 동작한다.
+# 전역 명령 herdr-harness(bin/, install로 설치)는 선택이다. 프로젝트 안에서는 이 사본으로 넘기기만 한다.
 set -Eeuo pipefail
 # $( ) 안에서도 set -e를 유지한다. 없으면 $( ) 속 함수가 다시 $( )를 부를 때 안쪽의 거부(die)가
 # 빈 값으로 바뀌어 게이트가 통과해 버린다(2.1.0 검토에서 실제로 재현됨). bash 4.4 이상.
@@ -28,21 +29,26 @@ usage() {
   cat <<'EOF'
 herdr-harness — Herdr에서 여러 에이전트를 증빙·교차 검토로 운영
 
-프로젝트 (저장소의 harness.sh로):
+프로젝트 (저장소의 harness.sh 또는 herdr-harness로):
   init DIR --goal TEXT [--name N] [--profile generic|python-timeseries|network-device]
            [--orchestrator P] [--worker P] [--reviewer P] [--fallback P,P]
            [--approval-mode ask|auto|bypass] [--code-dir DIR] [--review-level cross_provider|cross_model|same_model]
-  upgrade DIR...                    프로젝트의 bin·Skill을 이 버전으로 (프로젝트 안에서는 인수 없이)
+  upgrade [DIR...]                  프로젝트의 bin·Skill을 이 버전으로 (프로젝트 안에서는 DIR 없이)
   migrate DIR [--apply --confirm-user-approval] [--review-level L --reason "사유"]
               [--complete T,T --complete-reason "사유"]
                                     v1 프로젝트를 v2로 이전 (기본은 사전 점검 보고서만, 바꾸지 않음)
   migrate DIR --undo --confirm-user-approval    병합 전 이전 되돌리기 (Git 밖으로 옮긴 파일 포함)
   migrate DIR --rollback                        끊긴 이전(강제 종료 등)을 기록대로 되돌리기
 
-프로젝트 안에서 (.harness/bin/harness.sh, 다른 위치면 -C DIR):
+전역 명령 (저장소의 harness.sh로 설치, 선택):
+  install [--replace-v1]            ${XDG_DATA_HOME:-~/.local/share}/herdr-agent-harness에 설치하고 ~/.local/bin/herdr-harness를 잇는다
+                                    herdr-harness는 프로젝트 안에서 그 프로젝트의 .harness/bin/harness.sh로 넘긴다
+  herdr-harness completion bash     Bash 탭 완성 (~/.bashrc: source <(herdr-harness completion bash))
+
+프로젝트 안에서 (.harness/bin/harness.sh 또는 herdr-harness, 다른 위치면 -C DIR):
   status | metrics | validate | models [--refresh] | doctor | start
   approve-plan MILESTONE --confirm-user-approval   계획(Task·등급·AC) 승인, draft → ready
-  run MILESTONE [--in-pane] [--max-minutes N]      사람 결정이 필요할 때까지 자동 진행
+  run MILESTONE [--in-pane] [--max-minutes N] [--poll SEC]   사람 결정이 필요할 때까지 자동 진행
   approve MILESTONE --confirm-user-approval        Milestone 완료 승인 → 보관·태그
   reject TASK --reason "사유" --confirm-user-approval  승인 대기 결과 반려 → 사유를 받아 재작업
   review-level [LEVEL] [--task TASK] [--fallback none|cross_model|same_model] --reason "사유" [--confirm-user-approval]
@@ -66,9 +72,14 @@ EOF
 resolve_root() {  # -C DIR > 이 스크립트가 <root>/.harness/bin/harness.sh면 그 root > 현재 디렉터리부터 위로
   local d
   if [[ -n "$1" ]]; then d="$(realpath -m "$1")"
-  elif [[ "$HARNESS_BIN" == */.harness/bin/harness.sh ]]; then d="${HARNESS_BIN%/.harness/bin/harness.sh}"
+  elif [[ "$HARNESS_BIN" == */.harness/bin/harness.sh ]]; then
+    d="${HARNESS_BIN%/.harness/bin/harness.sh}"
+    # Task 작업 공간에 체크아웃된 사본은 브랜치 시점의 옛 bin이다. 그 코드로 본 상태를 다루지 않는다.
+    [[ "$d" != */.harness/worktrees/* ]] ||
+      die "Task 작업 공간 안의 사본입니다(브랜치 시점의 옛 bin): $HARNESS_BIN — 바깥 프로젝트의 ${d%%/.harness/worktrees/*}/.harness/bin/harness.sh 또는 herdr-harness를 쓴다."
   else
-    d="$PWD"
+    # Task 작업 공간(.harness/worktrees/T)에는 브랜치 시점의 .harness 사본이 있다. 그 바깥의 프로젝트에서 찾는다.
+    d="${PWD%%/.harness/worktrees/*}"
     while [[ "$d" != / && ! -f "$d/.harness/project.yaml" ]]; do d="$(dirname "$d")"; done
   fi
   [[ -f "$d/.harness/project.yaml" ]] || die "Harness 프로젝트를 찾지 못했습니다 (-C DIR로 지정): $d"
@@ -86,8 +97,9 @@ main() {
   case "$cmd" in
     help|-h|--help) usage; return 0 ;;
     init) cmd_init "$@"; return 0 ;;
-    upgrade) cmd_upgrade "$@"; return 0 ;;
+    upgrade) [[ -z "$dir" ]] || set -- "$dir" "$@"; cmd_upgrade "$@"; return 0 ;;
     migrate) cmd_migrate "$@"; return 0 ;;
+    install) cmd_install "$@"; return 0 ;;
     doctor) ROOT="$(resolve_root "$dir" 2>/dev/null)" || ROOT=""; cmd_doctor; return 0 ;;
   esac
   ROOT="$(resolve_root "$dir")"
